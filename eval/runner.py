@@ -7,6 +7,7 @@ import importlib
 import json
 import signal
 import sys
+import time
 from abc import ABC, abstractmethod
 
 import pathlib
@@ -145,12 +146,14 @@ def _load_backend(path: str) -> EvalBackend:
     return backend_cls()
 
 
-def run_all(backend: EvalBackend, milestones: list[str]) -> dict:
+def run_all(backend: EvalBackend, milestones: list[str], on_milestone_complete=None) -> dict:
     rf = DeterministicFactory(99)
     harnesses = {"M1": M1Harness(), "M2": M2Harness(), "M3": M3Harness(), "M5": M5Harness(), "KILL": KillHarness()}
     results = {}
     for m in milestones:
         results[m] = harnesses[m].run(backend)
+        if on_milestone_complete:
+            on_milestone_complete(m, results[m])
     passed = sum(1 for v in results.values() if v["status"] == "PASS")
     return {
         "run_id": rf.uuid_v7(),
@@ -175,10 +178,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=int, default=600)
     args = parser.parse_args(argv)
 
-    _ = args.timeout
     milestones = ["M1", "M2", "M3", "M5", "KILL"] if args.milestone == "ALL" else [args.milestone]
     backend = _load_backend(args.backend)
-    partial: dict = {}
+    partial: dict = {"milestones": {}, "summary": {"total_milestones": len(milestones), "passed": 0, "failed": 0}}
+    run_started = time.monotonic()
 
     def handler(sig, frame):
         _ = (sig, frame)
@@ -186,8 +189,27 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(partial, indent=2))
         raise SystemExit(130)
 
+    def timeout_handler(sig, frame):
+        _ = (sig, frame)
+        elapsed_s = round(time.monotonic() - run_started, 2)
+        partial["timeout_seconds"] = args.timeout
+        partial["elapsed_seconds"] = elapsed_s
+        partial["status"] = "TIMEOUT"
+        print(f"Timed out after {args.timeout}s. Partial results:")
+        print(json.dumps(partial, indent=2))
+        raise SystemExit(124)
+
+    def record_partial(milestone: str, result: dict) -> None:
+        partial["milestones"][milestone] = result
+        passed = sum(1 for m in partial["milestones"].values() if m["status"] == "PASS")
+        partial["summary"]["passed"] = passed
+        partial["summary"]["failed"] = len(partial["milestones"]) - passed
+
     signal.signal(signal.SIGINT, handler)
-    report = run_all(backend, milestones)
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(args.timeout)
+    report = run_all(backend, milestones, on_milestone_complete=record_partial)
+    signal.alarm(0)
     partial.update(report)
     output = json.dumps(report, indent=2)
     if args.output:

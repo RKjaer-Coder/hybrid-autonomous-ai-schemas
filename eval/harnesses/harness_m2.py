@@ -39,9 +39,27 @@ class M2Harness:
             lats.append(backend.memory_write(r["write_payload"])["latency_ms"])
             resp = backend.memory_read({"query": r["read_query"]})
             lats.append(resp["latency_ms"])
-            if not resp["results"]:
+            if not self._has_expected_roundtrip(resp["results"], r):
                 deviations += 1
         return {"provenance_deviations": deviations, "latencies": lats}
+
+    def _has_expected_roundtrip(self, results, fixture) -> bool:
+        expected = fixture["write_payload"]
+        expected_id = expected.get("node_id") or fixture.get("roundtrip_id")
+        expected_provenance = expected.get("provenance_links")
+        expected_trust_tier = expected.get("trust_tier")
+
+        for candidate in results:
+            candidate_id = candidate.get("node_id") or candidate.get("roundtrip_id") or candidate.get("id")
+            if candidate_id != expected_id:
+                continue
+
+            if expected_provenance is not None and candidate.get("provenance_links") != expected_provenance:
+                continue
+            if expected_trust_tier is not None and candidate.get("trust_tier") != expected_trust_tier:
+                continue
+            return True
+        return False
 
     def evaluate_relevance(self, backend, queries) -> dict:
         fp = fn = 0
