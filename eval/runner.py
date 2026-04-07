@@ -8,6 +8,7 @@ import importlib
 import json
 import logging
 import multiprocessing as mp
+import queue
 import signal
 import sys
 import time
@@ -229,31 +230,62 @@ def run_all(
     on_milestone_complete=None,
     per_milestone_timeout_s: float | None = None,
     backend_path: str | None = None,
+    global_timeout_s: float | None = None,
+    allow_backend_reinit_under_timeout: bool = False,
 ) -> dict:
+    if (per_milestone_timeout_s is not None or global_timeout_s is not None) and not backend_path:
+        raise ValueError("timeout enforcement requires backend_path for isolated execution")
     milestones = _normalize_milestones(milestones)
+    timeout_mode = per_milestone_timeout_s is not None or global_timeout_s is not None
+    if timeout_mode and len(milestones) > 1 and not allow_backend_reinit_under_timeout and backend_path != "mock":
+        raise ValueError(
+            "timeout-isolated execution re-initializes backend per milestone; "
+            "set allow_backend_reinit_under_timeout=True only for stateless/safe backends"
+        )
     harnesses = {"M1": M1Harness(), "M2": M2Harness(), "M3": M3Harness(), "M5": M5Harness(), "KILL": KillHarness()}
     results = {}
+    run_started = time.monotonic()
     for m in milestones:
         started = time.monotonic()
+        remaining_global = None
+        if global_timeout_s is not None:
+            remaining_global = max(0.0, global_timeout_s - (started - run_started))
+            if remaining_global <= 0:
+                result = {
+                    "status": "FAIL",
+                    "error_type": "RunTimeout",
+                    "error_message": f"operation exceeded {global_timeout_s:.2f}s",
+                    "details": [],
+                }
+                results[m] = result
+                if on_milestone_complete:
+                    on_milestone_complete(m, results[m])
+                continue
+        effective_timeout_s = per_milestone_timeout_s
+        if remaining_global is not None:
+            effective_timeout_s = (
+                remaining_global
+                if effective_timeout_s is None
+                else min(effective_timeout_s, remaining_global)
+            )
         try:
-            if per_milestone_timeout_s and backend_path:
+            if effective_timeout_s and backend_path:
                 # Portable preemptive timeout via process isolation (works across OS/thread models).
                 q: mp.Queue = mp.Queue()
                 proc = mp.Process(target=_run_milestone_worker, args=(backend_path, m, q), daemon=True)
                 proc.start()
-                proc.join(timeout=per_milestone_timeout_s)
+                proc.join(timeout=effective_timeout_s)
                 if proc.is_alive():
                     proc.terminate()
                     proc.join(1.0)
-                    raise TimeoutError(f"operation exceeded {per_milestone_timeout_s:.2f}s")
-                if q.empty():
-                    raise RuntimeError("milestone process exited without result")
-                status, payload = q.get()
+                    raise TimeoutError(f"operation exceeded {effective_timeout_s:.2f}s")
+                try:
+                    status, payload = q.get(timeout=1.0)
+                except queue.Empty as exc:
+                    raise RuntimeError("milestone process exited without result") from exc
                 result = payload if status == "ok" else payload
-            elif per_milestone_timeout_s and not backend_path:
-                raise RuntimeError("per-milestone timeout requires backend_path for isolated execution")
             else:
-                result = _run_with_timeout(lambda: harnesses[m].run(backend), per_milestone_timeout_s)
+                result = _run_with_timeout(lambda: harnesses[m].run(backend), effective_timeout_s)
         except TimeoutError as exc:
             elapsed = time.monotonic() - started
             LOGGER.error("milestone_timeout", extra={"milestone": m, "elapsed_seconds": round(elapsed, 3)})
@@ -297,6 +329,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--per-milestone-timeout", type=int, default=0, help="Optional timeout per milestone in seconds")
+    parser.add_argument(
+        "--allow-backend-reinit-under-timeout",
+        action="store_true",
+        help="Allow isolated timeout mode to recreate backend per milestone (safe only for stateless backends).",
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)
 
@@ -308,23 +345,12 @@ def main(argv: list[str] | None = None) -> int:
     milestones = list(ALLOWED_MILESTONES) if args.milestone == "ALL" else [args.milestone]
     backend = _load_backend(args.backend)
     partial: dict = {"milestones": {}, "summary": {"total_milestones": len(milestones), "passed": 0, "failed": 0}}
-    run_started = time.monotonic()
 
     def handler(sig, frame):
         _ = (sig, frame)
         print("Interrupted. Partial results:")
         print(json.dumps(partial, indent=2))
         raise SystemExit(130)
-
-    def timeout_handler(sig, frame):
-        _ = (sig, frame)
-        elapsed_s = round(time.monotonic() - run_started, 2)
-        partial["timeout_seconds"] = args.timeout
-        partial["elapsed_seconds"] = elapsed_s
-        partial["status"] = "TIMEOUT"
-        print(f"Timed out after {args.timeout}s. Partial results:")
-        print(json.dumps(partial, indent=2))
-        raise SystemExit(124)
 
     def record_partial(milestone: str, result: dict) -> None:
         partial["milestones"][milestone] = result
@@ -333,19 +359,15 @@ def main(argv: list[str] | None = None) -> int:
         partial["summary"]["failed"] = len(partial["milestones"]) - passed
 
     signal.signal(signal.SIGINT, handler)
-    use_global_alarm = hasattr(signal, "SIGALRM") and args.per_milestone_timeout == 0
-    if use_global_alarm:
-        signal.signal(signal.SIGALRM, timeout_handler)
-        signal.alarm(args.timeout)
     report = run_all(
         backend,
         milestones,
         on_milestone_complete=record_partial,
         per_milestone_timeout_s=args.per_milestone_timeout or None,
         backend_path=args.backend,
+        global_timeout_s=float(args.timeout),
+        allow_backend_reinit_under_timeout=args.allow_backend_reinit_under_timeout,
     )
-    if use_global_alarm:
-        signal.alarm(0)
     partial.update(report)
     output = json.dumps(report, indent=2)
     if args.output:

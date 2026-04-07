@@ -5,6 +5,7 @@ import logging
 import os
 import sqlite3
 import tempfile
+from pathlib import Path
 from typing import Optional
 
 from .types import (
@@ -42,10 +43,10 @@ class SpendReservationRegistry:
     def reserve(self, session_id: str, request_id: str, current_spend: float, cap: float, amount: float) -> bool:
         raise NotImplementedError
 
-    def commit(self, session_id: str, request_id: str) -> None:
+    def commit(self, session_id: str, request_id: str) -> bool:
         raise NotImplementedError
 
-    def release(self, session_id: str, request_id: str) -> None:
+    def release(self, session_id: str, request_id: str) -> bool:
         raise NotImplementedError
 
 
@@ -95,16 +96,25 @@ class SqliteSpendReservationRegistry(SpendReservationRegistry):
             conn.execute("DELETE FROM spend_reservations WHERE expires_at <= ?", (now.isoformat(),))
 
             existing = conn.execute(
-                "SELECT session_id, amount_usd FROM spend_reservations WHERE request_id = ?",
+                "SELECT session_id, amount_usd, status FROM spend_reservations WHERE request_id = ?",
                 (request_id,),
             ).fetchone()
             if existing:
-                existing_session, existing_amount = existing
+                existing_session, existing_amount, existing_status = existing
                 conn.execute("COMMIT")
-                return existing_session == session_id and abs(float(existing_amount) - float(amount)) < 1e-9
+                if existing_status == "released":
+                    return False
+                return (
+                    existing_session == session_id
+                    and abs(float(existing_amount) - float(amount)) < 1e-9
+                )
 
             reserved_total = conn.execute(
-                "SELECT COALESCE(SUM(amount_usd), 0.0) FROM spend_reservations WHERE session_id = ?",
+                """
+                SELECT COALESCE(SUM(amount_usd), 0.0)
+                FROM spend_reservations
+                WHERE session_id = ? AND status = 'reserved'
+                """,
                 (session_id,),
             ).fetchone()[0]
             if current_spend + float(reserved_total) + amount >= cap:
@@ -121,30 +131,54 @@ class SqliteSpendReservationRegistry(SpendReservationRegistry):
             conn.execute("COMMIT")
             return True
 
-    def commit(self, session_id: str, request_id: str) -> None:
+    def commit(self, session_id: str, request_id: str) -> bool:
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         with self._connect() as conn:
-            conn.execute(
-                "UPDATE spend_reservations SET status='committed', closed_at=? WHERE request_id=? AND session_id=?",
+            cursor = conn.execute(
+                """
+                UPDATE spend_reservations
+                SET status='committed', closed_at=?
+                WHERE request_id=? AND session_id=? AND status='reserved'
+                """,
                 (now, request_id, session_id),
             )
+            if cursor.rowcount == 0:
+                LOGGER.warning(
+                    "reservation_commit_noop",
+                    extra={"session_id": session_id, "request_id": request_id},
+                )
+                return False
+            return True
 
-    def release(self, session_id: str, request_id: str) -> None:
+    def release(self, session_id: str, request_id: str) -> bool:
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         with self._connect() as conn:
-            conn.execute(
-                "UPDATE spend_reservations SET status='released', closed_at=? WHERE request_id=? AND session_id=?",
+            cursor = conn.execute(
+                """
+                UPDATE spend_reservations
+                SET status='released', closed_at=?
+                WHERE request_id=? AND session_id=? AND status='reserved'
+                """,
                 (now, request_id, session_id),
             )
+            if cursor.rowcount == 0:
+                LOGGER.warning(
+                    "reservation_release_noop",
+                    extra={"session_id": session_id, "request_id": request_id},
+                )
+                return False
+            return True
 
 
 def _build_default_registry() -> SpendReservationRegistry:
     configured = os.getenv("HERMES_RESERVATION_DB_PATH")
-    db_path = configured or f"{tempfile.gettempdir()}/hybrid_router_reservations_v2.db"
+    default_state_dir = Path.home() / ".local" / "state" / "hybrid_router"
+    default_state_dir.mkdir(parents=True, exist_ok=True)
+    db_path = configured or str(default_state_dir / "reservations_v2.db")
     try:
         return SqliteSpendReservationRegistry(db_path)
     except Exception:  # noqa: BLE001
-        fallback = "./router_reservations_fallback.db"
+        fallback = f"{tempfile.gettempdir()}/hybrid_router_reservations_fallback.db"
         LOGGER.exception("reservation_store_init_failed", extra={"db_path": db_path, "fallback": fallback})
         return SqliteSpendReservationRegistry(fallback)
 
@@ -152,12 +186,22 @@ def _build_default_registry() -> SpendReservationRegistry:
 _DEFAULT_RESERVATIONS = _build_default_registry()
 
 
-def commit_paid_reservation(session_id: str, request_id: str, registry: Optional[SpendReservationRegistry] = None) -> None:
-    (registry or _DEFAULT_RESERVATIONS).commit(session_id, request_id)
+def commit_paid_reservation(session_id: str, request_id: str, registry: Optional[SpendReservationRegistry] = None) -> bool:
+    return (registry or _DEFAULT_RESERVATIONS).commit(session_id, request_id)
 
 
-def release_paid_reservation(session_id: str, request_id: str, registry: Optional[SpendReservationRegistry] = None) -> None:
-    (registry or _DEFAULT_RESERVATIONS).release(session_id, request_id)
+def release_paid_reservation(session_id: str, request_id: str, registry: Optional[SpendReservationRegistry] = None) -> bool:
+    return (registry or _DEFAULT_RESERVATIONS).release(session_id, request_id)
+
+
+def finalize_paid_reservation(
+    session_id: str,
+    request_id: str,
+    success: bool,
+    registry: Optional[SpendReservationRegistry] = None,
+) -> bool:
+    registry_impl = registry or _DEFAULT_RESERVATIONS
+    return registry_impl.commit(session_id, request_id) if success else registry_impl.release(session_id, request_id)
 
 
 def _filter_commercial(models: list[ModelInfo]) -> tuple[list[ModelInfo], dict[str, str]]:

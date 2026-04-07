@@ -1,9 +1,17 @@
 import datetime
+import os
+import tempfile
 import time
 import unittest
 import uuid
 
-from financial_router.router import route_task
+from financial_router.router import (
+    SqliteSpendReservationRegistry,
+    commit_paid_reservation,
+    finalize_paid_reservation,
+    release_paid_reservation,
+    route_task,
+)
 from financial_router.types import G3Path, G3Status, JWTClaims, BudgetState, ModelInfo, RoutingTier, SystemPhase, TaskMetadata
 
 
@@ -524,6 +532,33 @@ class TestEdgeCases(unittest.TestCase):
         ]
         result = route_task(task, models, budget, make_jwt(max_api_spend_usd=100.0), current_time=now)
         self.assertEqual(result.tier, RoutingTier.SUBSCRIPTION)
+
+
+class TestReservationRegistry(unittest.TestCase):
+    def test_released_reservations_do_not_consume_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "reservations.db")
+            registry = SqliteSpendReservationRegistry(db_path)
+            self.assertTrue(registry.reserve("session-1", "request-1", current_spend=0.0, cap=1.0, amount=0.5))
+            registry.release("session-1", "request-1")
+            self.assertTrue(registry.reserve("session-1", "request-2", current_spend=0.0, cap=1.0, amount=0.8))
+
+    def test_released_request_id_cannot_be_reused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "reservations.db")
+            registry = SqliteSpendReservationRegistry(db_path)
+            self.assertTrue(registry.reserve("session-1", "request-1", current_spend=0.0, cap=1.0, amount=0.5))
+            registry.release("session-1", "request-1")
+            self.assertFalse(registry.reserve("session-1", "request-1", current_spend=0.0, cap=1.0, amount=0.5))
+
+    def test_finalize_helpers_return_transition_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "reservations.db")
+            registry = SqliteSpendReservationRegistry(db_path)
+            self.assertTrue(registry.reserve("session-1", "request-1", current_spend=0.0, cap=1.0, amount=0.5))
+            self.assertTrue(finalize_paid_reservation("session-1", "request-1", success=False, registry=registry))
+            self.assertFalse(release_paid_reservation("session-1", "request-1", registry=registry))
+            self.assertFalse(commit_paid_reservation("session-1", "request-1", registry=registry))
 
 
 if __name__ == "__main__":
