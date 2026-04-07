@@ -1,117 +1,96 @@
-# Hybrid Autonomous AI SQLite Schema Suite
+# Hybrid Autonomous AI Schemas
 
-This repository defines a five-database SQLite schema bundle for the Hermes Agent architecture.
+This repository contains the **data contracts, migration tooling, routing logic, and evaluation harnesses** for a multi-database autonomous AI system design.
 
-## Databases
+While it started as a SQLite schema bundle, it now serves as a compact reference implementation for:
+- database-first system modeling,
+- deterministic migration + verification,
+- policy-aware financial model routing, and
+- milestone-based eval harnesses with reproducible fixtures.
 
-## 1) `strategic_memory.db`
-Purpose: institutional memory with provenance-aware strategic artifacts.
+---
 
-Tables:
+## Repository Intent
+
+The core intent of this repo is to make critical autonomous-system contracts **explicit, testable, and inspectable**:
+
+- **Schemas** define what must be persisted and how components interoperate.
+- **Migration tooling** ensures databases are created consistently and validated for drift.
+- **Router logic** encodes model-selection policy under budget, quality, and approval constraints.
+- **Eval harnesses** provide milestone-oriented checks to validate behavior with stable fixtures.
+
+This structure is designed to be useful for both:
+- **Human readers** (architecture understanding, audits, onboarding), and
+- **AI/code agents** (clear interfaces, deterministic checks, low ambiguity).
+
+---
+
+## Repository Layout
+
+```text
+.
+├── schemas/                 # SQLite schema definitions (source of truth)
+├── migrate.py               # Applies schemas + verifies required objects and drift
+├── financial_router/        # Financial routing policy + typed contracts
+├── eval/                    # Milestone harnesses, fixtures, and report formatting
+├── tests/                   # Unit/integration tests across schemas, router, and harnesses
+└── FINAL_STRICT_REAUDIT.md  # Audit-oriented notes
+```
+
+---
+
+## Data Layer: SQLite Schema Suite
+
+The system is modeled as **five SQLite databases** with focused responsibilities.
+
+### 1) `strategic_memory.db`
+Institutional memory and research/council artifacts.
+
+Representative tables:
 - `opportunity_records`
 - `council_verdicts`
-- `brief_quality_signals`
-- `calibration_records`
 - `intelligence_briefs`
 - `research_tasks`
-- `idea_records`
-- `market_signals`
-- `capability_gaps`
-- `source_reputations`
 - `dedup_records`
-- `deferred_research_entries`
 - `model_scout_reports`
 - `model_assess_reports`
 - `shadow_trial_reports`
 
-Common query patterns:
-```sql
--- Active opportunities by status
-SELECT opportunity_id, title FROM opportunity_records WHERE status = 'ACTIVE';
+### 2) `telemetry.db`
+Reliability telemetry for step/chain-level outcomes.
 
--- 30-day dedup window
-SELECT *
-FROM opportunity_records
-WHERE income_mechanism = 'software_product'
-  AND created_at >= datetime('now', '-30 days');
-
--- Task scheduling queue
-SELECT *
-FROM research_tasks
-WHERE domain = 1 AND priority = 'P1_HIGH' AND status = 'PENDING';
-```
-
-## 2) `telemetry.db`
-Purpose: reliability telemetry for March-of-Nines tracking.
-
-Tables:
+Representative tables/views:
 - `step_outcomes`
 - `chain_definitions`
+- `reliability_by_step` (view)
+- `chain_reliability` (view)
 
-Views:
-- `reliability_by_step`
-- `chain_reliability`
+### 3) `immune_system.db`
+Security/guardrail verdicting and alert/circuit tracking.
 
-Common query patterns:
-```sql
-SELECT *
-FROM reliability_by_step
-WHERE step_type = 'tool_call' AND skill = 'executor';
-
-SELECT * FROM chain_reliability WHERE chain_type = 'council_tier1';
-```
-
-## 3) `immune_system.db`
-Purpose: security verdicts, alerting, and circuit-breaker logging.
-
-Tables:
+Representative tables:
 - `immune_verdicts`
 - `security_alerts`
 - `circuit_breaker_log`
 - `jwt_revocation_log`
 - `skill_improvement_log`
 
-Common query patterns:
-```sql
--- Recent block-rate trend by skill
-SELECT skill_name, result, timestamp
-FROM immune_verdicts
-WHERE timestamp >= datetime('now', '-7 days');
+### 4) `financial_ledger.db`
+Project finance, routing economics, and kill-governance inputs.
 
--- Alert storm detection window
-SELECT * FROM security_alerts WHERE timestamp >= datetime('now', '-60 seconds');
-```
-
-## 4) `financial_ledger.db`
-Purpose: treasury, cost/revenue attribution, and portfolio/project P&L.
-
-Tables:
+Representative tables/views:
 - `projects`
-- `phases`
 - `kill_signals`
 - `kill_recommendations`
-- `assets`
 - `revenue_records`
 - `cost_records`
-- `treasury`
 - `routing_decisions`
+- `project_pnl` (view)
 
-Views:
-- `project_pnl`
+### 5) `operator_digest.db`
+Operator-facing status, gates, and workload tracking.
 
-Common query patterns:
-```sql
-SELECT * FROM project_pnl;
-
-SELECT *
-FROM routing_decisions
-WHERE role = 'Execution' AND created_at >= datetime('now', '-30 days');
-```
-
-## 5) `operator_digest.db`
-Purpose: operator-facing digest, gates, alerts, and load tracking data.
-
-Tables:
+Representative tables:
 - `digest_history`
 - `alert_log`
 - `harvest_requests`
@@ -119,42 +98,98 @@ Tables:
 - `operator_heartbeat`
 - `operator_load_tracking`
 
-Common query patterns:
-```sql
-SELECT * FROM gate_log WHERE status = 'PENDING';
+---
 
-SELECT *
-FROM alert_log
-WHERE alert_type = 'SECURITY_CASCADE'
-  AND created_at >= datetime('now', '-15 minutes');
-```
+## Migration + Verification Workflow
 
-## Migration runner
+Use the migration runner to create/apply all databases and optionally verify correctness.
 
-Run migrations:
 ```bash
 python migrate.py --db-dir ./data --verify
 ```
 
-Behavior:
-- Creates DB directory if needed.
-- Creates/opens all 5 DB files.
-- Enables WAL mode and foreign keys.
-- Executes each SQL schema file.
-- Optional `--verify` checks required tables/indexes and WAL mode.
+What `migrate.py` does:
+- creates the DB directory if needed,
+- enables `WAL` + foreign keys,
+- applies each schema script,
+- tracks schema hash in `_schema_meta`,
+- verifies expected tables/indexes exist,
+- performs semantic drift checks on table/index signatures.
+
+This makes the repo suitable for CI and for deterministic environment bootstrapping.
+
+---
+
+## Financial Router Module
+
+`financial_router/` contains a typed routing policy that selects model tiers based on quality, cost, approvals, and session/project budget context.
+
+Key concepts:
+- Routing tiers (`local`, `free_cloud`, `subscription`, `paid_cloud`, fallback modes),
+- typed contracts via dataclasses/enums in `types.py`,
+- G3 approval paths + timeout behavior,
+- spend reservation support with a SQLite-backed reservation registry for idempotency and concurrency safety.
+
+This module can be imported independently from the schema/migration flow when you only need routing logic.
+
+---
+
+## Eval Harnesses and Fixtures
+
+`eval/` provides milestone-driven evaluation entry points with deterministic fixtures.
+
+Included milestones:
+- `M1`, `M2`, `M3`, `M5`, and `KILL`
+
+Runner capabilities include:
+- selecting milestones to run,
+- backend abstraction via `EvalBackend`,
+- a deterministic `MockBackend` for repeatable checks,
+- optional per-milestone timeout isolation,
+- report formatting utilities.
+
+This allows architectural behaviors to be exercised before wiring into a full production runtime.
+
+---
 
 ## Testing
 
-Run tests:
+Run the test suite:
+
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-Test coverage includes:
-- round-trip writes (50+ records across tables)
-- constraint validation errors
-- JSON CHECK validation behavior
-- index presence checks
-- WAL mode checks
-- WAL crash recovery behavior
-- computed view correctness checks
+Tests cover (at a high level):
+- schema constraints and index presence,
+- migration verification behavior,
+- WAL mode and persistence assumptions,
+- financial router decision logic,
+- eval fixture/harness behavior.
+
+---
+
+## Typical Usage Paths
+
+### For humans (architecture review / onboarding)
+1. Read this README for high-level intent.
+2. Inspect `schemas/*.sql` for contracts.
+3. Run migrations and tests locally.
+4. Review router policy + eval harness behavior.
+
+### For AI agents (implementation / checks)
+1. Use `migrate.py --verify` to establish/validate DB baseline.
+2. Treat schema files + `financial_router/types.py` as interface contracts.
+3. Use eval fixtures/harnesses for deterministic behavioral checks.
+4. Extend tests when changing schema, routing, or eval semantics.
+
+---
+
+## Design Principles
+
+- **Contracts first**: persistence and typed interfaces are explicit.
+- **Determinism**: reproducible fixtures, hash/signature checks, strict validations.
+- **Auditability**: clear boundaries between memory, telemetry, security, finance, and operator layers.
+- **Incremental extensibility**: you can add tables, router rules, or harnesses without rewriting the entire stack.
+
+If you are extending this repository, prefer small, test-backed changes that preserve these principles.
