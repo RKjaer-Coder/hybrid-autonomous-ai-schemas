@@ -4,7 +4,9 @@ import tempfile
 import time
 import unittest
 import uuid
+from unittest.mock import patch
 
+import financial_router.router as router_module
 from financial_router.router import (
     SqliteSpendReservationRegistry,
     commit_paid_reservation,
@@ -262,6 +264,13 @@ class TestPaidCloudRouting(unittest.TestCase):
         result = route_task(task, models, budget, self._operating_jwt())
         self.assertNotEqual(result.tier, RoutingTier.PAID_CLOUD)
 
+    def test_paid_cloud_negative_model_cost_rejected(self):
+        task = make_task(quality_threshold=0.7, estimated_task_value_usd=1000.0, is_operating_phase=True)
+        models = [make_model(tier="paid", quality_score=0.95, commercial_use_permitted=True, cost_per_1k_tokens=-0.01)]
+        result = route_task(task, models, self._operating_budget(), self._operating_jwt())
+        self.assertNotEqual(result.tier, RoutingTier.PAID_CLOUD)
+        self.assertIn("invalid negative model cost", result.skipped_reasons.get("paid_cloud", ""))
+
     def test_paid_cloud_budget_headroom_exhausted(self):
         task = make_task(quality_threshold=0.7, estimated_task_value_usd=10000.0, is_operating_phase=True)
         budget = self._operating_budget(project_cloud_spend_cap_usd=100.0, project_cloud_spend_current_usd=99.99)
@@ -294,6 +303,14 @@ class TestJWTSpendCap(unittest.TestCase):
         models = [make_model(tier="local", quality_score=0.8)]
         result = route_task(task, models, make_budget(), jwt)
         self.assertEqual(result.tier, RoutingTier.LOCAL)
+
+    def test_jwt_cap_allows_exact_boundary(self):
+        task = make_task(quality_threshold=0.7, estimated_task_value_usd=1000.0, is_operating_phase=True)
+        budget = make_budget(system_phase=SystemPhase.OPERATING, project_cloud_spend_cap_usd=1000.0)
+        jwt = make_jwt(max_api_spend_usd=1.00, current_session_spend_usd=0.99)
+        models = [make_model(tier="paid", quality_score=0.95, commercial_use_permitted=True, cost_per_1k_tokens=0.005)]
+        result = route_task(task, models, budget, jwt)
+        self.assertEqual(result.tier, RoutingTier.PAID_CLOUD)
 
 
 class TestG3Timeout(unittest.TestCase):
@@ -485,6 +502,13 @@ class TestEdgeCases(unittest.TestCase):
         result = route_task(task, models, make_budget(), make_jwt())
         self.assertNotEqual(result.tier, RoutingTier.LOCAL)
 
+    def test_quality_threshold_above_one_is_normalized(self):
+        task = make_task(quality_threshold=2.0)
+        models = [make_model(tier="local", quality_score=1.0)]
+        result = route_task(task, models, make_budget(), make_jwt())
+        self.assertEqual(result.tier, RoutingTier.LOCAL)
+        self.assertIn("validation", result.skipped_reasons)
+
     def test_zero_cost_paid_model(self):
         task = make_task(quality_threshold=0.7, estimated_task_value_usd=100.0, is_operating_phase=True)
         budget = make_budget(system_phase=SystemPhase.OPERATING, project_cloud_spend_cap_usd=100.0)
@@ -543,6 +567,25 @@ class TestReservationRegistry(unittest.TestCase):
             registry.release("session-1", "request-1")
             self.assertTrue(registry.reserve("session-1", "request-2", current_spend=0.0, cap=1.0, amount=0.8))
 
+    def test_reservation_allows_exact_cap_boundary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "reservations.db")
+            registry = SqliteSpendReservationRegistry(db_path)
+            self.assertTrue(registry.reserve("session-1", "request-1", current_spend=0.99, cap=1.0, amount=0.01))
+
+    def test_reservation_rejects_negative_amount(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "reservations.db")
+            registry = SqliteSpendReservationRegistry(db_path)
+            self.assertFalse(registry.reserve("session-1", "request-1", current_spend=0.0, cap=1.0, amount=-0.01))
+
+    def test_reservation_rejects_negative_cap_or_current_spend(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "reservations.db")
+            registry = SqliteSpendReservationRegistry(db_path)
+            self.assertFalse(registry.reserve("session-1", "request-1", current_spend=-0.1, cap=1.0, amount=0.01))
+            self.assertFalse(registry.reserve("session-1", "request-2", current_spend=0.0, cap=-1.0, amount=0.01))
+
     def test_released_request_id_cannot_be_reused(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = os.path.join(tmp, "reservations.db")
@@ -559,6 +602,30 @@ class TestReservationRegistry(unittest.TestCase):
             self.assertTrue(finalize_paid_reservation("session-1", "request-1", success=False, registry=registry))
             self.assertFalse(release_paid_reservation("session-1", "request-1", registry=registry))
             self.assertFalse(commit_paid_reservation("session-1", "request-1", registry=registry))
+
+    def test_committed_rows_are_not_ttl_deleted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "reservations.db")
+            registry = SqliteSpendReservationRegistry(db_path)
+            self.assertTrue(registry.reserve("session-1", "request-1", current_spend=0.0, cap=1.0, amount=0.5))
+            self.assertTrue(registry.commit("session-1", "request-1"))
+            with registry._connect() as conn:
+                conn.execute(
+                    "UPDATE spend_reservations SET expires_at = ? WHERE request_id = ?",
+                    ("2000-01-01T00:00:00+00:00", "request-1"),
+                )
+
+            # Running reserve triggers TTL cleanup. request-1 must remain for idempotency safety.
+            self.assertTrue(registry.reserve("session-1", "request-2", current_spend=0.0, cap=2.0, amount=0.2))
+            self.assertTrue(registry.reserve("session-1", "request-1", current_spend=0.0, cap=2.0, amount=0.5))
+
+
+class TestDefaultRegistryBootstrap(unittest.TestCase):
+    def test_default_registry_falls_back_when_state_dir_creation_fails(self):
+        with patch("financial_router.router.Path.mkdir", side_effect=PermissionError("readonly")):
+            registry = router_module._build_default_registry()
+        self.assertIsInstance(registry, SqliteSpendReservationRegistry)
+        self.assertIn("hybrid_router_reservations_fallback.db", registry.db_path)
 
 
 if __name__ == "__main__":

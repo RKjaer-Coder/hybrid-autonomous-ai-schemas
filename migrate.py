@@ -116,26 +116,61 @@ def apply_schema(db_path: Path, schema_path: Path) -> None:
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA foreign_keys=ON;")
         conn.executescript(sql)
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS _schema_meta (
-              schema_name TEXT PRIMARY KEY,
-              schema_hash TEXT NOT NULL,
-              applied_at TEXT NOT NULL DEFAULT (datetime('now'))
-            ) STRICT
-            """
-        )
-        conn.execute(
-            """
-            INSERT INTO _schema_meta(schema_name, schema_hash, applied_at)
-            VALUES (?, ?, datetime('now'))
-            ON CONFLICT(schema_name) DO UPDATE SET
-              schema_hash=excluded.schema_hash,
-              applied_at=excluded.applied_at
-            """,
-            (schema_path.name, _schema_hash(schema_path)),
-        )
+        _ensure_schema_meta_table(conn)
+        _upsert_schema_meta(conn, schema_path.name, _schema_hash(schema_path))
         conn.commit()
+
+
+def _ensure_schema_meta_table(conn: sqlite3.Connection) -> None:
+    strict_ddl = """
+    CREATE TABLE IF NOT EXISTS _schema_meta (
+      schema_name TEXT PRIMARY KEY,
+      schema_hash TEXT NOT NULL,
+      applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+    ) STRICT
+    """
+    compatible_ddl = """
+    CREATE TABLE IF NOT EXISTS _schema_meta (
+      schema_name TEXT PRIMARY KEY,
+      schema_hash TEXT NOT NULL,
+      applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    """
+    try:
+        conn.execute(strict_ddl)
+    except sqlite3.OperationalError as exc:
+        # SQLite <3.37 does not support STRICT tables.
+        if "strict" not in str(exc).lower():
+            raise
+        conn.execute(compatible_ddl)
+
+
+def _upsert_schema_meta(conn: sqlite3.Connection, schema_name: str, schema_hash: str) -> None:
+    upsert_sql = """
+    INSERT INTO _schema_meta(schema_name, schema_hash, applied_at)
+    VALUES (?, ?, datetime('now'))
+    ON CONFLICT(schema_name) DO UPDATE SET
+      schema_hash=excluded.schema_hash,
+      applied_at=excluded.applied_at
+    """
+    try:
+        conn.execute(upsert_sql, (schema_name, schema_hash))
+    except sqlite3.OperationalError as exc:
+        # SQLite <3.24 may not support UPSERT syntax.
+        msg = str(exc).lower()
+        upsert_unsupported = ("upsert" in msg) or ("on conflict" in msg) or ("syntax error" in msg and "near \"on\"" in msg)
+        if not upsert_unsupported:
+            raise
+        # Fall back to UPDATE+INSERT probe sequence.
+        cursor = conn.execute(
+            "UPDATE _schema_meta SET schema_hash=?, applied_at=datetime('now') WHERE schema_name=?",
+            (schema_hash, schema_name),
+        )
+        if cursor.rowcount == 0:
+            conn.execute(
+                "INSERT INTO _schema_meta(schema_name, schema_hash, applied_at) VALUES (?, ?, datetime('now'))",
+                (schema_name, schema_hash),
+            )
 
 
 def verify_database(db_path: Path, db_name: str, schema_path: Path) -> tuple[bool, list[str]]:

@@ -88,12 +88,30 @@ class SqliteSpendReservationRegistry(SpendReservationRegistry):
                 conn.execute("ALTER TABLE spend_reservations ADD COLUMN closed_at TEXT")
 
     def reserve(self, session_id: str, request_id: str, current_spend: float, cap: float, amount: float) -> bool:
+        if current_spend < 0 or cap < 0 or amount < 0:
+            LOGGER.warning(
+                "reservation_invalid_inputs",
+                extra={
+                    "session_id": session_id,
+                    "request_id": request_id,
+                    "current_spend": current_spend,
+                    "cap": cap,
+                    "amount": amount,
+                },
+            )
+            return False
         now = datetime.datetime.now(datetime.timezone.utc)
         expires = now + datetime.timedelta(seconds=_RESERVATION_TTL_SECONDS)
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             # TTL cleanup prevents unbounded growth and stale cap pressure.
-            conn.execute("DELETE FROM spend_reservations WHERE expires_at <= ?", (now.isoformat(),))
+            conn.execute(
+                """
+                DELETE FROM spend_reservations
+                WHERE status = 'reserved' AND expires_at <= ?
+                """,
+                (now.isoformat(),),
+            )
 
             existing = conn.execute(
                 "SELECT session_id, amount_usd, status FROM spend_reservations WHERE request_id = ?",
@@ -117,7 +135,7 @@ class SqliteSpendReservationRegistry(SpendReservationRegistry):
                 """,
                 (session_id,),
             ).fetchone()[0]
-            if current_spend + float(reserved_total) + amount >= cap:
+            if current_spend + float(reserved_total) + amount > cap:
                 conn.execute("COMMIT")
                 return False
 
@@ -172,14 +190,17 @@ class SqliteSpendReservationRegistry(SpendReservationRegistry):
 
 def _build_default_registry() -> SpendReservationRegistry:
     configured = os.getenv("HERMES_RESERVATION_DB_PATH")
-    default_state_dir = Path.home() / ".local" / "state" / "hybrid_router"
-    default_state_dir.mkdir(parents=True, exist_ok=True)
-    db_path = configured or str(default_state_dir / "reservations_v2.db")
     try:
+        default_state_dir = Path.home() / ".local" / "state" / "hybrid_router"
+        default_state_dir.mkdir(parents=True, exist_ok=True)
+        db_path = configured or str(default_state_dir / "reservations_v2.db")
         return SqliteSpendReservationRegistry(db_path)
     except Exception:  # noqa: BLE001
         fallback = f"{tempfile.gettempdir()}/hybrid_router_reservations_fallback.db"
-        LOGGER.exception("reservation_store_init_failed", extra={"db_path": db_path, "fallback": fallback})
+        LOGGER.exception(
+            "reservation_store_init_failed",
+            extra={"db_path": configured or "<default>", "fallback": fallback},
+        )
         return SqliteSpendReservationRegistry(fallback)
 
 
@@ -306,6 +327,9 @@ def route_task(
     if task.quality_threshold < 0:
         skipped["validation"] = "quality threshold below 0 normalized to 0."
         effective_quality_threshold = 0.0
+    elif task.quality_threshold > 1:
+        skipped["validation"] = "quality threshold above 1 normalized to 1."
+        effective_quality_threshold = 1.0
 
     models = sorted(available_models, key=lambda m: (m.tier, m.model_id))
     permitted_models, commercial_skips = _filter_commercial(models)
@@ -353,13 +377,16 @@ def route_task(
                     if model.quality_score < effective_quality_threshold:
                         paid_fail_reasons.append(f"{model.model_id} quality {model.quality_score:.4f} below threshold {effective_quality_threshold:.4f}")
                         continue
+                    if model.cost_per_1k_tokens < 0:
+                        paid_fail_reasons.append(f"{model.model_id} blocked: invalid negative model cost")
+                        continue
                     if not jwt_spend_valid:
                         paid_fail_reasons.append(f"{model.model_id} blocked: invalid JWT spend claims")
                         continue
                     estimated_cost = model.cost_per_1k_tokens * _DEFAULT_ESTIMATED_TOKENS / 1000.0
-                    if jwt.current_session_spend_usd + estimated_cost >= jwt.max_api_spend_usd:
+                    if jwt.current_session_spend_usd + estimated_cost > jwt.max_api_spend_usd:
                         paid_fail_reasons.append(
-                            f"{model.model_id} blocked: JWT session spend cap would be exceeded ({jwt.current_session_spend_usd:.4f} + {estimated_cost:.4f} >= {jwt.max_api_spend_usd:.4f})."
+                            f"{model.model_id} blocked: JWT session spend cap would be exceeded ({jwt.current_session_spend_usd:.4f} + {estimated_cost:.4f} > {jwt.max_api_spend_usd:.4f})."
                         )
                         continue
                     roi = _compute_roi(task, budget, estimated_cost)

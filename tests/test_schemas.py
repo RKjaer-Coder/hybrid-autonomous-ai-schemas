@@ -268,5 +268,57 @@ os._exit(1)
             self.assertEqual(count, 10)
 
 
+class SchemaMetaCompatibilityTests(unittest.TestCase):
+    def test_schema_meta_falls_back_when_strict_not_supported(self):
+        class FakeConn:
+            def __init__(self) -> None:
+                self.executed: list[str] = []
+
+            def execute(self, sql: str):
+                self.executed.append(sql)
+                if "STRICT" in sql:
+                    raise sqlite3.OperationalError("near \"STRICT\": syntax error")
+                return None
+
+        conn = FakeConn()
+        migrate._ensure_schema_meta_table(conn)  # type: ignore[arg-type]
+        self.assertEqual(len(conn.executed), 2)
+        self.assertIn("STRICT", conn.executed[0])
+        self.assertNotIn("STRICT", conn.executed[1])
+
+    def test_schema_meta_upsert_falls_back_without_on_conflict_support(self):
+        class FakeCursor:
+            def __init__(self, rowcount: int) -> None:
+                self.rowcount = rowcount
+
+        class FakeConn:
+            def __init__(self) -> None:
+                self.executed: list[str] = []
+
+            def execute(self, sql: str, params=None):  # noqa: ANN001
+                self.executed.append(sql)
+                if "ON CONFLICT" in sql:
+                    raise sqlite3.OperationalError("near \"ON\": syntax error")
+                if sql.strip().startswith("UPDATE _schema_meta"):
+                    return FakeCursor(rowcount=0)
+                return FakeCursor(rowcount=1)
+
+        conn = FakeConn()
+        migrate._upsert_schema_meta(conn, "x.sql", "abc123")  # type: ignore[arg-type]
+        self.assertEqual(len(conn.executed), 3)
+        self.assertIn("ON CONFLICT", conn.executed[0])
+        self.assertTrue(conn.executed[1].strip().startswith("UPDATE _schema_meta"))
+        self.assertTrue(conn.executed[2].strip().startswith("INSERT INTO _schema_meta"))
+
+    def test_schema_meta_upsert_reraises_unrelated_operational_errors(self):
+        class FakeConn:
+            def execute(self, sql: str, params=None):  # noqa: ANN001
+                _ = (sql, params)
+                raise sqlite3.OperationalError("database is locked")
+
+        with self.assertRaises(sqlite3.OperationalError):
+            migrate._upsert_schema_meta(FakeConn(), "x.sql", "abc123")  # type: ignore[arg-type]
+
+
 if __name__ == "__main__":
     unittest.main()
