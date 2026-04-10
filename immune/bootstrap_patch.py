@@ -5,6 +5,7 @@ import functools
 import importlib
 from typing import Any, Callable
 
+from immune.config import load_config
 from immune.judge import judge_check
 from immune.sheriff import sheriff_check, trigger_deep_scan
 from immune.types import ImmuneBlockError, ImmuneConfig, JudgePayload, SheriffPayload
@@ -30,12 +31,17 @@ def _locate_dispatch() -> tuple[Any, str, Callable[..., Any]] | None:
 
 
 def apply_immune_patch(
-    sheriff_fn: Callable[..., Any],
-    judge_fn: Callable[..., Any],
-    config: ImmuneConfig,
-    verdict_logger: VerdictLogger,
+    sheriff_fn: Callable[..., Any] | None = None,
+    judge_fn: Callable[..., Any] | None = None,
+    config: ImmuneConfig | None = None,
+    verdict_logger: VerdictLogger | None = None,
 ) -> bool:
     """Apply monkey-patch wrapper around Hermes dispatch."""
+    config = config or load_config()
+    sheriff_fn = sheriff_fn or sheriff_check
+    judge_fn = judge_fn or judge_check
+    if verdict_logger is None:
+        raise ValueError("verdict_logger is required")
     if not config.bootstrap_patch_enabled:
         return True
     located = _locate_dispatch()
