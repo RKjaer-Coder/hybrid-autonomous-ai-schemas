@@ -190,7 +190,14 @@ def _load_backend(path: str) -> EvalBackend:
     backend_cls = getattr(module, "Backend")
     backend = backend_cls()
     if not isinstance(backend, EvalBackend):
-        raise TypeError(f"{path}.Backend must implement EvalBackend")
+        required = [
+            "sheriff_check", "sheriff_disable", "sheriff_enable", "memory_write", "memory_read",
+            "memory_force_kill", "memory_reopen", "execute_task", "inject_failure", "validate_output",
+            "get_step_outcomes", "council_deliberate", "research_loop", "rate_brief_quality",
+            "compute_kill_score", "recommend_kill",
+        ]
+        if not all(callable(getattr(backend, name, None)) for name in required):
+            raise TypeError(f"{path}.Backend must implement EvalBackend")
     return backend
 
 

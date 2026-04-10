@@ -152,6 +152,20 @@ This allows architectural behaviors to be exercised before wiring into a full pr
 
 ---
 
+
+## Immune System Integration Path
+
+To run the immune subsystem end-to-end with current wiring:
+
+1. **M1 validation (eval runner):** run `python -m eval.runner --backend eval.backends.immune_backend --milestone M1`.
+   This uses the same fail-closed criteria as `tests/test_fail_closed.py`, but through the eval harness path.
+2. **Hermes integration:** call `bootstrap_immune_patch()` from `bootstrap_patch.py` before opening any Hermes v0.8.0 agent session.
+   The bootstrap helper wires `apply_immune_patch(...)` into Hermes tool dispatch candidates.
+3. **Deep-scan model swap:** set `IMMUNE_DEEP_SCAN_MODEL_PATH` to a local Hugging Face model (for example a quantized DeBERTa-classifier)
+   and use `build_deep_scan_model()` for a zero-contract swap with Sheriff/Judge.
+4. **Canary audit boundary:** `canary_audits` is intentionally external to immune write-paths. The immune code enforces allowlists;
+   the `immune_canary_audit` cron skill should execute independent canary probes and write those rows.
+
 ## Testing
 
 Run the test suite:

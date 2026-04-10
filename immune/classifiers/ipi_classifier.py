@@ -13,7 +13,7 @@ HEX_ENC_RE = re.compile(r"\\x[0-9a-fA-F]{2}")
 INSTRUCTION_OVERRIDE_PATTERNS = [
     re.compile(p, re.IGNORECASE)
     for p in [
-        r"ignore\W*previous\W*instructions",
+        r"ignore\W+(all\W+)?previous\W+instructions",
         r"i\s*g\s*n\s*o\s*r\s*e\W+previous",
         r"new\W+instructions\s*:",
         r"override\W+mode",
