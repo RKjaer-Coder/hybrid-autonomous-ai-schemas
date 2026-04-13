@@ -33,7 +33,13 @@ def check_policy(
     args = payload.arguments
     if payload.tool_name in NETWORK_TOOLS:
         host = _extract_hostname(args, payload.tool_name)
-        if host and host not in config.permitted_endpoints:
+        has_explicit_target = any(isinstance(args.get(key), str) and args.get(key) for key in ("url", "endpoint", "target", "href"))
+        requires_parseable_host = has_explicit_target or (
+            payload.tool_name == "shell_command" and bool(URL_RE.search(str(args.get("command", ""))))
+        )
+        if requires_parseable_host and host is None:
+            return (BlockReason.POLICY_VIOLATION, "Unparseable URL: unable to extract hostname")
+        if host is not None and host not in config.permitted_endpoints:
             return (BlockReason.POLICY_VIOLATION, f"Endpoint not in allowlist: {host}")
 
     claims = payload.jwt_claims or {}

@@ -1,4 +1,4 @@
-from .router import route_task
+from .router import route_fallback, route_task
 from .types import (
     BudgetState,
     G3Path,
@@ -13,6 +13,7 @@ from .types import (
 
 __all__ = [
     "route_task",
+    "route_fallback",
     "BudgetState",
     "G3Path",
     "G3Status",

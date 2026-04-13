@@ -69,3 +69,6 @@ CREATE TABLE IF NOT EXISTS skill_improvement_log (
   emergency_override INTEGER DEFAULT 0 CHECK (emergency_override IN (0, 1)),
   timestamp TEXT NOT NULL
 ) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_circuit_breaker_log_timestamp ON circuit_breaker_log(timestamp);
+CREATE INDEX IF NOT EXISTS idx_skill_improvement_log_timestamp ON skill_improvement_log(timestamp);

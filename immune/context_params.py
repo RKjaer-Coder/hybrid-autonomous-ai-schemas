@@ -26,9 +26,18 @@ DETECTION_RULES = {
 }
 
 
-def check_context_params(context: ContextParams) -> None:
-    """Stage-2 stub checker that currently always passes."""
-    del context
+def check_context_params(context: ContextParams) -> tuple[str, str] | None:
+    """Check context parameters for suspicious patterns."""
+    tool_window = context.tool_window
+    if len(tool_window) >= 3:
+        reads = all("_read" in name for name in tool_window[-3:-1])
+        exfil = any(token in tool_window[-1] for token in ("web_fetch", "shell_command", "curl", "wget"))
+        if reads and exfil:
+            return ("EXFIL_SEQUENCE", DETECTION_RULES["EXFIL_SEQUENCE"]["action"])
+
+    if context.session_age_seconds < 10.0 and len(tool_window) >= 3:
+        return ("BURST_INVOCATION", DETECTION_RULES["BURST_INVOCATION"]["action"])
+
     return None
 
 

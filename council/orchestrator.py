@@ -125,10 +125,43 @@ def _assert_noncollapse(batch_a_outputs: List[RoleOutput]) -> None:
         raise ValueError("Anti-collapse violation: Batch A outputs are identical")
 
 
+def _verify_isolation(batch_a_outputs: List[RoleOutput]) -> None:
+    role_names = {o.role.value.lower() for o in batch_a_outputs}
+    for output in batch_a_outputs:
+        content_lower = output.content.lower()
+        for other in (role_names - {output.role.value.lower()}):
+            if f"the {other}" in content_lower and f"{other}'s" in content_lower:
+                raise ValueError(
+                    f"Isolation violation: {output.role.value} references {other}'s output"
+                )
+    for i, first in enumerate(batch_a_outputs):
+        first_words = set(first.content.lower().split())
+        for j, second in enumerate(batch_a_outputs):
+            if i >= j:
+                continue
+            second_words = set(second.content.lower().split())
+            if not first_words or not second_words:
+                continue
+            similarity = len(first_words & second_words) / len(first_words | second_words)
+            if similarity > 0.85:
+                raise ValueError(
+                    f"Isolation violation: {first.role.value} and {second.role.value} too similar ({similarity:.0%})"
+                )
+
+
+def run_tier2_deliberation(
+    context,
+    dispatcher: SubagentDispatcher,
+    tier1_verdict: CouncilVerdict | None = None,
+) -> CouncilVerdict:
+    _ = (context, dispatcher, tier1_verdict)
+    raise NotImplementedError("Tier 2 deliberation requires mixture_of_agents_tool integration")
+
+
 def run_tier1_deliberation(context, dispatcher: SubagentDispatcher, role_weights: Optional[dict] = None) -> CouncilVerdict:
     if context.token_count > context.max_tokens:
         raise ValueError("Context token budget exceeded")
-    del role_weights
+    effective_weights = role_weights or DEFAULT_ROLE_WEIGHTS
     user_prompt = format_context_packet(context)
     prompts = [
         (RoleName.STRATEGIST, STRATEGIST_SYSTEM_PROMPT, user_prompt),
@@ -137,6 +170,7 @@ def run_tier1_deliberation(context, dispatcher: SubagentDispatcher, role_weights
     ]
     batch_a = dispatcher.dispatch_parallel(prompts)
     _assert_noncollapse(batch_a)
+    _verify_isolation(batch_a)
     for out in batch_a:
         _, errors = validate_role_output(out.content, out.role)
         if errors:
@@ -150,16 +184,21 @@ def run_tier1_deliberation(context, dispatcher: SubagentDispatcher, role_weights
         raise ValueError("; ".join(da_errors))
 
     by_role = {o.role: o.content for o in batch_a}
+    weight_text = ", ".join(f"{r.value}: {w:.2f}" for r, w in effective_weights.items())
     syn_system = SYNTHESIS_SYSTEM_PROMPT.format(
         strategist_output=by_role[RoleName.STRATEGIST],
         critic_output=by_role[RoleName.CRITIC],
         realist_output=by_role[RoleName.REALIST],
         da_output=da_out.content,
         decision_type=context.decision_type.value,
-    )
+    ) + f"\n\nRole reliability weights: {weight_text}"
     raw = dispatcher.dispatch_synthesis(syn_system, user_prompt)
     verdict_data = parse_json_output(raw, SYNTHESIS_OUTPUT_SCHEMA)
     verdict_data = _check_auto_escalation(verdict_data)
+    is_degraded = verdict_data.get("recommendation") == Recommendation.ESCALATE.value
+    confidence_cap = 0.70 if is_degraded else None
+    raw_confidence = float(verdict_data["confidence"])
+    final_confidence = min(raw_confidence, confidence_cap) if confidence_cap is not None else raw_confidence
 
     da_assessment = parse_da_assessment(verdict_data.get("da_assessment", []))
     da_quality_score = score_da_quality(da_assessment)
@@ -174,7 +213,7 @@ def run_tier1_deliberation(context, dispatcher: SubagentDispatcher, role_weights
         tier_used=1,
         decision_type=context.decision_type,
         recommendation=Recommendation(verdict_data["recommendation"]),
-        confidence=float(verdict_data["confidence"]),
+        confidence=final_confidence,
         reasoning_summary=verdict_data["reasoning_summary"],
         dissenting_views=verdict_data["dissenting_views"],
         minority_positions=None,
@@ -184,7 +223,7 @@ def run_tier1_deliberation(context, dispatcher: SubagentDispatcher, role_weights
         da_assessment=da_assessment,
         da_quality_score=da_quality_score,
         tie_break=bool(verdict_data.get("tie_break", False)),
-        degraded=False,
-        confidence_cap=None,
+        degraded=is_degraded,
+        confidence_cap=confidence_cap,
         created_at=iso_utc_now(),
     )

@@ -71,13 +71,13 @@ def _compile_all() -> List[IPIPattern]:
     spaced_phrases = ["ignore previous", "new instructions", "forget everything", "reset instructions"]
     for phrase in spaced_phrases:
         words = phrase.split()
-        expr = r"\\b" + r"\\s+".join(_spaced_word(w) for w in words) + r"\\b"
+        expr = r"\b" + r"\s+".join(_spaced_word(w) for w in words) + r"\b"
         patterns.append(IPIPattern(IPICategory.INSTRUCTION_OVERRIDE, re.compile(expr, re.IGNORECASE), f"Instruction override whitespace variant: {phrase}", "critical"))
 
     homoglyph_phrases = ["ignore previous", "override mode", "new instructions", "disregard above"]
     for phrase in homoglyph_phrases:
         words = phrase.split()
-        expr = r"\\b" + r"\\s+".join(_homoglyph_word(w) for w in words) + r"\\b"
+        expr = r"\b" + r"\s+".join(_homoglyph_word(w) for w in words) + r"\b"
         patterns.append(IPIPattern(IPICategory.INSTRUCTION_OVERRIDE, re.compile(expr, re.IGNORECASE), f"Instruction override homoglyph variant: {phrase}", "critical"))
 
     patterns.append(IPIPattern(IPICategory.INSTRUCTION_OVERRIDE, re.compile(r"ign[oо]re\s+previ[oо]us", re.IGNORECASE), "Instruction override explicit homoglyph o", "critical"))
@@ -90,6 +90,9 @@ def _compile_all() -> List[IPIPattern]:
     # Role impersonation
     role_variants = [
         r"(?m)^\s*(system|admin|developer|operator)\s*:\s*(do|execute|run|ignore|override|change|set|enable|disable)\b",
+        r"(?m)^\s*admin\s+message\s*:\s*(do|execute|run|ignore|override|change|set|enable|disable)\b",
+        r"(?m)^\s*developer\s+override\s*:\s*(do|execute|run|ignore|override|change|set|enable|disable)\b",
+        r"(?i)\bfrom\s+the\s+administrator\s*:\s*(do|execute|run|ignore|override|change|set|enable|disable)\b",
         r"(?m)^\s*\[(SYSTEM|ADMIN|DEVELOPER|OPERATOR)\]\s*(do|execute|run|ignore|override|change|set|enable|disable)\b",
         r"(?m)^\s*<<\s*SYS\s*>>\s*(do|execute|run|ignore|override|change|set|enable|disable)\b",
         r"(?i)\b(speaking\s+as\s+the\s+operator|this\s+is\s+a\s+system\s+message|admin\s+override\s+activated|developer\s+mode\s+enabled|i\s+am\s+the\s+system\s+administrator)\b",
@@ -101,7 +104,9 @@ def _compile_all() -> List[IPIPattern]:
     # Exfiltration
     exfil_variants = [
         r"\b(send\s+this\s+to|post\s+data\s+to|upload\s+to|forward\s+to|exfiltrate|transmit\s+to)\b.{0,120}(https?://|ftp://|[\w.+-]+@[\w.-]+\.[a-z]{2,})",
+        r"\b(send\s+this\s+data\s+to|send\s+data\s+to|exfiltrate\s+to)\b.{0,40}\b[a-z0-9.-]+\b",
         r"\b(curl|wget|nc|netcat|scp|rsync)\b.{0,120}(https?://|ftp://|\b\d{1,3}(?:\.\d{1,3}){3}\b|[a-z0-9.-]+\.[a-z]{2,})",
+        r"\bpipe\s+output\s+to\b.{0,80}(https?://|ftp://|[a-z0-9.-]+\.[a-z]{2,})",
         r"(\|\s*curl\b|\|\s*nc\b)",
         r"\b(base64\s+encode|btoa\(|hex\s+encode)\b.{0,120}\b(password|secret|key|token|credential|config)\b",
         r"\b(nslookup|dig|host)\b\s+[A-Za-z0-9+/=_-]{8,}\.[a-z0-9.-]+",
@@ -126,7 +131,7 @@ def _compile_all() -> List[IPIPattern]:
 
     # Prompt extraction
     extract_variants = [
-        r"\b(show(\s+me)?\s+your\s+(complete\s+)?(system\s+)?prompt|what\s+are\s+your\s+instructions|repeat\s+your\s+rules|display\s+your\s+system\s+message|print\s+your\s+configuration|output\s+your\s+prompt)\b",
+        r"\b(show(\s+me)?\s+your\s+(complete\s+)?(system\s+)?prompt|what\s+are\s+your\s+instructions|repeat\s+your\s+rules|display\s+your\s+system\s+message|print\s+your\s+configuration|output\s+your\s+(prompt|directives))\b",
         r"\b(start\s+your\s+response\s+by\s+repeating\s+your\s+(initial\s+)?instructions|start\s+your\s+response\s+with\s+your\s+system\s+prompt|translate\s+your\s+(system\s+message|instructions)\s+into?\s+\w+|write\s+a\s+poem\s+using\s+your\s+rules|summarize\s+your\s+directives)\b",
         r"\b(pretend\s+you\s+have\s+no\s+rules|act\s+as\s+if\s+you\s+had\s+no\s+system\s+prompt|imagine\s+your\s+instructions\s+say|in\s+a\s+world\s+where\s+your\s+prompt\s+is)\b",
         r"(echo\s+\$SYSTEM_PROMPT|cat\s+/system/prompt|process\.env\.INSTRUCTIONS|getattr\(self\s*,\s*['\"]system_prompt['\"]\))",

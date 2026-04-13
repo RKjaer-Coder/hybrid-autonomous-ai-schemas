@@ -64,7 +64,8 @@ def detect_encodings(text: str, field_name: str = "") -> List[EncodingDetection]
             continue
         if len(decoded) >= 8:
             entropy_boost = min(0.4, len(segment) / 200)
-            detections.append(EncodingDetection("base64", segment, decoded, field_name, 0.55 + entropy_boost))
+            decoded_full = text.replace(segment, decoded)
+            detections.append(EncodingDetection("base64", segment, decoded_full, field_name, 0.55 + entropy_boost))
 
     for match in HEX_ESCAPED_RE.finditer(text):
         segment = match.group(0)
@@ -72,7 +73,8 @@ def detect_encodings(text: str, field_name: str = "") -> List[EncodingDetection]
             decoded = bytes.fromhex(segment.replace("\\x", "")).decode("utf-8", errors="ignore")
         except ValueError:
             continue
-        detections.append(EncodingDetection("hex", segment, decoded, field_name, 0.82))
+        decoded_full = text.replace(segment, decoded)
+        detections.append(EncodingDetection("hex", segment, decoded_full, field_name, 0.82))
 
     for match in HEX_RAW_RE.finditer(text):
         segment = match.group(0)
@@ -86,9 +88,19 @@ def detect_encodings(text: str, field_name: str = "") -> List[EncodingDetection]
             detections.append(EncodingDetection("hex", segment, decoded, field_name, 0.70))
 
     url_hits = URL_BYTE_RE.findall(text)
-    if text and (len(url_hits) * 3 / len(text)) > 0.30:
+    url_encoded_ratio = (len(url_hits) * 3 / len(text)) if text else 0.0
+    if url_encoded_ratio > 0.15:
         decoded = unquote(text)
-        detections.append(EncodingDetection("url_encoding", text, decoded, field_name, 0.88))
+        if decoded != text:
+            detections.append(
+                EncodingDetection(
+                    "url_encoding",
+                    text,
+                    decoded,
+                    field_name,
+                    min(1.0, 0.60 + url_encoded_ratio),
+                )
+            )
 
     zw_count = len(ZERO_WIDTH_RE.findall(text))
     rtl_count = len(RTL_RE.findall(text))
@@ -107,6 +119,11 @@ def decode_and_recheck(
 ) -> List[Tuple[IPICategory, str, EncodingDetection]]:
     matches: list[Tuple[IPICategory, str, EncodingDetection]] = []
     for detection in detections:
-        for category, description in check_ipi(detection.decoded_content):
-            matches.append((category, description, detection))
+        decoded_variants = [detection.decoded_content]
+        url_decoded = unquote(detection.decoded_content)
+        if url_decoded != detection.decoded_content:
+            decoded_variants.append(url_decoded)
+        for variant in decoded_variants:
+            for category, description in check_ipi(variant):
+                matches.append((category, description, detection))
     return matches

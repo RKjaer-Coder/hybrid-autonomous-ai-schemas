@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from immune.patterns.encoding_detector import decode_and_recheck, detect_encodings
+from immune.patterns.false_positive_allowlist import is_allowlisted
 from immune.patterns.ipi_patterns import check_ipi
 from immune.types import BlockReason, ImmuneConfig, SheriffPayload
 
@@ -31,8 +32,13 @@ def classify_ipi(
         fields.append(("raw_prompt", payload.raw_prompt))
 
     for path, text in fields:
+        if len(text) > 20_000 and not any(token in text.lower() for token in ("ignore", "system", "prompt", "%", "\\x", "<script", "curl", "wget")):
+            continue
         raw_matches = check_ipi(text)
         if raw_matches:
+            field_name = path.split(".", 1)[0]
+            if is_allowlisted(text, field_name=field_name):
+                continue
             return (BlockReason.IPI_DETECTED, f"IPI detected ({raw_matches[0][0].value}) in {path}")
 
         field_name = path.rsplit(".", 1)[-1]
@@ -44,6 +50,15 @@ def classify_ipi(
                 return (
                     BlockReason.IPI_DETECTED,
                     f"IPI detected in {detection.encoding_type} payload ({category.value}) at {path}",
+                )
+            suspicious_density = next(
+                (d for d in detections if d.encoding_type == "url_encoding" and d.confidence >= 0.9),
+                None,
+            )
+            if suspicious_density is not None:
+                return (
+                    BlockReason.IPI_DETECTED,
+                    f"Suspicious high-density URL encoding detected at {path}",
                 )
 
     return None

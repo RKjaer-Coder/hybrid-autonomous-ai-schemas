@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from immune.classifiers.policy_checker import check_policy
-from immune.types import ImmuneConfig, SheriffPayload, generate_uuid_v7
+from immune.types import BlockReason, ImmuneConfig, SheriffPayload, generate_uuid_v7
 
 
 def payload(**kwargs) -> SheriffPayload:
@@ -54,3 +54,10 @@ def test_dangerous_pattern_pass(default_config: ImmuneConfig):
 def test_dangerous_pattern_fail(default_config: ImmuneConfig):
     p = payload(tool_name="shell_command", arguments={"command": "rm -rf /", "burner_room": True})
     assert check_policy(p, default_config) is not None
+
+
+def test_unparseable_url_blocked(default_config: ImmuneConfig):
+    p = payload(tool_name="web_fetch", arguments={"url": "not-a-url:::garbage"})
+    result = check_policy(p, default_config)
+    assert result is not None
+    assert result[0] == BlockReason.POLICY_VIOLATION

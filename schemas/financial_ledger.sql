@@ -157,3 +157,7 @@ SELECT
     AS net_to_date
 FROM projects p
 WHERE p.status = 'ACTIVE';
+
+CREATE INDEX IF NOT EXISTS idx_projects_created_at ON projects(created_at);
+CREATE INDEX IF NOT EXISTS idx_revenue_records_created_at ON revenue_records(created_at);
+CREATE INDEX IF NOT EXISTS idx_kill_recommendations_created_at ON kill_recommendations(created_at);

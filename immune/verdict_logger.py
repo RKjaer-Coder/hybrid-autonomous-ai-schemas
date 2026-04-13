@@ -73,7 +73,6 @@ class VerdictLogger:
                     self._schedule_flush()
                 return
             rows = self._buffer[:]
-            self._buffer.clear()
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         values = [
             (
@@ -91,15 +90,19 @@ class VerdictLogger:
             )
             for v in rows
         ]
-        with self._lock:
-            self._conn.executemany(
-                "INSERT INTO immune_verdicts "
-                "(verdict_id, check_type, tier, skill_name, session_id, outcome, block_reason, "
-                "block_detail, latency_ms, alert_severity, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                values,
-            )
-            self._conn.commit()
+        try:
+            with self._lock:
+                self._conn.executemany(
+                    "INSERT INTO immune_verdicts "
+                    "(verdict_id, check_type, tier, skill_name, session_id, outcome, block_reason, "
+                    "block_detail, latency_ms, alert_severity, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    values,
+                )
+                self._conn.commit()
+                del self._buffer[: len(rows)]
+        except Exception:
+            return
         self._schedule_flush()
 
     def shutdown(self) -> None:

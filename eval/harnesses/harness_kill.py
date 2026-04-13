@@ -22,8 +22,16 @@ class KillHarness:
         return {"signal_accuracy": round(ok / len(projects), 4)}
 
     def evaluate_timing(self, backend, projects) -> dict:
-        # Placeholder deterministic timing check for backend-agnostic interface.
-        correct = sum(1 for p in projects if (p["ground_truth"]["optimal_kill_week"] is None) or p["weeks_active"] >= p["ground_truth"]["optimal_kill_week"])
+        correct = 0
+        for p in projects:
+            _ = backend
+            optimal_week = p["ground_truth"]["optimal_kill_week"]
+            recommended_week = p.get("recommended_kill_week")
+            tolerance = p["ground_truth"].get("timing_tolerance_weeks", 2)
+            if optimal_week is None:
+                correct += 1
+            elif recommended_week is not None and abs(recommended_week - optimal_week) <= tolerance:
+                correct += 1
         return {"timing_accuracy": round(correct / len(projects), 4)}
 
     def evaluate_false_rates(self, backend, projects) -> dict:

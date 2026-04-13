@@ -26,10 +26,11 @@ from eval.harnesses.harness_kill import KillHarness
 from eval.harnesses.harness_m1 import M1Harness
 from eval.harnesses.harness_m2 import M2Harness
 from eval.harnesses.harness_m3 import M3Harness
+from eval.harnesses.harness_m4 import M4Harness
 from eval.harnesses.harness_m5 import M5Harness
 from eval.report import format_report
 
-ALLOWED_MILESTONES = ("M1", "M2", "M3", "M5", "KILL")
+ALLOWED_MILESTONES = ("M1", "M2", "M3", "M4", "M5", "KILL")
 LOGGER = logging.getLogger(__name__)
 
 
@@ -150,7 +151,10 @@ class MockBackend(EvalBackend):
             fails = self.failure_cfg["force_failure"]["failure_count"]
             steps.extend({"outcome": "FAIL"} for _ in range(fails))
             # Key fix: recovery should reflect scenario contract, not a hardcoded True.
-            recovered = bool(self.failure_cfg["force_failure"].get("expected_recovery_success", False))
+            if self.failure_cfg and "force_failure" in self.failure_cfg:
+                recovered = bool(self.failure_cfg["force_failure"].get("expected_recovery_success", False))
+            else:
+                recovered = True
         self.step_outcomes[chain_id] = steps
         return {"steps": steps, "output": {"ok": True}, "latency_ms": 30_000, "telemetry": steps, "chain_id": chain_id, "recovered": recovered}
 
@@ -224,7 +228,7 @@ def _run_with_timeout(fn, timeout_s: float | None):
 def _run_milestone_worker(backend_path: str, milestone: str, output_queue: mp.Queue) -> None:
     try:
         backend = _load_backend(backend_path)
-        harnesses = {"M1": M1Harness(), "M2": M2Harness(), "M3": M3Harness(), "M5": M5Harness(), "KILL": KillHarness()}
+        harnesses = {"M1": M1Harness(), "M2": M2Harness(), "M3": M3Harness(), "M4": M4Harness(), "M5": M5Harness(), "KILL": KillHarness()}
         result = harnesses[milestone].run(backend)
         output_queue.put(("ok", result))
     except Exception as exc:  # noqa: BLE001
@@ -249,7 +253,7 @@ def run_all(
             "timeout-isolated execution re-initializes backend per milestone; "
             "set allow_backend_reinit_under_timeout=True only for stateless/safe backends"
         )
-    harnesses = {"M1": M1Harness(), "M2": M2Harness(), "M3": M3Harness(), "M5": M5Harness(), "KILL": KillHarness()}
+    harnesses = {"M1": M1Harness(), "M2": M2Harness(), "M3": M3Harness(), "M4": M4Harness(), "M5": M5Harness(), "KILL": KillHarness()}
     results = {}
     run_started = time.monotonic()
     for m in milestones:
@@ -331,7 +335,7 @@ def run_all(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--backend", default="mock")
-    parser.add_argument("--milestone", default="ALL", choices=["M1", "M2", "M3", "M5", "KILL", "ALL"])
+    parser.add_argument("--milestone", default="ALL", choices=["M1", "M2", "M3", "M4", "M5", "KILL", "ALL"])
     parser.add_argument("--output")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--timeout", type=int, default=600)

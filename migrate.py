@@ -99,7 +99,12 @@ def _semantic_schema_signatures(schema_path: Path) -> tuple[dict[str, list[tuple
     sql = schema_path.read_text(encoding="utf-8")
     with sqlite3.connect(":memory:") as conn:
         conn.execute("PRAGMA foreign_keys=ON;")
-        conn.executescript(sql)
+        conn.execute("BEGIN")
+        for statement in sql.split(";"):
+            statement = statement.strip()
+            if statement:
+                conn.execute(statement)
+        conn.commit()
         objects = conn.execute(
             "SELECT type, name FROM sqlite_master WHERE type IN ('table','index') AND name NOT LIKE 'sqlite_%'"
         ).fetchall()
@@ -115,7 +120,12 @@ def apply_schema(db_path: Path, schema_path: Path) -> None:
     with sqlite3.connect(db_path) as conn:
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA foreign_keys=ON;")
-        conn.executescript(sql)
+        conn.execute("BEGIN")
+        for statement in sql.split(";"):
+            statement = statement.strip()
+            if statement:
+                conn.execute(statement)
+        conn.commit()
         _ensure_schema_meta_table(conn)
         _upsert_schema_meta(conn, schema_path.name, _schema_hash(schema_path))
         conn.commit()

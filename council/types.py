@@ -95,7 +95,7 @@ class CouncilVerdict:
             raise ValueError(f"Confidence must be 0.0–1.0, got {self.confidence}")
         if self.tier_used not in (1, 2):
             raise ValueError(f"Tier must be 1 or 2, got {self.tier_used}")
-        if self.degraded and self.confidence > 0.70:
+        if self.degraded and self.confidence > 0.70:  # 0.70 is allowed; above 0.70 is rejected.
             raise ValueError(f"Degraded verdict confidence cannot exceed 0.70, got {self.confidence}")
 
 

@@ -91,7 +91,8 @@ def enforce_token_budget(text: str, max_tokens: int) -> str:
 def format_batch_a_for_da(outputs: List[RoleOutput]) -> str:
     lines = []
     for output in outputs:
-        lines.append(f"[{output.role.value.upper()}]\n{output.content}")
+        safe_content = output.content.replace("{", "{{").replace("}", "}}")
+        lines.append(f"[{output.role.value.upper()}]\n{safe_content}")
     return "\n\n".join(lines)
 
 
