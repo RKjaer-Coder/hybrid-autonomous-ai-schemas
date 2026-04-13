@@ -33,7 +33,7 @@ class M5Harness:
         }
 
     def evaluate_council_verdicts(self, backend, opportunities) -> dict:
-        fp = fn = bad = good = 0
+        fp = fn = bad = good = ambiguous = 0
         da_scores = []
         for o in opportunities:
             v = backend.council_deliberate(o)
@@ -42,15 +42,19 @@ class M5Harness:
                 bad += 1
                 if v["recommendation"] == "PURSUE":
                     fp += 1
-            if label == "GOOD":
+            elif label == "GOOD":
                 good += 1
                 if v["recommendation"] == "REJECT":
                     fn += 1
+            elif label == "AMBIGUOUS":
+                ambiguous += 1
+            else:
+                raise ValueError(f"Unknown label: {label}")
             da_scores.append(v.get("da_quality_score", 0.0))
         fp_rate = round(fp / bad, 4) if bad else 0.0
         fn_rate = round(fn / good, 4) if good else 0.0
         da_mean = round(sum(da_scores) / len(da_scores), 4) if da_scores else 0.0
-        return {"fp_rate": fp_rate, "fn_rate": fn_rate, "da_quality_mean": da_mean}
+        return {"fp_rate": fp_rate, "fn_rate": fn_rate, "da_quality_mean": da_mean, "ambiguous": ambiguous}
 
     def evaluate_research_loops(self, backend, scenarios) -> dict:
         lat, briefs = [], []

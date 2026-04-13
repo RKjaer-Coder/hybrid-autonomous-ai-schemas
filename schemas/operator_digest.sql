@@ -88,3 +88,6 @@ CREATE TABLE IF NOT EXISTS operator_load_tracking (
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_operator_load_tracking_week_start ON operator_load_tracking(week_start);
+
+CREATE INDEX IF NOT EXISTS idx_digest_history_created_at ON digest_history(created_at);
+CREATE INDEX IF NOT EXISTS idx_harvest_requests_created_at ON harvest_requests(created_at);

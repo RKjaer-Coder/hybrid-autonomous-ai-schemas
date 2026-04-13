@@ -260,3 +260,8 @@ CREATE TABLE IF NOT EXISTS shadow_trial_reports (
   recommendation TEXT NOT NULL CHECK (recommendation IN ('PROMOTE','REJECT')),
   created_at TEXT NOT NULL
 ) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_research_tasks_created_at ON research_tasks(created_at);
+CREATE INDEX IF NOT EXISTS idx_market_signals_created_at ON market_signals(created_at);
+CREATE INDEX IF NOT EXISTS idx_idea_records_created_at ON idea_records(created_at);
+CREATE INDEX IF NOT EXISTS idx_dedup_records_created_at ON dedup_records(created_at);

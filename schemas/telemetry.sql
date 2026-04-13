@@ -61,3 +61,5 @@ LEFT JOIN reliability_by_step r
   ON r.step_type = json_extract(s.value, '$.step_type')
  AND r.skill = json_extract(s.value, '$.skill')
 GROUP BY cd.chain_type;
+
+CREATE INDEX IF NOT EXISTS idx_chain_definitions_created_at ON chain_definitions(created_at);

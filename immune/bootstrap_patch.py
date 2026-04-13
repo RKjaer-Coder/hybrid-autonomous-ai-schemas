@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import importlib
+import threading
 from typing import Any, Callable
 
 from immune.config import load_config
@@ -36,7 +37,11 @@ def apply_immune_patch(
     config: ImmuneConfig | None = None,
     verdict_logger: VerdictLogger | None = None,
 ) -> bool:
-    """Apply monkey-patch wrapper around Hermes dispatch."""
+    """Apply monkey-patch wrapper around Hermes dispatch.
+
+    Returns False when dispatch cannot be located. Callers must treat False as a
+    fatal startup condition because immune enforcement is not active.
+    """
     config = config or load_config()
     sheriff_fn = sheriff_fn or sheriff_check
     judge_fn = judge_fn or judge_check
@@ -71,7 +76,13 @@ def apply_immune_patch(
         if config.deep_scan_enabled:
             model = kwargs.get("deep_scan_model")
             if model is not None:
-                asyncio.get_event_loop().create_task(trigger_deep_scan(payload, config, model))
+                try:
+                    asyncio.get_running_loop().create_task(trigger_deep_scan(payload, config, model))
+                except RuntimeError:
+                    threading.Thread(
+                        target=lambda: asyncio.run(trigger_deep_scan(payload, config, model)),
+                        daemon=True,
+                    ).start()
 
         if "immune_system" not in str(kwargs.get("execution_stack", "")):
             verdict_logger.log_bypass(skill_name, session_id, "direct_dispatch", "Missing immune wrapper")

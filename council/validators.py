@@ -14,7 +14,12 @@ from council.types import DecisionType, RoleName
 def validate_verdict(verdict_data: dict, decision_type: DecisionType) -> List[str]:
     errors: List[str] = []
     try:
-        parse_json_output(str(verdict_data).replace("'", '"'), SYNTHESIS_OUTPUT_SCHEMA)
+        if isinstance(verdict_data, dict):
+            parsed = verdict_data
+        else:
+            parsed = parse_json_output(verdict_data, SYNTHESIS_OUTPUT_SCHEMA)
+        if not isinstance(parsed, dict):
+            errors.append("invalid verdict payload")
     except Exception:
         for field in SYNTHESIS_OUTPUT_SCHEMA["required"]:
             if field not in verdict_data:

@@ -12,6 +12,7 @@ from financial_router.router import (
     commit_paid_reservation,
     finalize_paid_reservation,
     release_paid_reservation,
+    route_fallback,
     route_task,
 )
 from financial_router.types import G3Path, G3Status, JWTClaims, BudgetState, ModelInfo, RoutingTier, SystemPhase, TaskMetadata
@@ -618,6 +619,23 @@ class TestReservationRegistry(unittest.TestCase):
             # Running reserve triggers TTL cleanup. request-1 must remain for idempotency safety.
             self.assertTrue(registry.reserve("session-1", "request-2", current_spend=0.0, cap=2.0, amount=0.2))
             self.assertTrue(registry.reserve("session-1", "request-1", current_spend=0.0, cap=2.0, amount=0.5))
+
+
+class TestFallbackRouting(unittest.TestCase):
+    def test_fallback_excludes_failed_model(self):
+        task = make_task(quality_threshold=0.6)
+        models = [
+            make_model(model_id="failed", tier="local", quality_score=0.95),
+            make_model(model_id="ok", tier="free_cloud", quality_score=0.8, commercial_use_permitted=True),
+        ]
+        result = route_fallback(task, models, make_budget(), make_jwt(), "failed", "provider_error", 0)
+        self.assertNotEqual(result.model_id, "failed")
+        self.assertTrue(result.quality_warning)
+
+    def test_fallback_max_switches_exceeded(self):
+        result = route_fallback(make_task(), [], make_budget(), make_jwt(), "x", "timeout_30s", 2)
+        self.assertEqual(result.tier, RoutingTier.COMPUTE_STARVED)
+        self.assertTrue(result.compute_starved)
 
 
 class TestDefaultRegistryBootstrap(unittest.TestCase):

@@ -49,6 +49,8 @@ class M2Harness:
         expected_provenance = expected.get("provenance_links")
         expected_trust_tier = expected.get("trust_tier")
 
+        if not results:
+            return False
         for candidate in results:
             candidate_id = candidate.get("node_id") or candidate.get("roundtrip_id") or candidate.get("id")
             if candidate_id != expected_id:

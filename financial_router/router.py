@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import dataclasses
 import logging
 import os
 import sqlite3
@@ -359,11 +360,22 @@ def route_task(
         return RoutingDecision(RoutingTier.SUBSCRIPTION, sub_model.model_id, G3Path.NOT_APPLICABLE, 0.0, False, _build_justification(RoutingTier.SUBSCRIPTION, skipped), skipped, False, False)
     skipped["subscription"] = sub_reason
 
+    if task.is_council_tier1_preassessment:
+        return RoutingDecision(
+            RoutingTier.COMPUTE_STARVED,
+            None,
+            G3Path.NOT_APPLICABLE,
+            0.0,
+            False,
+            _build_justification(RoutingTier.COMPUTE_STARVED, {**skipped, "tier1": "tier 1 preassessment requires free compute only"}),
+            {**skipped, "tier1": "tier 1 preassessment requires free compute only"},
+            False,
+            True,
+        )
+
     if not g3_expired:
         if budget.system_phase == SystemPhase.CONSTRUCTION:
             skipped["paid_cloud"] = "construction phase — paid routing prohibited."
-        elif task.is_council_tier1_preassessment:
-            skipped["paid_cloud"] = "tier 1 council pre-assessment is always free, never gated."
         else:
             paid_candidates = [m for m in permitted_models if m.tier == "paid"]
             if not paid_candidates:
@@ -384,6 +396,9 @@ def route_task(
                         paid_fail_reasons.append(f"{model.model_id} blocked: invalid JWT spend claims")
                         continue
                     estimated_cost = model.cost_per_1k_tokens * _DEFAULT_ESTIMATED_TOKENS / 1000.0
+                    if jwt.max_api_spend_usd == 0.0:
+                        paid_fail_reasons.append(f"{model.model_id} blocked: JWT spend cap is $0.00 (construction phase default)")
+                        continue
                     if jwt.current_session_spend_usd + estimated_cost > jwt.max_api_spend_usd:
                         paid_fail_reasons.append(
                             f"{model.model_id} blocked: JWT session spend cap would be exceeded ({jwt.current_session_spend_usd:.4f} + {estimated_cost:.4f} > {jwt.max_api_spend_usd:.4f})."
@@ -396,7 +411,7 @@ def route_task(
 
                     if budget.project_cloud_spend_cap_usd is not None:
                         headroom = budget.project_cloud_spend_cap_usd - budget.project_cloud_spend_current_usd
-                        if estimated_cost > headroom:
+                        if headroom <= 0 or estimated_cost > headroom:
                             paid_fail_reasons.append(f"{model.model_id} rejected: insufficient budget headroom ({estimated_cost:.4f} > {headroom:.4f})")
                             continue
                         g3_path, requires_approval = G3Path.WITHIN_BUDGET, False
@@ -442,3 +457,44 @@ def route_task(
         skipped["subscription"] = "no subscription model available for default fallback"
 
     return RoutingDecision(RoutingTier.COMPUTE_STARVED, None, G3Path.NOT_APPLICABLE, 0.0, False, _build_justification(RoutingTier.COMPUTE_STARVED, skipped), skipped, False, True)
+
+
+def route_fallback(
+    task: TaskMetadata,
+    available_models: list[ModelInfo],
+    budget: BudgetState,
+    jwt: JWTClaims,
+    failed_model_id: str,
+    failure_reason: str,
+    switch_count: int,
+    current_time: Optional[datetime.datetime] = None,
+    request_id: Optional[str] = None,
+    reservation_registry: Optional[SpendReservationRegistry] = None,
+) -> RoutingDecision:
+    if switch_count >= 2:
+        return RoutingDecision(
+            RoutingTier.COMPUTE_STARVED,
+            None,
+            G3Path.NOT_APPLICABLE,
+            0.0,
+            True,
+            f"Max live switches (2) exceeded. Last failure: {failure_reason}",
+            {"fallback": "max_switches_exceeded"},
+            False,
+            True,
+        )
+    filtered = [model for model in available_models if model.model_id != failed_model_id]
+    decision = route_task(
+        task=task,
+        available_models=filtered,
+        budget=budget,
+        jwt=jwt,
+        current_time=current_time,
+        request_id=request_id,
+        reservation_registry=reservation_registry,
+    )
+    return dataclasses.replace(
+        decision,
+        quality_warning=True,
+        justification=f"Fallback from {failed_model_id} ({failure_reason}). {decision.justification}",
+    )
