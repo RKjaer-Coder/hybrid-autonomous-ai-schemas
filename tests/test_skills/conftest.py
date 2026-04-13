@@ -12,7 +12,7 @@ from skills.hermes_interfaces import HermesSessionContext, MockHermesRuntime
 def test_data_dir(tmp_path: Path) -> Path:
     mapping = {
         "strategic_memory.db": "schemas/strategic_memory.sql",
-        "immune.db": "schemas/immune_system.sql",
+        "immune_system.db": "schemas/immune_system.sql",
         "telemetry.db": "schemas/telemetry.sql",
         "financial_ledger.db": "schemas/financial_ledger.sql",
         "operator_digest.db": "schemas/operator_digest.sql",

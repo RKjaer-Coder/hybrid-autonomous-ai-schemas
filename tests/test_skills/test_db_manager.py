@@ -45,4 +45,5 @@ def test_missing_database_raises(tmp_path):
 def test_verify_all_databases_returns_status(test_data_dir):
     db = DatabaseManager(str(test_data_dir))
     status = db.verify_all_databases()
+    assert set(status) == {"strategic_memory", "immune", "telemetry", "financial_ledger", "operator_digest"}
     assert all(status.values())

@@ -10,7 +10,9 @@ import logging
 import multiprocessing as mp
 import queue
 import signal
+import sqlite3
 import sys
+import tempfile
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -80,6 +82,80 @@ class EvalBackend(ABC):
     def compute_kill_score(self, project: dict) -> dict: ...
     @abstractmethod
     def recommend_kill(self, project: dict) -> dict: ...
+    @abstractmethod
+    def route_financial_task(self, scenario: dict) -> dict: ...
+
+
+def _hydrate_financial_budget(payload: dict):
+    from financial_router.types import BudgetState, G3Status, SystemPhase
+
+    budget_payload = dict(payload)
+    budget_payload["system_phase"] = SystemPhase(budget_payload.get("system_phase", SystemPhase.CONSTRUCTION.value))
+    budget_payload["g3_status"] = G3Status(budget_payload.get("g3_status", G3Status.NOT_REQUIRED.value))
+    requested_at = budget_payload.get("g3_requested_at")
+    if isinstance(requested_at, str):
+        budget_payload["g3_requested_at"] = datetime.datetime.fromisoformat(requested_at)
+    return BudgetState(**budget_payload)
+
+
+def _seed_financial_ledger(db_dir: pathlib.Path) -> None:
+    schema_path = pathlib.Path(__file__).resolve().parents[1] / "schemas" / "financial_ledger.sql"
+    db_path = db_dir / "financial_ledger.db"
+    sql = schema_path.read_text(encoding="utf-8")
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.executescript(sql)
+        conn.commit()
+
+
+def _run_financial_routing_scenario(scenario: dict) -> dict:
+    import financial_router.router as router_module
+    from financial_router.router import SqliteSpendReservationRegistry
+    from financial_router.types import JWTClaims, ModelInfo, TaskMetadata
+    from skills.db_manager import DatabaseManager
+    from skills.financial_router.skill import FinancialRouterSkill
+
+    with tempfile.TemporaryDirectory(prefix="eval-m4-") as tmp:
+        db_dir = pathlib.Path(tmp)
+        _seed_financial_ledger(db_dir)
+        reservation_registry = SqliteSpendReservationRegistry(str(db_dir / "reservations.db"))
+        prior_registry = router_module._DEFAULT_RESERVATIONS
+        try:
+            router_module._DEFAULT_RESERVATIONS = reservation_registry
+            db = DatabaseManager(str(db_dir))
+            skill = FinancialRouterSkill(db)
+            task = TaskMetadata(**scenario["task"])
+            models = [ModelInfo(**model) for model in scenario["models"]]
+            budget = _hydrate_financial_budget(scenario["budget"])
+            jwt = JWTClaims(**scenario["jwt"])
+            decision = skill.route(task, models, budget, jwt)
+            row = db.get_connection("financial_ledger").execute(
+                """
+                SELECT route_selected, model_used, g3_required, g3_status,
+                       quality_warning, reservation_id, cost_usd
+                FROM routing_decisions
+                WHERE task_id = ?
+                ORDER BY created_at DESC, decision_id DESC
+                LIMIT 1
+                """,
+                (task.task_id,),
+            ).fetchone()
+            db.close_all()
+        finally:
+            router_module._DEFAULT_RESERVATIONS = prior_registry
+
+    return {
+        "decision": {
+            "tier": decision.tier.value,
+            "model_id": decision.model_id,
+            "g3_path": decision.g3_path.value,
+            "estimated_cost_usd": decision.estimated_cost_usd,
+            "quality_warning": decision.quality_warning,
+            "requires_operator_approval": decision.requires_operator_approval,
+            "compute_starved": decision.compute_starved,
+            "reservation_id": decision.reservation_id,
+        },
+        "ledger_row": dict(row) if row is not None else None,
+    }
 
 
 class MockBackend(EvalBackend):
@@ -186,6 +262,9 @@ class MockBackend(EvalBackend):
     def recommend_kill(self, project: dict) -> dict:
         return {"recommendation": "KILL" if project["ground_truth"]["should_have_killed"] else "CONTINUE", "confidence": 0.8}
 
+    def route_financial_task(self, scenario: dict) -> dict:
+        return _run_financial_routing_scenario(scenario)
+
 
 def _load_backend(path: str) -> EvalBackend:
     if path == "mock":
@@ -198,7 +277,7 @@ def _load_backend(path: str) -> EvalBackend:
             "sheriff_check", "sheriff_disable", "sheriff_enable", "memory_write", "memory_read",
             "memory_force_kill", "memory_reopen", "execute_task", "inject_failure", "validate_output",
             "get_step_outcomes", "council_deliberate", "research_loop", "rate_brief_quality",
-            "compute_kill_score", "recommend_kill",
+            "compute_kill_score", "recommend_kill", "route_financial_task",
         ]
         if not all(callable(getattr(backend, name, None)) for name in required):
             raise TypeError(f"{path}.Backend must implement EvalBackend")

@@ -192,10 +192,22 @@ class SqliteSpendReservationRegistry(SpendReservationRegistry):
 def _build_default_registry() -> SpendReservationRegistry:
     configured = os.getenv("HERMES_RESERVATION_DB_PATH")
     try:
-        default_state_dir = Path.home() / ".local" / "state" / "hybrid_router"
-        default_state_dir.mkdir(parents=True, exist_ok=True)
-        db_path = configured or str(default_state_dir / "reservations_v2.db")
-        return SqliteSpendReservationRegistry(db_path)
+        if configured:
+            configured_path = Path(configured)
+            configured_path.parent.mkdir(parents=True, exist_ok=True)
+            return SqliteSpendReservationRegistry(str(configured_path))
+
+        state_root = os.getenv("HERMES_STATE_DIR") or os.getenv("XDG_STATE_HOME")
+        if state_root:
+            default_state_dir = Path(state_root) / "hybrid_router"
+            default_state_dir.mkdir(parents=True, exist_ok=True)
+            return SqliteSpendReservationRegistry(str(default_state_dir / "reservations_v2.db"))
+
+        home = Path.home()
+        if os.access(home, os.W_OK):
+            default_state_dir = home / ".local" / "state" / "hybrid_router"
+            default_state_dir.mkdir(parents=True, exist_ok=True)
+            return SqliteSpendReservationRegistry(str(default_state_dir / "reservations_v2.db"))
     except Exception:  # noqa: BLE001
         fallback = f"{tempfile.gettempdir()}/hybrid_router_reservations_fallback.db"
         LOGGER.exception(
@@ -203,6 +215,9 @@ def _build_default_registry() -> SpendReservationRegistry:
             extra={"db_path": configured or "<default>", "fallback": fallback},
         )
         return SqliteSpendReservationRegistry(fallback)
+
+    fallback = f"{tempfile.gettempdir()}/hybrid_router_reservations_fallback.db"
+    return SqliteSpendReservationRegistry(fallback)
 
 
 _DEFAULT_RESERVATIONS = _build_default_registry()

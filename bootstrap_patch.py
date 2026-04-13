@@ -12,7 +12,7 @@ from immune.verdict_logger import VerdictLogger
 def bootstrap_immune_patch(db_path: str | None = None) -> bool:
     """Attach immune wrappers before starting Hermes agent sessions."""
     cfg = load_config()
-    logger = VerdictLogger(db_path or os.getenv("IMMUNE_DB_PATH", "immune.db"), cfg)
+    logger = VerdictLogger(db_path or os.getenv("IMMUNE_DB_PATH", "immune_system.db"), cfg)
     return apply_immune_patch(config=cfg, verdict_logger=logger)
 
 

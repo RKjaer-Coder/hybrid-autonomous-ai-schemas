@@ -159,9 +159,10 @@ class SchemaSuiteTests(unittest.TestCase):
             fl.execute("INSERT INTO revenue_records VALUES (?,?,?,?,?,?,?,?)", (uid(), project_id, 100.0, 'web_store', 'automated', now, now, now))
             fl.execute("INSERT INTO cost_records VALUES (?,?,?,?,?,?,?,?)", (uid(), project_id, 'cloud_api', 30.0, 'desc', 'openai', 'task1', now))
             fl.execute("INSERT INTO treasury VALUES (?,?,?,?,?,?,?)", (uid(), 'revenue_in', 100.0, 100.0, project_id, 'desc', now))
-            fl.execute("INSERT INTO routing_decisions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (
-                uid(), 'task1', 'chain1', 'Execution', 'local', 'model', 1, 0, 0.0, None, 0, None, now,
-            ))
+            fl.execute(
+                "INSERT INTO routing_decisions (decision_id, task_id, chain_id, role, route_selected, model_used, commercial_use_ok, quality_warning, cost_usd, justification, g3_required, g3_status, reservation_id, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (uid(), 'task1', 'chain1', 'Execution', 'local', 'model', 1, 0, 0.0, None, 0, None, None, now),
+            )
             count += 9
 
         with self.conn("operator_digest") as od:

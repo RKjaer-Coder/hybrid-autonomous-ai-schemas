@@ -132,14 +132,15 @@ CREATE TABLE IF NOT EXISTS routing_decisions (
   task_id TEXT,
   chain_id TEXT,
   role TEXT NOT NULL CHECK (role IN ('Primary Reasoning','Execution','Validation','Training/Reward','Embedding','Cloud Escalation')),
-  route_selected TEXT NOT NULL CHECK (route_selected IN ('local','free_cloud','subscription','paid_cloud','operator_prompted')),
+  route_selected TEXT NOT NULL CHECK (route_selected IN ('local','free_cloud','subscription','paid_cloud','default_fallback','compute_starved','operator_prompted')),
   model_used TEXT,
   commercial_use_ok INTEGER NOT NULL CHECK (commercial_use_ok IN (0, 1)),
   quality_warning INTEGER DEFAULT 0 CHECK (quality_warning IN (0, 1)),
   cost_usd REAL DEFAULT 0.00,
   justification TEXT,
   g3_required INTEGER DEFAULT 0 CHECK (g3_required IN (0, 1)),
-  g3_status TEXT CHECK (g3_status IS NULL OR g3_status IN ('APPROVED','BLOCKED','EXPIRED')),
+  g3_status TEXT CHECK (g3_status IS NULL OR g3_status IN ('PENDING','APPROVED','BLOCKED','EXPIRED')),
+  reservation_id TEXT,
   created_at TEXT NOT NULL
 ) STRICT;
 

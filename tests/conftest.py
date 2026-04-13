@@ -53,17 +53,15 @@ def test_db() -> str:
     conn.executescript(
         """
         CREATE TABLE immune_verdicts (
-            verdict_id TEXT, check_type TEXT, tier TEXT, skill_name TEXT,
-            session_id TEXT, outcome TEXT, block_reason TEXT, block_detail TEXT,
-            latency_ms REAL, alert_severity TEXT, created_at TEXT
+            verdict_id TEXT, verdict_type TEXT, scan_tier TEXT, session_id TEXT,
+            skill_name TEXT, result TEXT, match_pattern TEXT, latency_ms INTEGER,
+            timestamp TEXT
         );
-        CREATE TABLE skill_bypass_log (
-            event_id TEXT, skill_name TEXT, session_id TEXT,
-            bypass_type TEXT, details TEXT, created_at TEXT
+        CREATE TABLE security_alerts (
+            alert_id TEXT, source TEXT, severity TEXT, details TEXT,
+            session_id TEXT, resolved INTEGER, resolved_at TEXT, timestamp TEXT
         );
         CREATE TABLE canary_audits (id TEXT);
-        CREATE TABLE circuit_breakers (id TEXT);
-        CREATE TABLE circuit_breaker_events (id TEXT);
         """
     )
     conn.commit()

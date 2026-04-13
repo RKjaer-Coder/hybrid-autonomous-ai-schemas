@@ -20,13 +20,23 @@ class DatabaseConfig:
 
 DATABASE_CONFIGS: Dict[str, DatabaseConfig] = {
     "strategic_memory": DatabaseConfig("strategic_memory", "strategic_memory.db"),
-    "immune": DatabaseConfig("immune", "immune.db"),
+    "immune": DatabaseConfig("immune", "immune_system.db"),
+    "immune_system": DatabaseConfig("immune_system", "immune_system.db"),
     "telemetry": DatabaseConfig("telemetry", "telemetry.db"),
     "financial_ledger": DatabaseConfig("financial_ledger", "financial_ledger.db"),
     "operator_digest": DatabaseConfig("operator_digest", "operator_digest.db"),
+    # Compatibility aliases retained for code that still thinks in legacy module slices.
     "opportunity": DatabaseConfig("opportunity", "strategic_memory.db"),
     "project": DatabaseConfig("project", "financial_ledger.db"),
 }
+
+CANONICAL_DATABASES = (
+    "strategic_memory",
+    "immune",
+    "telemetry",
+    "financial_ledger",
+    "operator_digest",
+)
 
 
 class DatabaseManager:
@@ -66,7 +76,7 @@ class DatabaseManager:
 
     def verify_all_databases(self) -> Dict[str, bool]:
         results: Dict[str, bool] = {}
-        for db_name in DATABASE_CONFIGS:
+        for db_name in CANONICAL_DATABASES:
             try:
                 conn = self.get_connection(db_name)
                 mode = str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower()

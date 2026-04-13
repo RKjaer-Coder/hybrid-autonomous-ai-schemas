@@ -139,7 +139,7 @@ This module can be imported independently from the schema/migration flow when yo
 `eval/` provides milestone-driven evaluation entry points with deterministic fixtures.
 
 Included milestones:
-- `M1`, `M2`, `M3`, `M5`, and `KILL`
+- `M1`, `M2`, `M3`, `M4`, `M5`, and `KILL`
 
 Runner capabilities include:
 - selecting milestones to run,
@@ -168,10 +168,16 @@ To run the immune subsystem end-to-end with current wiring:
 
 ## Testing
 
-Run the test suite:
+Install the dev test dependency:
 
 ```bash
-python -m unittest discover -s tests -v
+python -m pip install -r requirements-dev.txt
+```
+
+Run the authoritative test suite:
+
+```bash
+python -m pytest -q
 ```
 
 Tests cover (at a high level):

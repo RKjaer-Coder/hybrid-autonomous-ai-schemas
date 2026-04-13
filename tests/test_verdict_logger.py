@@ -25,7 +25,9 @@ def _verdict() -> ImmuneVerdict:
 def test_missing_table_raises(default_config):
     fd, path = tempfile.mkstemp(suffix=".db")
     conn = sqlite3.connect(path)
-    conn.execute("CREATE TABLE immune_verdicts (id TEXT)")
+    conn.execute(
+        "CREATE TABLE immune_verdicts (verdict_id TEXT, verdict_type TEXT, scan_tier TEXT, session_id TEXT, skill_name TEXT, result TEXT, match_pattern TEXT, latency_ms INTEGER, timestamp TEXT)"
+    )
     conn.commit()
     conn.close()
     with pytest.raises(RuntimeError):
@@ -88,5 +90,5 @@ def test_log_bypass(default_config, test_db):
     logger = VerdictLogger(test_db, default_config)
     logger.log_bypass("immune_system", "s", "direct", "d")
     c = sqlite3.connect(test_db)
-    n = c.execute("select count(*) from skill_bypass_log").fetchone()[0]
+    n = c.execute("select count(*) from security_alerts where source = 'skill_bypass'").fetchone()[0]
     assert n == 1

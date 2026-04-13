@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 import time
@@ -8,10 +9,7 @@ from immune.types import ImmuneConfig, ImmuneVerdict
 
 REQUIRED_TABLES = {
     "immune_verdicts",
-    "skill_bypass_log",
-    "canary_audits",
-    "circuit_breakers",
-    "circuit_breaker_events",
+    "security_alerts",
 }
 
 
@@ -56,12 +54,20 @@ class VerdictLogger:
     def log_bypass(self, skill_name: str, session_id: str, bypass_type: str, details: str) -> None:
         """Write bypass forensic row."""
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        payload = json.dumps(
+            {
+                "skill_name": skill_name,
+                "bypass_type": bypass_type,
+                "details": details,
+            },
+            separators=(",", ":"),
+        )
         with self._lock:
             self._conn.execute(
-                "INSERT INTO skill_bypass_log "
-                "(event_id, skill_name, session_id, bypass_type, details, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (f"bypass-{time.time_ns()}", skill_name, session_id, bypass_type, details, now),
+                "INSERT INTO security_alerts "
+                "(alert_id, source, severity, details, session_id, resolved, resolved_at, timestamp) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (f"alert-{time.time_ns()}", "skill_bypass", "ALERT", payload, session_id, 0, None, now),
             )
             self._conn.commit()
 
@@ -77,15 +83,13 @@ class VerdictLogger:
         values = [
             (
                 v.verdict_id,
-                v.check_type.value,
+                "sheriff_input" if v.check_type.value == "sheriff" else "judge_output",
                 v.tier.value,
-                v.skill_name,
                 v.session_id,
-                v.outcome.value,
+                v.skill_name,
+                "TIMEOUT" if v.block_reason and v.block_reason.value == "TIMEOUT" else v.outcome.value,
                 v.block_reason.value if v.block_reason else None,
-                v.block_detail,
-                v.latency_ms,
-                v.alert_severity.value if v.alert_severity else None,
+                int(v.latency_ms),
                 now,
             )
             for v in rows
@@ -94,9 +98,8 @@ class VerdictLogger:
             with self._lock:
                 self._conn.executemany(
                     "INSERT INTO immune_verdicts "
-                    "(verdict_id, check_type, tier, skill_name, session_id, outcome, block_reason, "
-                    "block_detail, latency_ms, alert_severity, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "(verdict_id, verdict_type, scan_tier, session_id, skill_name, result, match_pattern, latency_ms, timestamp) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     values,
                 )
                 self._conn.commit()

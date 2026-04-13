@@ -8,6 +8,7 @@ from eval.harnesses.harness_kill import KillHarness
 from eval.harnesses.harness_m1 import M1Harness
 from eval.harnesses.harness_m2 import M2Harness
 from eval.harnesses.harness_m3 import M3Harness
+from eval.harnesses.harness_m4 import M4Harness
 from eval.harnesses.harness_m5 import M5Harness
 from eval.runner import MockBackend
 
@@ -18,6 +19,7 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(M1Harness().run(b)["status"], "PASS")
         self.assertEqual(M2Harness().run(b)["status"], "PASS")
         self.assertEqual(M3Harness().run(b)["status"], "PASS")
+        self.assertEqual(M4Harness().run(b)["status"], "PASS")
         self.assertEqual(M5Harness().run(b)["status"], "PASS")
         self.assertEqual(KillHarness().run(b)["status"], "PASS")
 
