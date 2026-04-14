@@ -39,9 +39,10 @@ Implemented here today:
 - council and skill-layer scaffolding for bootstrap, memory, routing, operator,
   observability, and research flows
 - eval harnesses and deterministic fixtures for milestone verification
-- a Hermes runtime bootstrap scaffold in `skills/runtime.py` that can prepare
-  runtime directories, migrate the databases, create a Hermes session context,
-  and smoke-test bootstrap against a mock runtime
+- a Hermes runtime integration layer in `skills/runtime.py` that can prepare
+  runtime directories, install a local profile bundle, migrate the databases,
+  create a Hermes session context, run a doctor check, and prove a narrow
+  operator workflow against a mock runtime
 
 Not yet proven live in this repo:
 
@@ -137,6 +138,27 @@ Smoke-test the Hermes runtime scaffold locally:
 ```bash
 python3 -m skills.runtime --data-dir /tmp/hybrid-autonomous-ai-data
 ```
+
+Install a local runtime profile bundle:
+
+```bash
+python3 -m skills.runtime --install-profile
+```
+
+Run the runtime doctor:
+
+```bash
+python3 -m skills.runtime --doctor
+```
+
+Prove the Stage 0/1 operator workflow:
+
+```bash
+python3 -m skills.runtime --operator-workflow
+```
+
+This workflow now installs the local profile bundle automatically before its
+final doctor check, so it succeeds from a clean runtime layout.
 
 Create and verify the five-database baseline directly:
 
