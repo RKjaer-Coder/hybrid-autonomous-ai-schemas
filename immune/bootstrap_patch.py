@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import importlib
+import re
 import threading
 from typing import Any, Callable
 
@@ -17,6 +18,21 @@ CANDIDATES = [
     ("hermes.agent.executor", "dispatch_tool"),
     ("hermes.core.tool_registry", "invoke"),
 ]
+_STACK_TOKEN_SPLIT_RE = re.compile(r"[\s>/,:]+")
+
+
+def _stack_has_immune_wrapper(execution_stack: Any) -> bool:
+    """Detect the immune wrapper in structured or string execution stacks."""
+    if execution_stack is None:
+        return False
+    if isinstance(execution_stack, str):
+        tokens = [token for token in _STACK_TOKEN_SPLIT_RE.split(execution_stack) if token]
+        return "immune_system" in tokens
+    if isinstance(execution_stack, dict):
+        return any(_stack_has_immune_wrapper(value) for value in execution_stack.values())
+    if isinstance(execution_stack, (list, tuple, set, frozenset)):
+        return any(_stack_has_immune_wrapper(value) for value in execution_stack)
+    return False
 
 
 def _locate_dispatch() -> tuple[Any, str, Callable[..., Any]] | None:
@@ -84,7 +100,7 @@ def apply_immune_patch(
                         daemon=True,
                     ).start()
 
-        if "immune_system" not in str(kwargs.get("execution_stack", "")):
+        if not _stack_has_immune_wrapper(kwargs.get("execution_stack")):
             verdict_logger.log_bypass(skill_name, session_id, "direct_dispatch", "Missing immune wrapper")
 
         output = original_fn(*args, **kwargs)

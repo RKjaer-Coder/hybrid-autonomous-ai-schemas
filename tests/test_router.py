@@ -84,6 +84,9 @@ def make_jwt(**overrides) -> JWTClaims:
 
 
 class TestCommercialUseGate(unittest.TestCase):
+    def test_operator_prompted_enum_exists(self):
+        self.assertEqual(RoutingTier.OPERATOR_PROMPTED.value, "operator_prompted")
+
     def test_non_commercial_model_excluded_even_if_free(self):
         task = make_task()
         models = [make_model(tier="free_cloud", commercial_use_permitted=False, quality_score=0.95)]

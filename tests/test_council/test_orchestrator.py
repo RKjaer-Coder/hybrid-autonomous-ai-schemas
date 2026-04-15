@@ -42,6 +42,7 @@ class TestOrchestrator(unittest.TestCase):
         ctx = build_context_packet(DecisionType.OPPORTUNITY_SCREEN, "id", "ctx")
         verdict = run_tier1_deliberation(ctx, dispatcher)
         self.assertEqual(verdict.recommendation, Recommendation.ESCALATE)
+        self.assertFalse(verdict.degraded)
 
     def test_synthesis_parse_failure_raises(self):
         dispatcher = MockDispatcher(bad_json=True)
@@ -51,6 +52,31 @@ class TestOrchestrator(unittest.TestCase):
 
     def test_identical_outputs_rejected(self):
         dispatcher = MockDispatcher(identical=True)
+        ctx = build_context_packet(DecisionType.OPPORTUNITY_SCREEN, "id", "ctx")
+        with self.assertRaises(ValueError):
+            run_tier1_deliberation(ctx, dispatcher)
+
+    def test_g3_denied_caps_confidence_and_marks_degraded(self):
+        dispatcher = MockDispatcher()
+        ctx = build_context_packet(DecisionType.OPPORTUNITY_SCREEN, "id", "ctx")
+        verdict = run_tier1_deliberation(ctx, dispatcher, g3_denied=True)
+        self.assertTrue(verdict.degraded)
+        self.assertLessEqual(verdict.confidence, 0.70)
+
+    def test_role_token_budget_enforced(self):
+        class OverBudgetDispatcher(MockDispatcher):
+            def dispatch_parallel(self, prompts):
+                outputs = super().dispatch_parallel(prompts)
+                first = outputs[0]
+                outputs[0] = type(first)(
+                    role=first.role,
+                    content=first.content,
+                    token_count=first.max_tokens + 1,
+                    max_tokens=first.max_tokens,
+                )
+                return outputs
+
+        dispatcher = OverBudgetDispatcher()
         ctx = build_context_packet(DecisionType.OPPORTUNITY_SCREEN, "id", "ctx")
         with self.assertRaises(ValueError):
             run_tier1_deliberation(ctx, dispatcher)

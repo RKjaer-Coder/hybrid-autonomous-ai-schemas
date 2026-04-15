@@ -15,6 +15,7 @@ class RoutingTier(Enum):
     PAID_CLOUD = "paid_cloud"
     DEFAULT_FALLBACK = "default_fallback"
     COMPUTE_STARVED = "compute_starved"
+    OPERATOR_PROMPTED = "operator_prompted"
 
 
 class G3Path(Enum):

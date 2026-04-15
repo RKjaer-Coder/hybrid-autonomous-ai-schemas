@@ -4,7 +4,7 @@ import sys
 import time
 import types
 
-from immune.bootstrap_patch import apply_immune_patch
+from immune.bootstrap_patch import _stack_has_immune_wrapper, apply_immune_patch
 from immune.types import BlockReason, ImmuneBlockError, Outcome
 
 from immune.types import CheckType, ImmuneVerdict, Tier, generate_uuid_v7
@@ -134,3 +134,9 @@ def test_patch_disabled(default_config, test_db):
     cfg = default_config.__class__(**{**default_config.__dict__, "bootstrap_patch_enabled": False})
     logger = VerdictLogger(test_db, cfg)
     assert apply_immune_patch(lambda *_: None, lambda *_: None, cfg, logger)
+
+
+def test_stack_parser_handles_structured_stacks():
+    assert _stack_has_immune_wrapper(("planner", "immune_system", "shell_command"))
+    assert _stack_has_immune_wrapper("planner > immune_system > shell_command")
+    assert not _stack_has_immune_wrapper({"stack": ("planner", "shell_command")})

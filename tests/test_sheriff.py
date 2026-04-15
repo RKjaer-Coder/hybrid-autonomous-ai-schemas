@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 
+from immune.context_params import ContextParams, KNOWN_BAD_TRACES
 from immune import sheriff
 from immune.types import BlockReason, Outcome
 
@@ -43,3 +44,28 @@ def test_latency_and_uuid(clean_sheriff_payload, default_config):
     verdict = sheriff.sheriff_check(clean_sheriff_payload, default_config)
     assert verdict.latency_ms >= 0
     assert UUID7_RE.search(verdict.verdict_id)
+
+
+def test_explicit_context_params_used(clean_sheriff_payload, default_config):
+    cfg = default_config.__class__(**{**default_config.__dict__, "context_params_enabled": True})
+    verdict = sheriff.sheriff_check(
+        clean_sheriff_payload,
+        cfg,
+        context_params=ContextParams(tool_window=("memory_read", "config_read", "web_fetch")),
+    )
+    assert verdict.outcome == Outcome.BLOCK
+    assert "EXFIL_SEQUENCE" in (verdict.block_detail or "")
+
+
+def test_trace_anomaly_flags_without_fast_path_block(clean_sheriff_payload, default_config):
+    cfg = default_config.__class__(**{**default_config.__dict__, "context_params_enabled": True})
+    KNOWN_BAD_TRACES.add("bad-trace")
+    try:
+        verdict = sheriff.sheriff_check(
+            clean_sheriff_payload,
+            cfg,
+            context_params=ContextParams(execution_trace_hash="bad-trace"),
+        )
+    finally:
+        KNOWN_BAD_TRACES.discard("bad-trace")
+    assert verdict.outcome == Outcome.PASS

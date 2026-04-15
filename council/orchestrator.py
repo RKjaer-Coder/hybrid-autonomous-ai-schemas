@@ -155,10 +155,15 @@ def run_tier2_deliberation(
     tier1_verdict: CouncilVerdict | None = None,
 ) -> CouncilVerdict:
     _ = (context, dispatcher, tier1_verdict)
-    raise NotImplementedError("Tier 2 deliberation requires mixture_of_agents_tool integration")
+    raise NotImplementedError("Tier 2 deliberation remains a Stage 5+ mixture_of_agents_tool integration")
 
 
-def run_tier1_deliberation(context, dispatcher: SubagentDispatcher, role_weights: Optional[dict] = None) -> CouncilVerdict:
+def run_tier1_deliberation(
+    context,
+    dispatcher: SubagentDispatcher,
+    role_weights: Optional[dict] = None,
+    g3_denied: bool = False,
+) -> CouncilVerdict:
     if context.token_count > context.max_tokens:
         raise ValueError("Context token budget exceeded")
     effective_weights = role_weights or DEFAULT_ROLE_WEIGHTS
@@ -172,6 +177,8 @@ def run_tier1_deliberation(context, dispatcher: SubagentDispatcher, role_weights
     _assert_noncollapse(batch_a)
     _verify_isolation(batch_a)
     for out in batch_a:
+        if out.token_count > out.max_tokens:
+            raise ValueError(f"{out.role.value} exceeded token budget ({out.token_count}>{out.max_tokens})")
         _, errors = validate_role_output(out.content, out.role)
         if errors:
             raise ValueError("; ".join(errors))
@@ -179,6 +186,8 @@ def run_tier1_deliberation(context, dispatcher: SubagentDispatcher, role_weights
     batch_text = format_batch_a_for_da(batch_a)
     da_system = DEVILS_ADVOCATE_SYSTEM_PROMPT.format(batch_a_outputs=batch_text)
     da_out = dispatcher.dispatch_sequential(RoleName.DEVILS_ADVOCATE, da_system, user_prompt)
+    if da_out.token_count > da_out.max_tokens:
+        raise ValueError(f"{da_out.role.value} exceeded token budget ({da_out.token_count}>{da_out.max_tokens})")
     _, da_errors = validate_role_output(da_out.content, RoleName.DEVILS_ADVOCATE)
     if da_errors:
         raise ValueError("; ".join(da_errors))
@@ -195,8 +204,8 @@ def run_tier1_deliberation(context, dispatcher: SubagentDispatcher, role_weights
     raw = dispatcher.dispatch_synthesis(syn_system, user_prompt)
     verdict_data = parse_json_output(raw, SYNTHESIS_OUTPUT_SCHEMA)
     verdict_data = _check_auto_escalation(verdict_data)
-    is_degraded = verdict_data.get("recommendation") == Recommendation.ESCALATE.value
-    confidence_cap = 0.70 if is_degraded else None
+    is_degraded = g3_denied
+    confidence_cap = 0.70 if g3_denied else None
     raw_confidence = float(verdict_data["confidence"])
     final_confidence = min(raw_confidence, confidence_cap) if confidence_cap is not None else raw_confidence
 

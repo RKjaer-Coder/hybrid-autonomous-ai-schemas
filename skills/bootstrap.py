@@ -3,11 +3,13 @@ from __future__ import annotations
 import logging
 import sys
 import types
+from pathlib import Path
 from typing import Optional
 
 from immune.config import load_config
 from immune.sheriff import sheriff_check
 from immune.types import Outcome, SheriffPayload
+from immune.verdict_logger import VerdictLogger
 from skills.append_buffer import AppendBuffer, IMMUNE_BUFFER_CONFIG, TELEMETRY_BUFFER_CONFIG
 from skills.config import IntegrationConfig
 from skills.db_manager import DatabaseManager
@@ -60,14 +62,8 @@ class BootstrapOrchestrator:
         try:
             from immune.bootstrap_patch import apply_immune_patch
 
-            class _NoopVerdictLogger:
-                def log_verdict(self, verdict):
-                    return None
-
-                def log_bypass(self, *args, **kwargs):
-                    return None
-
-            ok = apply_immune_patch(config=immune_config, verdict_logger=_NoopVerdictLogger())
+            verdict_logger = VerdictLogger(str(Path(self._config.data_dir) / "immune_system.db"), immune_config)
+            ok = apply_immune_patch(config=immune_config, verdict_logger=verdict_logger)
             if not ok:
                 logger.critical("BOOTSTRAP_FAILED: Immune patch target not found")
                 return False

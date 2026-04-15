@@ -44,6 +44,7 @@ class AppendBuffer:
         self._buffer: deque = deque(maxlen=config.max_entries)
         self._lock = threading.Lock()
         self._dropped_count = 0
+        self._dropped_since_flush = 0
         self._flush_count = 0
         self._running = False
         self._flush_thread: Optional[threading.Thread] = None
@@ -65,6 +66,7 @@ class AppendBuffer:
             self._buffer.append(row)
             if was_full:
                 self._dropped_count += 1
+                self._dropped_since_flush += 1
         if len(self._buffer) >= self._config.max_entries // 2:
             self._flush_now()
 
@@ -89,6 +91,15 @@ class AppendBuffer:
             conn.executemany(sql, rows)
             conn.commit()
             self._flush_count += 1
+            with self._lock:
+                dropped_since_flush = self._dropped_since_flush
+                self._dropped_since_flush = 0
+            if dropped_since_flush:
+                logger.warning(
+                    "TELEMETRY_BACKPRESSURE: %s entries dropped before flushing %s",
+                    dropped_since_flush,
+                    self._config.db_name,
+                )
         except Exception as e:  # noqa: BLE001
             logger.error("Flush failed for %s: %s", self._config.db_name, e)
             with self._lock:
@@ -97,6 +108,7 @@ class AppendBuffer:
                         self._buffer.appendleft(row)
                     else:
                         self._dropped_count += 1
+                        self._dropped_since_flush += 1
 
     @property
     def stats(self) -> dict:

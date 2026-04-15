@@ -4,6 +4,7 @@ import sqlite3
 import threading
 import time
 import uuid
+import logging
 
 from skills.append_buffer import AppendBuffer, BufferConfig
 
@@ -119,3 +120,16 @@ def test_fill_pct(tmp_path):
     for i in range(5):
         b.append((str(i), "x"))
     assert b.stats["fill_pct"] <= 100
+
+
+def test_backpressure_warning_logged_on_flush(tmp_path, caplog):
+    conn = _mk_conn(tmp_path)
+    b = AppendBuffer(BufferConfig("x", "t", 2, 1000, ("id", "v")), lambda: conn)
+    b._flush_now = lambda: None
+    b.append(("1", "a"))
+    b.append(("2", "b"))
+    b.append(("3", "c"))
+    b._flush_now = AppendBuffer._flush_now.__get__(b, AppendBuffer)
+    with caplog.at_level(logging.WARNING):
+        b._flush_now()
+    assert "TELEMETRY_BACKPRESSURE" in caplog.text

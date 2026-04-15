@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+KNOWN_BAD_TRACES: set[str] = set()
+
 
 @dataclass(frozen=True)
 class ContextParams:
@@ -26,6 +28,13 @@ DETECTION_RULES = {
 }
 
 
+def check_trace_anomaly(context: ContextParams) -> tuple[str, str] | None:
+    """Flag known-bad execution traces for async deep-scan per spec §6.1a."""
+    if context.execution_trace_hash and context.execution_trace_hash in KNOWN_BAD_TRACES:
+        return ("TRACE_ANOMALY", DETECTION_RULES["TRACE_ANOMALY"]["action"])
+    return None
+
+
 def check_context_params(context: ContextParams) -> tuple[str, str] | None:
     """Check context parameters for suspicious patterns."""
     tool_window = context.tool_window
@@ -38,7 +47,7 @@ def check_context_params(context: ContextParams) -> tuple[str, str] | None:
     if context.session_age_seconds < 10.0 and len(tool_window) >= 3:
         return ("BURST_INVOCATION", DETECTION_RULES["BURST_INVOCATION"]["action"])
 
-    return None
+    return check_trace_anomaly(context)
 
 
 if __name__ == "__main__":

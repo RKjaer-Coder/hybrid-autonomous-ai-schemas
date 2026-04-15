@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 
 from immune.classifiers.ipi_classifier import classify_ipi
@@ -21,6 +22,7 @@ from immune.types import (
 )
 
 FALLBACK_UUID = "00000000-0000-7000-8000-000000000000"
+LOGGER = logging.getLogger(__name__)
 
 
 def _safe_verdict_id() -> str:
@@ -30,7 +32,11 @@ def _safe_verdict_id() -> str:
         return FALLBACK_UUID
 
 
-def sheriff_check(payload: SheriffPayload, config: ImmuneConfig) -> ImmuneVerdict:
+def sheriff_check(
+    payload: SheriffPayload,
+    config: ImmuneConfig,
+    context_params: ContextParams | None = None,
+) -> ImmuneVerdict:
     """Run fast-path Sheriff checks. Fail closed on all exceptions."""
     try:
         start = time.monotonic_ns()
@@ -70,27 +76,38 @@ def sheriff_check(payload: SheriffPayload, config: ImmuneConfig) -> ImmuneVerdic
                 )
         if config.context_params_enabled:
             args = payload.arguments if isinstance(payload.arguments, dict) else {}
+            effective_context = context_params or ContextParams(
+                execution_trace_hash=args.get("execution_trace_hash"),
+                tool_window=tuple(args.get("tool_window", ())),
+                session_age_seconds=float(args.get("session_age_seconds", 0.0)),
+            )
             c_result = check_context_params(
-                ContextParams(
-                    execution_trace_hash=args.get("execution_trace_hash"),
-                    tool_window=tuple(args.get("tool_window", ())),
-                    session_age_seconds=float(args.get("session_age_seconds", 0.0)),
-                )
+                effective_context
             )
             if c_result is not None:
                 rule_name, action = c_result
-                return ImmuneVerdict(
-                    verdict_id=generate_uuid_v7(),
-                    check_type=CheckType.SHERIFF,
-                    tier=Tier.FAST_PATH,
-                    skill_name=payload.skill_name,
-                    session_id=payload.session_id,
-                    outcome=Outcome.BLOCK,
-                    block_reason=BlockReason.POLICY_VIOLATION,
-                    block_detail=f"{rule_name}: {action}",
-                    latency_ms=(time.monotonic_ns() - start) / 1_000_000,
-                    alert_severity=AlertSeverity.IMMUNE_BLOCK_FAST,
-                )
+                if rule_name == "TRACE_ANOMALY":
+                    LOGGER.warning(
+                        "trace_anomaly_flagged",
+                        extra={
+                            "session_id": payload.session_id,
+                            "skill_name": payload.skill_name,
+                            "execution_trace_hash": effective_context.execution_trace_hash,
+                        },
+                    )
+                else:
+                    return ImmuneVerdict(
+                        verdict_id=generate_uuid_v7(),
+                        check_type=CheckType.SHERIFF,
+                        tier=Tier.FAST_PATH,
+                        skill_name=payload.skill_name,
+                        session_id=payload.session_id,
+                        outcome=Outcome.BLOCK,
+                        block_reason=BlockReason.POLICY_VIOLATION,
+                        block_detail=f"{rule_name}: {action}",
+                        latency_ms=(time.monotonic_ns() - start) / 1_000_000,
+                        alert_severity=AlertSeverity.IMMUNE_BLOCK_FAST,
+                    )
         elapsed_ms = (time.monotonic_ns() - start) / 1_000_000
         if elapsed_ms > config.sheriff_fast_path_timeout_ms:
             return ImmuneVerdict(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 import tempfile
+import logging
 
 import pytest
 
@@ -92,3 +93,28 @@ def test_log_bypass(default_config, test_db):
     c = sqlite3.connect(test_db)
     n = c.execute("select count(*) from security_alerts where source = 'skill_bypass'").fetchone()[0]
     assert n == 1
+
+
+def test_flush_logs_warning_on_failure(default_config, test_db, caplog):
+    logger = VerdictLogger(test_db, default_config)
+    logger.log_verdict(_verdict())
+    logger._closed = True
+    if logger._timer:
+        logger._timer.cancel()
+    logger._conn.close()
+    with caplog.at_level(logging.WARNING):
+        logger.flush()
+    assert "Verdict flush failure #1" in caplog.text
+
+
+def test_flush_raises_after_three_failures(default_config, test_db):
+    logger = VerdictLogger(test_db, default_config)
+    logger.log_verdict(_verdict())
+    logger._closed = True
+    if logger._timer:
+        logger._timer.cancel()
+    logger._conn.close()
+    logger.flush()
+    logger.flush()
+    with pytest.raises(RuntimeError, match="Circuit breaker"):
+        logger.flush()

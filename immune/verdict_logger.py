@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 import time
@@ -11,6 +12,7 @@ REQUIRED_TABLES = {
     "immune_verdicts",
     "security_alerts",
 }
+LOGGER = logging.getLogger(__name__)
 
 
 class VerdictLogger:
@@ -25,6 +27,8 @@ class VerdictLogger:
         self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
         self._verify_tables()
         self._timer: threading.Timer | None = None
+        self._consecutive_failures = 0
+        self._max_consecutive_failures = 3
         if not self._closed:
             self._schedule_flush()
 
@@ -104,8 +108,20 @@ class VerdictLogger:
                 )
                 self._conn.commit()
                 del self._buffer[: len(rows)]
+                self._consecutive_failures = 0
         except Exception:
-            return
+            self._consecutive_failures += 1
+            LOGGER.warning(
+                "Verdict flush failure #%s: %s verdict(s) remain buffered",
+                self._consecutive_failures,
+                len(rows),
+                exc_info=True,
+            )
+            if self._consecutive_failures < self._max_consecutive_failures:
+                if not self._closed:
+                    self._schedule_flush()
+                return
+            raise RuntimeError("Circuit breaker: immune verdict persistence failed repeatedly") from None
         self._schedule_flush()
 
     def shutdown(self) -> None:

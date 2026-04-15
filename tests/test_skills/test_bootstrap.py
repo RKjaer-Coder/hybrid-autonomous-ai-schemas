@@ -83,6 +83,20 @@ def test_shutdown_flushes_buffers(test_data_dir):
     b.shutdown()
 
 
+def test_bootstrap_uses_real_verdict_logger(test_data_dir, monkeypatch):
+    rt = MockHermesRuntime(str(test_data_dir))
+    captured = {}
+
+    def fake_apply_immune_patch(**kwargs):
+        captured["logger_type"] = type(kwargs["verdict_logger"]).__name__
+        return True
+
+    monkeypatch.setattr("immune.bootstrap_patch.apply_immune_patch", fake_apply_immune_patch)
+    b = BootstrapOrchestrator(IntegrationConfig(data_dir=str(test_data_dir)), rt, _mk_ctx(str(test_data_dir)))
+    assert b.run() is True
+    assert captured["logger_type"] == "VerdictLogger"
+
+
 @pytest.mark.parametrize("field", ["data_dir", "skills_dir", "checkpoints_dir", "alerts_dir"])
 def test_config_paths_can_expand(field):
     cfg = IntegrationConfig()
