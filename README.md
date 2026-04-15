@@ -1,123 +1,88 @@
 # Hybrid Autonomous AI
 
-This repository is the implementation substrate for `Hybrid Autonomous AI`: a
-hybrid, local-first autonomous intelligence system built on Hermes Agent and
-designed to run primarily on operator-owned infrastructure while selectively
-using cloud frontier models for high-value or safety-critical work.
+This repository is the implementation baseline for Hybrid Autonomous AI: a
+hybrid, local-first autonomous intelligence system designed to run primarily on
+operator-owned infrastructure and use cloud models selectively where they add
+clear leverage or safety value.
 
-It is not the whole live system yet. This repo is the contract-first baseline
-that makes the architecture concrete: persistence schemas, routing policy,
-immune guardrails, Hermes-facing integration scaffolding, and milestone evals.
-If the surrounding architecture workspace is available, treat the sibling
-`spec/` directory as architecture truth and this repo as implemented truth.
+This is a real, test-backed codebase, not just an idea dump. It already
+contains the persistence layer, routing contracts, immune guardrails, Hermes
+integration scaffolding, milestone evals, and a deterministic runtime proof.
+It is still pre-live from a real Hermes deployment perspective.
 
-## What This Repo Is For
+## What Is In This Repo
 
-Use this repo to answer:
+Today, this repository includes:
 
-- what has actually been implemented today
-- how core persistence contracts are shaped
-- how model routing and spend controls work
-- how the immune subsystem fails closed
-- how Hermes integration is being scaffolded and tested
-- how to verify changes with deterministic tests and evals
+- a five-database SQLite baseline with migrations and drift verification
+- a typed financial router with spend controls and hard approval boundaries
+- an immune subsystem with Sheriff, Judge, bootstrap patching, and verdict logs
+- council contracts and orchestration support for structured deliberation
+- research, strategic-memory, opportunity, operator, and observability skills
+- milestone eval harnesses and deterministic fixtures
+- a Hermes runtime integration layer that can prepare a local profile bundle,
+  migrate the databases, bootstrap a runtime, run a doctor check, and prove a
+  deterministic operator workflow plus a council-backed opportunity and
+  phase-gate path against a mock runtime
+- GitHub Actions CI that runs the full test suite on `main`, `codex/**`, and
+  pull requests to `main`
 
-The repo is designed to be useful for both humans and agents: low-ambiguity
-interfaces, inspectable contracts, and fast verification loops.
+## What This Repo Is Not Yet
 
-## Current Reality
+This repository should not be described as:
 
-This codebase is in the transition from validated reference implementation to
-real Hermes runtime integration.
+- a confirmed live Hermes installation
+- a production-attached runtime on a real operator machine
+- the full target-state autonomous system described in the broader architecture
+- proof that the richer long-horizon loops are already operating live
 
-Implemented here today:
+The current state is best described as a strong pre-live implementation
+substrate with deterministic runtime proofs.
 
-- five SQLite databases with migration and drift verification tooling
-- financial router logic with typed contracts and gated spend behavior
-- immune subsystem core: Sheriff, Judge, config, deep-scan adapter, bootstrap
-  patching, and verdict logging
-- council and skill-layer scaffolding for bootstrap, memory, routing, operator,
-  observability, and research flows
-- eval harnesses and deterministic fixtures for milestone verification
-- a Hermes runtime integration layer in `skills/runtime.py` that can prepare
-  runtime directories, install a local profile bundle, migrate the databases,
-  create a Hermes session context, run a doctor check, prove a narrow
-  operator workflow against a mock runtime, and verify the resulting
-  observability, alert, digest, and telemetry surfaces
-
-Not yet proven live in this repo:
-
-- confirmed wiring into a real Hermes startup/profile path
-- full live Hermes startup/profile attachment on a real installed runtime
-- broader production workflows beyond the current deterministic Stage 0/1
-  memory, operator, observability, and research slices
-- the richer target-state autonomy described in the broader architecture spec
-
-## Repository Layout
+## Repo Map
 
 ```text
 .
 ├── schemas/             # SQLite contracts for the five-database baseline
 ├── migrate.py           # Applies schemas and verifies structural drift
-├── financial_router/    # Typed routing policy, cost logic, approval gates
-├── immune/              # Fail-closed guardrail subsystem
-├── council/             # Deliberation-related contracts and helpers
-├── skills/              # Hermes-facing integration and bootstrap scaffolding
-├── eval/                # Milestone runners, backends, fixtures, reporting
-├── tests/               # Unit and integration tests
-└── README.md            # Human + agent orientation
+├── financial_router/    # Routing policy, cost logic, approval gates
+├── immune/              # Fail-closed security and policy validation
+├── council/             # Deliberation types, prompts, validators, orchestration
+├── skills/              # Hermes-facing integration and runtime scaffolding
+├── eval/                # Milestone runners, mock backends, fixtures, reporting
+├── tests/               # Unit and integration coverage
+└── .github/workflows/   # CI automation
 ```
 
 ## The Five Databases
 
-The baseline runtime state is split across five SQLite databases with explicit
-responsibility boundaries:
+Runtime state is intentionally split across five SQLite databases:
 
-- `strategic_memory.db`: opportunity records, council outputs, research briefs,
-  and other long-horizon memory artifacts
-- `telemetry.db`: step outcomes, chain definitions, and reliability views
-- `immune_system.db`: security verdicts, alerts, revocations, and guardrail logs
-- `financial_ledger.db`: routing decisions, revenue, costs, projects, and
-  kill-governance inputs
-- `operator_digest.db`: digest history, alerts, gate state, and operator load
+- `strategic_memory.db`: briefs, research tasks, opportunities, council outputs
+- `telemetry.db`: chain definitions, step outcomes, reliability views
+- `immune_system.db`: verdicts, alerts, revocations, security audit trails
+- `financial_ledger.db`: routing decisions, costs, revenue, projects, kill data
+- `operator_digest.db`: digests, alerts, gates, harvest requests, operator load
 
-This split is intentional. It keeps audit domains clearer and reduces hidden
-coupling between strategic state, safety controls, finances, and operator UX.
+This separation keeps safety, finance, operator UX, and strategic state easier
+to reason about and audit.
 
-## Key Modules
+## Key Entry Points
 
-### `migrate.py`
+- `migrate.py`
+  Bootstraps and verifies the full SQLite baseline.
+- `financial_router/`
+  Enforces routing, quality, and spend policy.
+- `immune/`
+  Implements the fail-closed validation layer.
+- `skills/runtime.py`
+  The main Hermes-facing runtime bootstrap and workflow proof entry point.
+- `eval/runner.py`
+  Runs milestone-oriented evals against deterministic harnesses.
 
-Creates and verifies the full SQLite baseline. This is the authoritative entry
-point for bootstrapping repo state and checking schema drift.
+## Quick Verification
 
-### `financial_router/`
-
-Implements typed routing decisions across local, free-cloud, subscription, and
-paid paths under budget, approval, and quality constraints. G3 spend approval
-is treated as a hard boundary, not a soft preference.
-
-### `immune/`
-
-Implements the fail-closed validation layer. This is where Sheriff, Judge,
-context-parameterized checks, verdict logging, and deep-scan model integration
-live.
-
-### `skills/`
-
-Contains Hermes-facing integration scaffolding. In particular,
-`skills/runtime.py` is the current bootstrap path for preparing a runtime
-layout, migrating all databases, constructing a Hermes session context, and
-running bootstrap against a tool registry or mock runtime.
-
-### `eval/`
-
-Provides milestone-oriented eval entry points and deterministic fixtures so key
-architecture claims can be exercised before full live deployment.
-
-## Fast Start
-
-Install dev dependencies:
+Install development dependencies:
 
 ```bash
 python3 -m pip install -r requirements-dev.txt
@@ -129,79 +94,63 @@ Run the full test suite:
 python3 -m pytest -q
 ```
 
-Run a representative milestone eval:
+Run the skill-focused suite:
 
 ```bash
-python3 -m eval.runner --milestone M1
+python3 -m pytest -q tests/test_skills
 ```
 
-Smoke-test the Hermes runtime scaffold locally:
+Run the M2 eval:
 
 ```bash
-python3 -m skills.runtime --data-dir /tmp/hybrid-autonomous-ai-data
+python3 -m eval.runner --milestone M2
 ```
 
-Install a local runtime profile bundle:
-
-```bash
-python3 -m skills.runtime --install-profile
-```
-
-Run the runtime doctor:
-
-```bash
-python3 -m skills.runtime --doctor
-```
-
-Prove the Stage 0/1 operator workflow plus observability-backed digest/alert checks:
+Run the deterministic runtime proof:
 
 ```bash
 python3 -m skills.runtime --operator-workflow
 ```
 
-This workflow now installs the local profile bundle automatically before its
-final doctor check, records telemetry and immune verdict evidence into the
-SQLite baseline, generates a deterministic digest, and verifies the resulting
-observability queries from a clean runtime layout.
+That runtime proof now exercises this chain from a clean layout:
 
-Create and verify the five-database baseline directly:
+`heartbeat -> immune check -> route -> research brief -> opportunity routing ->
+harvest request -> council review -> project handoff -> phase gate ->
+operator alert -> digest -> observability readback`
+
+If you only want to bootstrap and verify the databases directly:
 
 ```bash
 python3 migrate.py --db-dir ./data --verify
 ```
 
-## How To Work In This Repo
+## How To Read This Codebase
 
-For humans:
+If you are new here, start in this order:
 
-1. Read this README for current intent and boundaries.
-2. Treat code and tests as the source of truth for what exists now.
-3. Start with `migrate.py`, `schemas/*.sql`, and the module under change.
-4. Verify changes with targeted tests before broad refactors.
+1. `README.md`
+2. `migrate.py`
+3. `schemas/*.sql`
+4. the module you want to change
+5. the nearest test file under `tests/`
 
-For agents:
+Treat the code and tests as the source of truth for what is implemented today.
+If you also have access to the broader architecture workspace, use that for
+target-state intent and this repository for implemented behavior.
 
-1. Assume this repo is the implemented truth, not the aspirational architecture.
-2. Prefer small reads: the touched module, its types, and its tests.
-3. Preserve contract boundaries unless the task explicitly changes them.
-4. Run the smallest relevant tests and evals after edits.
-5. Surface spec/repo drift explicitly rather than smoothing it over.
+## Working Style
 
-## Working Principles
+- contracts first
+- local first
+- fail closed
+- auditability over hidden magic
+- deterministic tests over vague claims
+- small, verified increments over broad rewrites
 
-- Contracts first: schemas and typed interfaces should be explicit.
-- Local first: prefer local execution paths unless cloud use is intentionally
-  justified by quality, leverage, or safety.
-- Fail closed: unsafe or ambiguous behavior should stop or degrade safely.
-- Auditability over magic: state transitions and decisions should be visible.
-- Small verified increments: prefer test-backed progress over broad rewrites.
+## Short Version
 
-## If You Are New Here
-
-The shortest accurate summary is:
-
-This repo is the implementation backbone for Hybrid Autonomous AI. It already
-contains a strong, test-backed substrate for persistence, routing, immune
-guardrails, evals, and Hermes bootstrap integration, but it should still be
-described as an implemented pre-live integration layer rather than a live
-Hermes deployment or a fully deployed autonomous system.
+This repository already contains a substantial, validated implementation
+substrate for Hybrid Autonomous AI: databases, routing, immune guardrails,
+council scaffolding, research and operator skills, evals, CI, and a
+deterministic Hermes-facing runtime proof. It is not yet the fully live system,
+but it is well past a skeleton.

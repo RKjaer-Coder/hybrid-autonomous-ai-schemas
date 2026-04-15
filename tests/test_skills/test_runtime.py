@@ -144,10 +144,19 @@ def test_run_operator_workflow_installs_profile_before_final_doctor(tmp_path):
     assert Path(result.doctor.profile_manifest_path).is_file()
     assert result.digest_id
     assert result.digest is not None
-    assert "SYSTEM HEALTH:" in result.digest["content"]
+    assert result.opportunity_id
+    assert result.harvest_id
+    assert result.project_id
+    assert result.phase_gate_id
+    assert result.phase_gate_verdict == "CONTINUE"
+    assert len(result.council_verdict_ids) == 2
+    assert "PENDING DECISIONS:" in result.digest["content"]
     assert result.observability is not None
     assert result.observability.alert_history
+    assert result.observability.council_verdicts
     assert result.observability.digest_history
     assert result.observability.immune_verdicts
     assert result.observability.telemetry_events
+    assert any(item["step_type"] == "phase_gate_apply" for item in result.observability.telemetry_events)
     assert result.observability.system_health["heartbeat_state"] == "ACTIVE"
+    assert result.observability.system_health["pending_harvests"] == 1

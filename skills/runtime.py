@@ -19,6 +19,9 @@ EXPECTED_CORE_TOOLS = (
     "immune_system",
     "financial_router",
     "strategic_memory",
+    "council",
+    "research_domain_2",
+    "opportunity_pipeline",
     "operator_interface",
     "observability",
 )
@@ -64,6 +67,7 @@ class WorkflowObservabilitySnapshot:
     """Queryable runtime evidence produced by the operator workflow proof."""
 
     alert_history: list[dict[str, Any]]
+    council_verdicts: list[dict[str, Any]]
     digest_history: list[dict[str, Any]]
     immune_verdicts: list[dict[str, Any]]
     telemetry_events: list[dict[str, Any]]
@@ -73,7 +77,7 @@ class WorkflowObservabilitySnapshot:
 
 @dataclass(frozen=True)
 class OperatorWorkflowResult:
-    """End-to-end Stage 0/1 operator workflow smoke test result."""
+    """End-to-end operator workflow and council-backed project proof result."""
 
     ok: bool
     bootstrap: RuntimeBootstrapResult
@@ -81,6 +85,12 @@ class OperatorWorkflowResult:
     routing_tier: str | None
     brief_id: str | None
     readback: dict[str, Any] | None
+    opportunity_id: str | None
+    harvest_id: str | None
+    project_id: str | None
+    phase_gate_id: str | None
+    phase_gate_verdict: str | None
+    council_verdict_ids: list[str]
     alert_id: str | None
     digest_id: str | None
     digest: dict[str, Any] | None
@@ -95,6 +105,126 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def _mock_council_synthesis(
+    decision_type: str,
+    *,
+    recommendation: str,
+    confidence: float,
+    reasoning_summary: str,
+    dissenting_views: str,
+    risk_watch: list[str] | None = None,
+) -> str:
+    return json.dumps(
+        {
+            "tier_used": 1,
+            "decision_type": decision_type,
+            "recommendation": recommendation,
+            "confidence": confidence,
+            "reasoning_summary": reasoning_summary,
+            "dissenting_views": dissenting_views,
+            "da_assessment": [
+                {
+                    "objection": "Execution variance remains possible",
+                    "tag": "acknowledged",
+                    "reasoning": "Captured in dissent and risk watch.",
+                }
+            ],
+            "tie_break": False,
+            "risk_watch": risk_watch or [],
+        }
+    )
+
+
+def _seed_mock_council_roles(tool_registry: HermesToolRegistry) -> None:
+    if not isinstance(tool_registry, MockHermesRuntime):
+        return
+    tool_registry.set_mock_response(
+        "delegate:strategist",
+        json.dumps(
+            {
+                "role": "strategist",
+                "case_for": "The opportunity has a credible route from validated signal to execution.",
+                "market_fit_score": 0.77,
+                "timing_assessment": "Current operator workflow evidence supports moving forward.",
+                "strategic_alignment": "Fits the local-first commercial engine.",
+                "key_assumption": "The initial operator proof generalises to the next phase.",
+            }
+        ),
+    )
+    tool_registry.set_mock_response(
+        "delegate:critic",
+        json.dumps(
+            {
+                "role": "critic",
+                "case_against": "The current evidence is still narrow and could hide delivery risk.",
+                "execution_risk": "Phase handoff could amplify coordination mistakes.",
+                "market_risk": "Signal may reflect a narrow segment.",
+                "fatal_dependency": "Reliable project gate execution.",
+                "risk_severity": 0.58,
+            }
+        ),
+    )
+    tool_registry.set_mock_response(
+        "delegate:realist",
+        json.dumps(
+            {
+                "role": "realist",
+                "execution_requirements": "Maintain deterministic gate handling and operator visibility.",
+                "compute_needs": "Local execution with occasional council deliberation.",
+                "time_to_revenue_days": 45,
+                "capital_required_usd": 0,
+                "blocking_prerequisite": "Qualified opportunity must pass phase gate.",
+                "feasibility_score": 0.71,
+            }
+        ),
+    )
+    tool_registry.set_mock_response(
+        "delegate:devils_advocate",
+        json.dumps(
+            {
+                "role": "devils_advocate",
+                "shared_assumption": "The current workflow proof is representative of future load.",
+                "novel_risk": "Brief quality can degrade if corroboration lags.",
+                "material_disagreement": "The gate may be too optimistic about downstream execution.",
+                "alternative_interpretation": "Proceeding now may just defer a necessary pause by one phase.",
+            }
+        ),
+    )
+
+
+def _seed_mock_council_synthesis(
+    tool_registry: HermesToolRegistry,
+    *,
+    decision_type: str,
+    recommendation: str,
+    confidence: float,
+    reasoning_summary: str,
+    dissenting_views: str,
+    risk_watch: list[str] | None = None,
+) -> None:
+    if not isinstance(tool_registry, MockHermesRuntime):
+        return
+    tool_registry.set_mock_response(
+        "delegate:synthesis",
+        _mock_council_synthesis(
+            decision_type,
+            recommendation=recommendation,
+            confidence=confidence,
+            reasoning_summary=reasoning_summary,
+            dissenting_views=dissenting_views,
+            risk_watch=risk_watch,
+        ),
+    )
+
+
+def _phase_gate_verdict_from_council(recommendation: str) -> str:
+    if recommendation == "PURSUE":
+        return "CONTINUE"
+    if recommendation == "REJECT":
+        return "KILL_RECOMMEND"
+    return "PAUSE"
+
+
 def _ensure_operator_workflow_chain_definition(config: IntegrationConfig, chain_type: str = "operator_workflow") -> None:
     db_manager = DatabaseManager(config.data_dir)
     try:
@@ -105,8 +235,15 @@ def _ensure_operator_workflow_chain_definition(config: IntegrationConfig, chain_
                 {"step_type": "heartbeat", "skill": "operator_interface"},
                 {"step_type": "sheriff", "skill": "immune_system"},
                 {"step_type": "route", "skill": "financial_router"},
+                {"step_type": "create_opportunity_task", "skill": "research_domain_2"},
                 {"step_type": "write_brief", "skill": "strategic_memory"},
                 {"step_type": "read_brief", "skill": "strategic_memory"},
+                {"step_type": "route_opportunity_brief", "skill": "research_domain_2"},
+                {"step_type": "create_harvest_task", "skill": "research_domain_2"},
+                {"step_type": "route_harvest_brief", "skill": "research_domain_2"},
+                {"step_type": "phase_gate_trigger", "skill": "opportunity_pipeline"},
+                {"step_type": "council_phase_gate", "skill": "council"},
+                {"step_type": "phase_gate_apply", "skill": "opportunity_pipeline"},
                 {"step_type": "judge", "skill": "immune_system"},
                 {"step_type": "alert", "skill": "operator_interface"},
                 {"step_type": "digest", "skill": "operator_interface"},
@@ -499,10 +636,10 @@ def run_operator_workflow(
     session_context: HermesSessionContext | None = None,
     model_name: str = "local-default",
     task_id: str = "stage0-operator-workflow",
-    title: str = "Stage 0/1 operator workflow smoke test",
-    summary: str = "Validated bootstrap, routing, memory, and operator alert smoke test.",
+    title: str = "Operator workflow smoke test",
+    summary: str = "Validated bootstrap, routing, council-backed opportunity review, and operator alert smoke test.",
 ) -> OperatorWorkflowResult:
-    """Run one narrow operator path end-to-end against the configured runtime."""
+    """Run one deterministic operator workflow plus council-backed project flow."""
     resolved_config = config or IntegrationConfig()
     install_runtime_profile(resolved_config)
     bootstrap = bootstrap_runtime(
@@ -515,6 +652,43 @@ def run_operator_workflow(
     session_id = bootstrap.session_context.session_id
     chain_id = task_id
     _ensure_operator_workflow_chain_definition(resolved)
+    _seed_mock_council_roles(tool_registry)
+
+    sheriff_outcome = "error"
+    routing_tier: str | None = None
+    brief_id: str | None = None
+    readback: dict[str, Any] | None = None
+    opportunity_id: str | None = None
+    harvest_id: str | None = None
+    project_id: str | None = None
+    phase_gate_id: str | None = None
+    phase_gate_verdict: str | None = None
+    council_verdict_ids: list[str] = []
+    alert_id: str | None = None
+    digest_payload: dict[str, Any] | None = None
+
+    def _fail(error: str | None, *, observability: WorkflowObservabilitySnapshot | None = None) -> OperatorWorkflowResult:
+        doctor = doctor_runtime(tool_registry, config=resolved, bootstrap_if_needed=False)
+        return OperatorWorkflowResult(
+            ok=False,
+            bootstrap=bootstrap,
+            sheriff_outcome=sheriff_outcome,
+            routing_tier=routing_tier,
+            brief_id=brief_id,
+            readback=readback,
+            opportunity_id=opportunity_id,
+            harvest_id=harvest_id,
+            project_id=project_id,
+            phase_gate_id=phase_gate_id,
+            phase_gate_verdict=phase_gate_verdict,
+            council_verdict_ids=list(council_verdict_ids),
+            alert_id=alert_id,
+            digest_id=None if digest_payload is None else digest_payload.get("digest_id"),
+            digest=digest_payload,
+            observability=observability,
+            doctor=doctor,
+            error=error,
+        )
 
     heartbeat = tool_registry.invoke_tool(
         "operator_interface",
@@ -524,29 +698,9 @@ def run_operator_workflow(
             "channel": "CLI",
         },
     )
-    _record_tool_step(
-        resolved,
-        chain_id=chain_id,
-        step_type="heartbeat",
-        skill="operator_interface",
-        result=heartbeat,
-    )
+    _record_tool_step(resolved, chain_id=chain_id, step_type="heartbeat", skill="operator_interface", result=heartbeat)
     if not heartbeat.success:
-        doctor = doctor_runtime(tool_registry, config=resolved, bootstrap_if_needed=False)
-        return OperatorWorkflowResult(
-            ok=False,
-            bootstrap=bootstrap,
-            sheriff_outcome="error",
-            routing_tier=None,
-            brief_id=None,
-            readback=None,
-            alert_id=None,
-            digest_id=None,
-            digest=None,
-            observability=None,
-            doctor=doctor,
-            error=heartbeat.error,
-        )
+        return _fail(heartbeat.error)
 
     sheriff = tool_registry.invoke_tool(
         "immune_system",
@@ -563,47 +717,14 @@ def run_operator_workflow(
             ),
         },
     )
-    _record_tool_step(
-        resolved,
-        chain_id=chain_id,
-        step_type="sheriff",
-        skill="immune_system",
-        result=sheriff,
-    )
+    _record_tool_step(resolved, chain_id=chain_id, step_type="sheriff", skill="immune_system", result=sheriff)
     if not sheriff.success:
-        doctor = doctor_runtime(tool_registry, config=resolved, bootstrap_if_needed=False)
-        return OperatorWorkflowResult(
-            ok=False,
-            bootstrap=bootstrap,
-            sheriff_outcome="error",
-            routing_tier=None,
-            brief_id=None,
-            readback=None,
-            alert_id=None,
-            digest_id=None,
-            digest=None,
-            observability=None,
-            doctor=doctor,
-            error=sheriff.error,
-        )
+        return _fail(sheriff.error)
     sheriff_verdict = sheriff.output
+    sheriff_outcome = sheriff_verdict.outcome.value
     _persist_immune_verdict(resolved, sheriff_verdict, sheriff.duration_ms)
     if sheriff_verdict.outcome == Outcome.BLOCK:
-        doctor = doctor_runtime(tool_registry, config=resolved, bootstrap_if_needed=False)
-        return OperatorWorkflowResult(
-            ok=False,
-            bootstrap=bootstrap,
-            sheriff_outcome=sheriff_verdict.outcome.value,
-            routing_tier=None,
-            brief_id=None,
-            readback=None,
-            alert_id=None,
-            digest_id=None,
-            digest=None,
-            observability=None,
-            doctor=doctor,
-            error="workflow blocked by sheriff",
-        )
+        return _fail("workflow blocked by sheriff")
 
     route = tool_registry.invoke_tool(
         "financial_router",
@@ -620,66 +741,81 @@ def run_operator_workflow(
             "jwt": JWTClaims(session_id=session_id),
         },
     )
-    route_quality_warning = bool(route.success and getattr(route.output, "quality_warning", False))
     _record_tool_step(
         resolved,
         chain_id=chain_id,
         step_type="route",
         skill="financial_router",
         result=route,
-        quality_warning=route_quality_warning,
+        quality_warning=bool(route.success and getattr(route.output, "quality_warning", False)),
     )
     if not route.success:
-        doctor = doctor_runtime(tool_registry, config=resolved, bootstrap_if_needed=False)
-        return OperatorWorkflowResult(
-            ok=False,
-            bootstrap=bootstrap,
-            sheriff_outcome=sheriff_verdict.outcome.value,
-            routing_tier=None,
-            brief_id=None,
-            readback=None,
-            alert_id=None,
-            digest_id=None,
-            digest=None,
-            observability=None,
-            doctor=doctor,
-            error=route.error,
-        )
+        return _fail(route.error)
     routing_decision = route.output
+    routing_tier = routing_decision.tier.value
 
-    write_result = tool_registry.invoke_tool(
-        "strategic_memory",
+    opportunity_task = tool_registry.invoke_tool(
+        "research_domain_2",
         {
-            "action": "write_brief",
-            "task_id": task_id,
+            "action": "create_task",
             "title": title,
-            "summary": summary,
-            "confidence": 0.8,
+            "brief": summary,
+            "priority": "P1_HIGH",
+            "tags": ["runtime", "council", "opportunity"],
         },
     )
     _record_tool_step(
         resolved,
         chain_id=chain_id,
-        step_type="write_brief",
-        skill="strategic_memory",
-        result=write_result,
+        step_type="create_opportunity_task",
+        skill="research_domain_2",
+        result=opportunity_task,
     )
+    if not opportunity_task.success:
+        return _fail(opportunity_task.error)
+    opportunity_task_id = opportunity_task.output
+
+    write_result = tool_registry.invoke_tool(
+        "strategic_memory",
+        {
+            "action": "write_brief",
+            "task_id": opportunity_task_id,
+            "title": title,
+            "summary": summary,
+            "confidence": 0.82,
+            "actionability": "ACTION_RECOMMENDED",
+            "action_type": "opportunity_feed",
+            "depth_tier": "FULL",
+            "tags": ["runtime", "council", "project-gate"],
+            "source_urls": ["https://example.com/runtime", "https://api.example.com/runtime"],
+            "source_assessments": [
+                {
+                    "url": "https://example.com/runtime",
+                    "relevance": 0.86,
+                    "freshness": "2026-04-15",
+                    "source_type": "tier2_web",
+                },
+                {
+                    "url": "https://api.example.com/runtime",
+                    "relevance": 0.91,
+                    "freshness": "2026-04-15",
+                    "source_type": "tier1_api",
+                },
+            ],
+            "uncertainty_statement": (
+                "We still need more real production repetitions to know whether the validated workflow "
+                "holds under broader operator load."
+            ),
+            "counter_thesis": (
+                "The strongest reason this could fail is that the current proof overfits the happy path "
+                "and underestimates downstream delivery friction."
+            ),
+            "provenance_links": ["runtime-proof", "operator-workflow"],
+        },
+    )
+    _record_tool_step(resolved, chain_id=chain_id, step_type="write_brief", skill="strategic_memory", result=write_result)
     if not write_result.success:
-        doctor = doctor_runtime(tool_registry, config=resolved, bootstrap_if_needed=False)
-        return OperatorWorkflowResult(
-            ok=False,
-            bootstrap=bootstrap,
-            sheriff_outcome=sheriff_verdict.outcome.value,
-            routing_tier=routing_decision.tier.value,
-            brief_id=None,
-            readback=None,
-            alert_id=None,
-            digest_id=None,
-            digest=None,
-            observability=None,
-            doctor=doctor,
-            error=write_result.error,
-        )
+        return _fail(write_result.error)
     brief_id = write_result.output
 
     read_result = tool_registry.invoke_tool(
@@ -689,29 +825,250 @@ def run_operator_workflow(
             "brief_id": brief_id,
         },
     )
+    _record_tool_step(resolved, chain_id=chain_id, step_type="read_brief", skill="strategic_memory", result=read_result)
+    if not read_result.success:
+        return _fail(read_result.error)
+    readback = read_result.output
+
+    complete_opportunity_task = tool_registry.invoke_tool(
+        "research_domain_2",
+        {
+            "action": "complete_task",
+            "task_id": opportunity_task_id,
+            "output_brief_id": brief_id,
+            "actual_spend_usd": 0.0,
+        },
+    )
+    if not complete_opportunity_task.success:
+        return _fail(complete_opportunity_task.error)
+
+    _seed_mock_council_synthesis(
+        tool_registry,
+        decision_type="opportunity_screen",
+        recommendation="PURSUE",
+        confidence=0.74,
+        reasoning_summary="The brief is sufficiently corroborated to advance into validation.",
+        dissenting_views="The evidence is promising but still drawn from a narrow slice of execution data.",
+        risk_watch=["brief quality drift", "phase gate throughput"],
+    )
+    route_opportunity_brief = tool_registry.invoke_tool(
+        "research_domain_2",
+        {
+            "action": "route_task_output",
+            "task_id": opportunity_task_id,
+            "include_council_review": True,
+        },
+    )
     _record_tool_step(
         resolved,
         chain_id=chain_id,
-        step_type="read_brief",
-        skill="strategic_memory",
-        result=read_result,
+        step_type="route_opportunity_brief",
+        skill="research_domain_2",
+        result=route_opportunity_brief,
     )
-    if not read_result.success:
-        doctor = doctor_runtime(tool_registry, config=resolved, bootstrap_if_needed=False)
-        return OperatorWorkflowResult(
-            ok=False,
-            bootstrap=bootstrap,
-            sheriff_outcome=sheriff_verdict.outcome.value,
-            routing_tier=routing_decision.tier.value,
-            brief_id=brief_id,
-            readback=None,
-            alert_id=None,
-            digest_id=None,
-            digest=None,
-            observability=None,
-            doctor=doctor,
-            error=read_result.error,
-        )
+    if not route_opportunity_brief.success:
+        return _fail(route_opportunity_brief.error)
+    for action in route_opportunity_brief.output["actions"]:
+        if action["type"] in {"opportunity_created", "opportunity_existing"}:
+            opportunity_id = action["opportunity_id"]
+        if action["type"] == "council_review_created":
+            council_verdict_ids.append(action["verdict_id"])
+    if opportunity_id is None:
+        return _fail("opportunity routing did not produce an opportunity id")
+
+    harvest_task = tool_registry.invoke_tool(
+        "research_domain_2",
+        {
+            "action": "create_task",
+            "title": f"{title} harvest",
+            "brief": "Gather one subscription-only corroboration input for the runtime proof.",
+            "priority": "P1_HIGH",
+            "tags": ["runtime", "harvest"],
+        },
+    )
+    _record_tool_step(
+        resolved,
+        chain_id=chain_id,
+        step_type="create_harvest_task",
+        skill="research_domain_2",
+        result=harvest_task,
+    )
+    if not harvest_task.success:
+        return _fail(harvest_task.error)
+    harvest_task_id = harvest_task.output
+
+    harvest_brief = tool_registry.invoke_tool(
+        "strategic_memory",
+        {
+            "action": "write_brief",
+            "task_id": harvest_task_id,
+            "title": f"{title} harvest",
+            "summary": "The workflow needs one subscription-only corroboration step.",
+            "confidence": 0.66,
+            "actionability": "HARVEST_NEEDED",
+            "action_type": "operator_surface",
+        },
+    )
+    if not harvest_brief.success:
+        return _fail(harvest_brief.error)
+
+    complete_harvest_task = tool_registry.invoke_tool(
+        "research_domain_2",
+        {
+            "action": "complete_task",
+            "task_id": harvest_task_id,
+            "output_brief_id": harvest_brief.output,
+            "actual_spend_usd": 0.0,
+        },
+    )
+    if not complete_harvest_task.success:
+        return _fail(complete_harvest_task.error)
+
+    route_harvest_brief = tool_registry.invoke_tool(
+        "research_domain_2",
+        {
+            "action": "route_task_output",
+            "task_id": harvest_task_id,
+            "target_interface": "Claude Pro web",
+            "harvest_prompt": "Review the workflow proof and extract the missing corroboration data point.",
+        },
+    )
+    _record_tool_step(
+        resolved,
+        chain_id=chain_id,
+        step_type="route_harvest_brief",
+        skill="research_domain_2",
+        result=route_harvest_brief,
+    )
+    if not route_harvest_brief.success:
+        return _fail(route_harvest_brief.error)
+    for action in route_harvest_brief.output["actions"]:
+        if action["type"] in {"harvest_request_created", "harvest_request_existing"}:
+            harvest_id = action["harvest_id"]
+            break
+    if harvest_id is None:
+        return _fail("harvest routing did not produce a harvest request id")
+
+    transition_validation = tool_registry.invoke_tool(
+        "opportunity_pipeline",
+        {
+            "action": "transition_opportunity",
+            "opportunity_id": opportunity_id,
+            "new_status": "IN_VALIDATION",
+            "validation_report": f"Council-reviewed runtime opportunity from brief {brief_id}.",
+            "validation_spend": 0.0,
+            "council_verdict_id": council_verdict_ids[0] if council_verdict_ids else None,
+        },
+    )
+    if not transition_validation.success:
+        return _fail(transition_validation.error)
+    transition_go_no_go = tool_registry.invoke_tool(
+        "opportunity_pipeline",
+        {
+            "action": "transition_opportunity",
+            "opportunity_id": opportunity_id,
+            "new_status": "GO_NO_GO",
+            "validation_report": "Validation complete. Ready for deterministic handoff into project flow.",
+            "council_verdict_id": council_verdict_ids[0] if council_verdict_ids else None,
+        },
+    )
+    if not transition_go_no_go.success:
+        return _fail(transition_go_no_go.error)
+
+    project_handoff = tool_registry.invoke_tool(
+        "opportunity_pipeline",
+        {
+            "action": "handoff_to_project",
+            "opportunity_id": opportunity_id,
+            "project_name": f"{title} Project",
+        },
+    )
+    if not project_handoff.success:
+        return _fail(project_handoff.error)
+    project_id = project_handoff.output["project_id"]
+
+    phase_gate_trigger = tool_registry.invoke_tool(
+        "opportunity_pipeline",
+        {
+            "action": "trigger_phase_gate",
+            "project_id": project_id,
+            "trigger": "BUDGET_EXHAUSTED",
+            "outputs_summary": "Validated workflow, one qualified opportunity, and one pending harvest request created.",
+            "cashflow_forecast_usd": 1000.0,
+            "kill_score_current": 0.46,
+            "kill_signals": [
+                {"signal_type": "cashflow_vs_forecast", "raw_score": 0.5},
+                {"signal_type": "operator_load", "raw_score": 0.4},
+            ],
+        },
+    )
+    _record_tool_step(
+        resolved,
+        chain_id=chain_id,
+        step_type="phase_gate_trigger",
+        skill="opportunity_pipeline",
+        result=phase_gate_trigger,
+    )
+    if not phase_gate_trigger.success:
+        return _fail(phase_gate_trigger.error)
+    phase_gate_id = phase_gate_trigger.output["gate_id"]
+
+    _seed_mock_council_synthesis(
+        tool_registry,
+        decision_type="phase_gate",
+        recommendation="PURSUE",
+        confidence=0.67,
+        reasoning_summary="The gate context supports continuing into the next phase with a focused scope amendment.",
+        dissenting_views="The pending harvest request still leaves one evidence gap to monitor closely.",
+        risk_watch=["pending harvest", "cashflow tracking"],
+    )
+    phase_gate_council = tool_registry.invoke_tool(
+        "council",
+        {
+            "action": "deliberate",
+            "decision_type": "phase_gate",
+            "subject_id": project_id,
+            "context": json.dumps(phase_gate_trigger.output["context_packet"], sort_keys=True),
+            "source_briefs": [brief_id],
+        },
+    )
+    _record_tool_step(
+        resolved,
+        chain_id=chain_id,
+        step_type="council_phase_gate",
+        skill="council",
+        result=phase_gate_council,
+    )
+    if not phase_gate_council.success:
+        return _fail(phase_gate_council.error)
+    phase_gate_council_verdict = phase_gate_council.output
+    council_verdict_ids.append(phase_gate_council_verdict.verdict_id)
+    phase_gate_verdict = _phase_gate_verdict_from_council(phase_gate_council_verdict.recommendation.value)
+
+    apply_phase_gate = tool_registry.invoke_tool(
+        "opportunity_pipeline",
+        {
+            "action": "apply_phase_gate_verdict",
+            "project_id": project_id,
+            "verdict": phase_gate_verdict,
+            "confidence": phase_gate_council_verdict.confidence,
+            "rationale": phase_gate_council_verdict.reasoning_summary,
+            "dissent_log": [phase_gate_council_verdict.dissenting_views],
+            "gate_id": phase_gate_id,
+            "next_phase_amendments": {
+                "scope_delta": "Prioritise the validated deterministic workflow slice before expanding.",
+            },
+        },
+    )
+    _record_tool_step(
+        resolved,
+        chain_id=chain_id,
+        step_type="phase_gate_apply",
+        skill="opportunity_pipeline",
+        result=apply_phase_gate,
+    )
+    if not apply_phase_gate.success:
+        return _fail(apply_phase_gate.error)
 
     judge = tool_registry.invoke_tool(
         "immune_system",
@@ -720,52 +1077,18 @@ def run_operator_workflow(
             "payload": JudgePayload(
                 session_id=session_id,
                 skill_name="operator_workflow",
-                tool_name="strategic_memory",
-                output=read_result.output,
+                tool_name="opportunity_pipeline",
+                output=apply_phase_gate.output,
             ),
         },
     )
-    _record_tool_step(
-        resolved,
-        chain_id=chain_id,
-        step_type="judge",
-        skill="immune_system",
-        result=judge,
-    )
+    _record_tool_step(resolved, chain_id=chain_id, step_type="judge", skill="immune_system", result=judge)
     if not judge.success:
-        doctor = doctor_runtime(tool_registry, config=resolved, bootstrap_if_needed=False)
-        return OperatorWorkflowResult(
-            ok=False,
-            bootstrap=bootstrap,
-            sheriff_outcome=sheriff_verdict.outcome.value,
-            routing_tier=routing_decision.tier.value,
-            brief_id=brief_id,
-            readback=read_result.output,
-            alert_id=None,
-            digest_id=None,
-            digest=None,
-            observability=None,
-            doctor=doctor,
-            error=judge.error,
-        )
+        return _fail(judge.error)
     judge_verdict = judge.output
     _persist_immune_verdict(resolved, judge_verdict, judge.duration_ms)
     if judge_verdict.outcome == Outcome.BLOCK:
-        doctor = doctor_runtime(tool_registry, config=resolved, bootstrap_if_needed=False)
-        return OperatorWorkflowResult(
-            ok=False,
-            bootstrap=bootstrap,
-            sheriff_outcome=sheriff_verdict.outcome.value,
-            routing_tier=routing_decision.tier.value,
-            brief_id=brief_id,
-            readback=read_result.output,
-            alert_id=None,
-            digest_id=None,
-            digest=None,
-            observability=None,
-            doctor=doctor,
-            error="workflow blocked by judge",
-        )
+        return _fail("workflow blocked by judge")
 
     alert_result = tool_registry.invoke_tool(
         "operator_interface",
@@ -773,32 +1096,16 @@ def run_operator_workflow(
             "action": "alert",
             "tier": "T1",
             "alert_type": "WORKFLOW_SMOKE_TEST",
-            "content": f"Workflow {task_id} stored brief {brief_id} via {routing_decision.tier.value}.",
+            "content": (
+                f"Workflow {task_id} advanced opportunity {opportunity_id} into project {project_id}, "
+                f"recorded harvest {harvest_id}, and applied {phase_gate_verdict}."
+            ),
         },
     )
-    _record_tool_step(
-        resolved,
-        chain_id=chain_id,
-        step_type="alert",
-        skill="operator_interface",
-        result=alert_result,
-    )
+    _record_tool_step(resolved, chain_id=chain_id, step_type="alert", skill="operator_interface", result=alert_result)
     if not alert_result.success:
-        doctor = doctor_runtime(tool_registry, config=resolved, bootstrap_if_needed=False)
-        return OperatorWorkflowResult(
-            ok=False,
-            bootstrap=bootstrap,
-            sheriff_outcome=sheriff_verdict.outcome.value,
-            routing_tier=routing_decision.tier.value,
-            brief_id=brief_id,
-            readback=read_result.output,
-            alert_id=None,
-            digest_id=None,
-            digest=None,
-            observability=None,
-            doctor=doctor,
-            error=alert_result.error,
-        )
+        return _fail(alert_result.error)
+    alert_id = alert_result.output
 
     digest_result = tool_registry.invoke_tool(
         "operator_interface",
@@ -808,56 +1115,30 @@ def run_operator_workflow(
             "operator_state": "ACTIVE",
         },
     )
-    _record_tool_step(
-        resolved,
-        chain_id=chain_id,
-        step_type="digest",
-        skill="operator_interface",
-        result=digest_result,
-    )
+    _record_tool_step(resolved, chain_id=chain_id, step_type="digest", skill="operator_interface", result=digest_result)
     if not digest_result.success:
-        doctor = doctor_runtime(tool_registry, config=resolved, bootstrap_if_needed=False)
-        return OperatorWorkflowResult(
-            ok=False,
-            bootstrap=bootstrap,
-            sheriff_outcome=sheriff_verdict.outcome.value,
-            routing_tier=routing_decision.tier.value,
-            brief_id=brief_id,
-            readback=read_result.output,
-            alert_id=alert_result.output,
-            digest_id=None,
-            digest=None,
-            observability=None,
-            doctor=doctor,
-            error=digest_result.error,
-        )
+        return _fail(digest_result.error)
+    digest_payload = digest_result.output
 
-    observability_alerts = tool_registry.invoke_tool(
+    observability_alerts = tool_registry.invoke_tool("observability", {"action": "query_alert_history", "limit": 5})
+    observability_council = tool_registry.invoke_tool(
         "observability",
-        {"action": "query_alert_history", "limit": 5},
+        {"action": "query_council_verdicts", "limit": 10, "project_id": project_id},
     )
-    observability_digests = tool_registry.invoke_tool(
-        "observability",
-        {"action": "recent_digests", "limit": 3},
-    )
-    observability_immune = tool_registry.invoke_tool(
-        "observability",
-        {"action": "query_immune_verdicts", "limit": 5},
-    )
+    observability_digests = tool_registry.invoke_tool("observability", {"action": "recent_digests", "limit": 3})
+    observability_immune = tool_registry.invoke_tool("observability", {"action": "query_immune_verdicts", "limit": 5})
     observability_telemetry = tool_registry.invoke_tool(
         "observability",
-        {"action": "query_telemetry", "chain_id": chain_id, "limit": 20},
+        {"action": "query_telemetry", "chain_id": chain_id, "limit": 30},
     )
     observability_reliability = tool_registry.invoke_tool(
         "observability",
         {"action": "reliability_dashboard", "limit": 10},
     )
-    observability_health = tool_registry.invoke_tool(
-        "observability",
-        {"action": "system_health"},
-    )
+    observability_health = tool_registry.invoke_tool("observability", {"action": "system_health"})
     observability_results = [
         observability_alerts,
+        observability_council,
         observability_digests,
         observability_immune,
         observability_telemetry,
@@ -866,24 +1147,11 @@ def run_operator_workflow(
     ]
     first_failure = next((item for item in observability_results if not item.success), None)
     if first_failure is not None:
-        doctor = doctor_runtime(tool_registry, config=resolved, bootstrap_if_needed=False)
-        return OperatorWorkflowResult(
-            ok=False,
-            bootstrap=bootstrap,
-            sheriff_outcome=sheriff_verdict.outcome.value,
-            routing_tier=routing_decision.tier.value,
-            brief_id=brief_id,
-            readback=read_result.output,
-            alert_id=alert_result.output,
-            digest_id=digest_result.output.get("digest_id"),
-            digest=digest_result.output,
-            observability=None,
-            doctor=doctor,
-            error=first_failure.error,
-        )
+        return _fail(first_failure.error)
 
     observability = WorkflowObservabilitySnapshot(
         alert_history=observability_alerts.output,
+        council_verdicts=observability_council.output,
         digest_history=observability_digests.output,
         immune_verdicts=observability_immune.output,
         telemetry_events=observability_telemetry.output,
@@ -894,13 +1162,19 @@ def run_operator_workflow(
     return OperatorWorkflowResult(
         ok=doctor.ok,
         bootstrap=bootstrap,
-        sheriff_outcome=sheriff_verdict.outcome.value,
-        routing_tier=routing_decision.tier.value,
+        sheriff_outcome=sheriff_outcome,
+        routing_tier=routing_tier,
         brief_id=brief_id,
-        readback=read_result.output,
-        alert_id=alert_result.output,
-        digest_id=digest_result.output["digest_id"],
-        digest=digest_result.output,
+        readback=readback,
+        opportunity_id=opportunity_id,
+        harvest_id=harvest_id,
+        project_id=project_id,
+        phase_gate_id=phase_gate_id,
+        phase_gate_verdict=phase_gate_verdict,
+        council_verdict_ids=list(council_verdict_ids),
+        alert_id=alert_id,
+        digest_id=digest_payload["digest_id"],
+        digest=digest_payload,
         observability=observability,
         doctor=doctor,
         error=None if doctor.ok else "doctor reported missing runtime components",
@@ -912,7 +1186,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bootstrap-live", action="store_true", help="Bootstrap the runtime against the selected registry")
     parser.add_argument("--install-profile", action="store_true", help="Install a local Hermes runtime profile bundle")
     parser.add_argument("--doctor", action="store_true", help="Verify runtime layout, databases, and skill registration")
-    parser.add_argument("--operator-workflow", action="store_true", help="Run the Stage 0/1 operator workflow smoke test")
+    parser.add_argument("--operator-workflow", action="store_true", help="Run the operator workflow plus council-backed project smoke test")
     parser.add_argument("--data-dir", default="~/.hermes/data/")
     parser.add_argument("--skills-dir", default="~/.hermes/skills/hybrid-autonomous-ai/")
     parser.add_argument("--checkpoints-dir", default="~/.hermes/skills/hybrid-autonomous-ai/checkpoints/")
@@ -921,10 +1195,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-name", default="local-default")
     parser.add_argument("--repo-root", default=None, help="Override the repository root used for profile installation")
     parser.add_argument("--task-id", default="stage0-operator-workflow")
-    parser.add_argument("--title", default="Stage 0/1 operator workflow smoke test")
+    parser.add_argument("--title", default="Operator workflow smoke test")
     parser.add_argument(
         "--summary",
-        default="Validated bootstrap, routing, memory, and operator alert smoke test.",
+        default="Validated bootstrap, routing, council-backed opportunity review, and operator alert smoke test.",
     )
     return parser
 

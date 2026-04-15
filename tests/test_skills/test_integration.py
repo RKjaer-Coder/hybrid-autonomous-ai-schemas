@@ -74,10 +74,17 @@ def test_run_operator_workflow_proves_stage0_operator_path(tmp_path):
     assert result.brief_id
     assert result.readback is not None
     assert result.readback["title"] == "Stage 0 Proof"
+    assert result.opportunity_id
+    assert result.harvest_id
+    assert result.project_id
+    assert result.phase_gate_id
+    assert result.phase_gate_verdict == "CONTINUE"
+    assert len(result.council_verdict_ids) == 2
     assert result.alert_id
     assert result.digest_id
     assert result.digest is not None
-    assert "Stage 0 Proof (INFORMATIONAL)" in result.digest["content"]
+    assert "PENDING DECISIONS:" in result.digest["content"]
     assert result.observability is not None
     assert any(item["step_type"] == "digest" for item in result.observability.telemetry_events)
+    assert any(item["decision_type"] == "phase_gate" for item in result.observability.council_verdicts)
     assert result.observability.system_health["heartbeat_state"] == "ACTIVE"
