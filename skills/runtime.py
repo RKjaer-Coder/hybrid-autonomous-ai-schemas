@@ -2,12 +2,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shlex
+import shutil
+import sqlite3
+import subprocess
+import tarfile
+import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from financial_router.types import BudgetState, JWTClaims, ModelInfo, TaskMetadata
+from immune.patterns.policy_signatures import CONSTRUCTION_ALLOWLIST
 from immune.types import JudgePayload, Outcome, SheriffPayload, generate_uuid_v7
 from migrate import SCHEMAS, apply_schema, verify_database
 from skills.bootstrap import BootstrapOrchestrator
@@ -25,6 +33,40 @@ EXPECTED_CORE_TOOLS = (
     "operator_interface",
     "observability",
 )
+EXPECTED_SEED_TOOLS = (
+    "code_execution",
+    "file_operations",
+    "web_search",
+    "web_fetch",
+    "shell_command",
+)
+LEGACY_SPLIT_DATABASES = ("opportunity.db", "project.db", "treasury.db")
+MANIFEST_HERMES_VERSION_FLOOR = (0, 9, 0)
+CHECKLIST_HERMES_VERSION_FLOOR = (0, 8, 0)
+VERSION_DRIFT_NOTE = (
+    "spec drift: spec/00_manifest.md declares Hermes v0.9.0+ while "
+    "spec/s07_hermes_config.md §7.5c still says v0.8.0+."
+)
+PROFILE_DRIFT_NOTE = (
+    "repo/spec drift: --install-profile creates the repo-managed runtime bundle "
+    "under ~/.hermes/skills/.../runtime/, but it does not generate the "
+    "Hermes-native ~/.hermes/profiles/<profile>/profile.yaml that §7.5c D1-2 "
+    "still expects."
+)
+CHECKLIST_COVERAGE_NOTE = (
+    "coverage gap: readiness automates the repo-toolable Day 1–2 checks, but "
+    "it still relies on heuristic text matching for Hermes config schema "
+    "assertions because the repo does not yet own a canonical Hermes-native "
+    "profile.yaml generator."
+)
+EXPECTED_DANGEROUS_COMMAND_FAMILIES: dict[str, tuple[str, ...]] = {
+    "rm_rf": ("rm -rf", "rm\\s+(-[rrf]+\\s+)*[/~]"),
+    "chmod_777": ("chmod 777", "chmod\\s+[0-7]*777"),
+    "sudo_root": ("sudo", "su root", "su\\s+root", "doas"),
+    "disk_ops": ("mkfs", "fdisk", "dd if=", "of=/dev"),
+    "firewall_ops": ("iptables", "ufw", "firewall-cmd"),
+}
+CONFIG_LOCAL_TOKENS = tuple(sorted({*(str(port) for port in CONSTRUCTION_ALLOWLIST.permitted_ports), "localhost", "127.0.0.1", "::1"}))
 
 
 @dataclass(frozen=True)
@@ -60,6 +102,47 @@ class RuntimeDoctorResult:
     registered_tools: list[str]
     missing_items: list[str]
     profile_manifest_path: str
+
+
+@dataclass(frozen=True)
+class ExternalCommandResult:
+    """Captured result from a Hermes CLI probe."""
+
+    ok: bool
+    command: tuple[str, ...]
+    returncode: int
+    stdout: str
+    stderr: str
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class HermesReadinessResult:
+    """Readiness report for attaching the repo runtime to a real Hermes install."""
+
+    ok: bool
+    config: IntegrationConfig
+    hermes_installed: bool
+    hermes_version: str | None
+    hermes_version_ok: bool
+    profile_listed: bool
+    live_tools: list[str]
+    seed_tool_status: dict[str, bool]
+    config_status: dict[str, bool]
+    path_status: dict[str, bool]
+    database_status: dict[str, bool]
+    legacy_database_files: list[str]
+    cli_smoke_attempted: bool
+    cli_smoke_ok: bool
+    cli_smoke_marker: str | None
+    cli_smoke_step_outcomes_delta: int
+    cli_smoke_log_trace: bool
+    cli_smoke_output: str | None
+    checkpoint_backup_path: str | None
+    blocking_items: list[str]
+    drift_items: list[str]
+    install: RuntimeProfileInstallResult
+    doctor: RuntimeDoctorResult
 
 
 @dataclass(frozen=True)
@@ -395,12 +478,172 @@ def _runtime_launcher_paths(config: IntegrationConfig) -> dict[str, Path]:
     return {
         "bootstrap": bin_dir / "bootstrap_runtime.sh",
         "doctor": bin_dir / "doctor_runtime.sh",
+        "readiness": bin_dir / "readiness_runtime.sh",
         "operator_workflow": bin_dir / "run_operator_workflow.sh",
     }
 
 
 def _linked_skills_dir(config: IntegrationConfig) -> Path:
     return _runtime_bundle_dir(config) / "linked_skills"
+
+
+def _runtime_root(config: IntegrationConfig) -> Path:
+    return Path(config.data_dir).expanduser().resolve().parent
+
+
+def _runtime_profile_dir(config: IntegrationConfig) -> Path:
+    return _runtime_root(config) / "profiles" / config.profile_name
+
+
+def _run_external_command(argv: Sequence[str]) -> ExternalCommandResult:
+    command = tuple(str(part) for part in argv)
+    try:
+        completed = subprocess.run(
+            list(command),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        return ExternalCommandResult(
+            ok=False,
+            command=command,
+            returncode=-1,
+            stdout="",
+            stderr="",
+            error=str(exc),
+        )
+    return ExternalCommandResult(
+        ok=completed.returncode == 0,
+        command=command,
+        returncode=completed.returncode,
+        stdout=completed.stdout.strip(),
+        stderr=completed.stderr.strip(),
+    )
+
+
+def _parse_semver(text: str) -> tuple[int, int, int] | None:
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", text)
+    if match is None:
+        return None
+    return tuple(int(part) for part in match.groups())
+
+
+def _extract_named_entries(text: str) -> list[str]:
+    names: set[str] = set()
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        token = re.split(r"\s+", stripped.lstrip("-*"), maxsplit=1)[0].rstrip(":,")
+        if re.fullmatch(r"[A-Za-z0-9_.-]+", token):
+            names.add(token)
+        for expected in EXPECTED_SEED_TOOLS:
+            if expected in stripped:
+                names.add(expected)
+    return sorted(names)
+
+
+def _format_probe_failure(result: ExternalCommandResult) -> str:
+    if result.error:
+        return result.error
+    stderr = result.stderr or "no stderr"
+    return f"exit {result.returncode}: {stderr}"
+
+
+def _run_command_candidates(
+    runner: Callable[[Sequence[str]], ExternalCommandResult],
+    candidates: Sequence[Sequence[str]],
+) -> ExternalCommandResult:
+    last_result: ExternalCommandResult | None = None
+    for candidate in candidates:
+        result = runner(candidate)
+        last_result = result
+        if result.ok:
+            return result
+    if last_result is None:
+        raise ValueError("at least one command candidate is required")
+    return last_result
+
+
+def _config_contains_any(text: str, tokens: Sequence[str]) -> bool:
+    lower = text.lower()
+    return any(token.lower() in lower for token in tokens)
+
+
+def _config_has_key_with_zero(text: str, key: str) -> bool:
+    return re.search(rf"{re.escape(key)}[^0-9-]*0(?:\.0+)?\b", text.lower()) is not None
+
+
+def _audit_config_texts(config_texts: Sequence[str]) -> dict[str, bool]:
+    merged = "\n".join(text for text in config_texts if text).lower()
+    dangerous_family_hits = {
+        family: _config_contains_any(merged, variants)
+        for family, variants in EXPECTED_DANGEROUS_COMMAND_FAMILIES.items()
+    }
+    approvals_not_off = not re.search(r"approvals(?:\s*:\s*|\..*?mode[^a-z]*)off\b", merged)
+    return {
+        "local_routing_endpoint": _config_contains_any(merged, CONFIG_LOCAL_TOKENS),
+        "strong_model_hint": _config_contains_any(merged, ("strong_model", "fallback_model", "priority_processing", "smart_model_routing")),
+        "max_api_spend_zero": _config_has_key_with_zero(merged, "max_api_spend_usd"),
+        "dangerous_command_patterns": all(dangerous_family_hits.values()),
+        "approvals_not_off": approvals_not_off,
+    }
+
+
+def _step_outcome_count(config: IntegrationConfig) -> int:
+    db_path = Path(config.data_dir) / "telemetry.db"
+    if not db_path.is_file():
+        return 0
+    with sqlite3.connect(db_path) as conn:
+        return int(conn.execute("SELECT COUNT(*) FROM step_outcomes").fetchone()[0])
+
+
+def _snapshot_runtime_data(config: IntegrationConfig) -> str:
+    checkpoint_dir = Path(config.checkpoints_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    stamp = _utc_now().replace(":", "").replace("-", "")
+    snapshot_path = checkpoint_dir / f"readiness-data-snapshot-{stamp}.tar.gz"
+    with tarfile.open(snapshot_path, "w:gz") as archive:
+        archive.add(Path(config.data_dir), arcname="data")
+    return str(snapshot_path)
+
+
+def _capture_log_state(log_dir: Path) -> dict[Path, tuple[float, int]]:
+    if not log_dir.is_dir():
+        return {}
+    return {
+        path: (path.stat().st_mtime, path.stat().st_size)
+        for path in log_dir.rglob("*")
+        if path.is_file()
+    }
+
+
+def _log_trace_present(log_dir: Path, previous_state: dict[Path, tuple[float, int]], marker: str) -> bool:
+    if not log_dir.is_dir():
+        return False
+    for path in sorted(log_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        stat = path.stat()
+        previous = previous_state.get(path)
+        if previous is not None and previous == (stat.st_mtime, stat.st_size):
+            continue
+        try:
+            content = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        lower = content.lower()
+        if marker.lower() in lower or "shell_command" in lower or "step_outcome" in lower:
+            return True
+    return False
+
+
+def _default_cli_smoke_query(marker: str) -> str:
+    return (
+        "Readiness smoke test. Use the shell_command tool exactly once to run "
+        f"`echo {marker}` and then reply with the echoed marker only."
+    )
 
 
 def _command_args(config: IntegrationConfig) -> list[str]:
@@ -505,6 +748,7 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
         "commands": {
             "bootstrap": _command_string(resolved, "--bootstrap-live", root),
             "doctor": _command_string(resolved, "--doctor", root),
+            "readiness": _command_string(resolved, "--readiness", root),
             "operator_workflow": _command_string(resolved, "--operator-workflow", root),
         },
     }
@@ -513,6 +757,7 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
 
     _write_launcher(launcher_paths["bootstrap"], resolved, root, "--bootstrap-live")
     _write_launcher(launcher_paths["doctor"], resolved, root, "--doctor")
+    _write_launcher(launcher_paths["readiness"], resolved, root, "--readiness")
     _write_launcher(launcher_paths["operator_workflow"], resolved, root, "--operator-workflow")
 
     return RuntimeProfileInstallResult(
@@ -596,6 +841,7 @@ def doctor_runtime(
         "profile_manifest": _runtime_profile_manifest_path(resolved).is_file(),
         "bootstrap_launcher": launcher_paths["bootstrap"].is_file(),
         "doctor_launcher": launcher_paths["doctor"].is_file(),
+        "readiness_launcher": launcher_paths["readiness"].is_file(),
         "operator_workflow_launcher": launcher_paths["operator_workflow"].is_file(),
     }
 
@@ -626,6 +872,223 @@ def doctor_runtime(
         registered_tools=registered_tools,
         missing_items=missing_items,
         profile_manifest_path=str(_runtime_profile_manifest_path(resolved)),
+    )
+
+
+def assess_hermes_readiness(
+    *,
+    config: IntegrationConfig | None = None,
+    repo_root: str | None = None,
+    hermes_binary: str = "hermes",
+    run_cli_smoke: bool = True,
+    smoke_query: str | None = None,
+    command_runner: Callable[[Sequence[str]], ExternalCommandResult] | None = None,
+    tool_registry: HermesToolRegistry | None = None,
+) -> HermesReadinessResult:
+    """Prepare repo-managed runtime artifacts and verify live Hermes readiness."""
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    install = install_runtime_profile(resolved, repo_root=repo_root)
+    database_status = migrate_runtime_databases(resolved)
+    registry = tool_registry or MockHermesRuntime(data_dir=resolved.data_dir)
+    doctor = doctor_runtime(registry, config=resolved)
+    checkpoint_backup_path = _snapshot_runtime_data(resolved)
+
+    profile_dir = _runtime_profile_dir(resolved)
+    profile_yaml = profile_dir / "profile.yaml"
+    logs_dir = _runtime_root(resolved) / "logs"
+    path_status = {
+        "data_dir": Path(resolved.data_dir).is_dir(),
+        "skills_dir": Path(resolved.skills_dir).is_dir(),
+        "checkpoints_dir": Path(resolved.checkpoints_dir).is_dir(),
+        "alerts_dir": Path(resolved.alerts_dir).is_dir(),
+        "runtime_bundle": _runtime_bundle_dir(resolved).is_dir(),
+        "profile_manifest": _runtime_profile_manifest_path(resolved).is_file(),
+        "profile_dir": profile_dir.is_dir(),
+        "profile_yaml": profile_yaml.is_file(),
+        "logs_dir": logs_dir.is_dir(),
+    }
+    legacy_database_files = sorted(
+        path.name
+        for path in Path(resolved.data_dir).glob("*.db")
+        if path.name in LEGACY_SPLIT_DATABASES
+    )
+
+    blocking_items: list[str] = []
+    drift_items = [VERSION_DRIFT_NOTE, PROFILE_DRIFT_NOTE, CHECKLIST_COVERAGE_NOTE]
+    missing_paths = [name for name, ok in path_status.items() if not ok]
+    if missing_paths:
+        blocking_items.append(f"missing expected Hermes paths: {', '.join(missing_paths)}")
+    failed_databases = [name for name, ok in database_status.items() if not ok]
+    if failed_databases:
+        blocking_items.append(f"schema deployment/verification failed for: {', '.join(failed_databases)}")
+    if legacy_database_files:
+        blocking_items.append(f"legacy split databases present: {', '.join(legacy_database_files)}")
+    if not doctor.ok:
+        blocking_items.append(
+            "install-profile/doctor compatibility failed: "
+            f"{', '.join(doctor.missing_items) if doctor.missing_items else 'unknown doctor error'}"
+        )
+
+    runner = command_runner or _run_external_command
+    hermes_installed = shutil.which(hermes_binary) is not None
+    hermes_version: str | None = None
+    hermes_version_ok = False
+    profile_listed = False
+    live_tools: list[str] = []
+    seed_tool_status = {tool_name: False for tool_name in EXPECTED_SEED_TOOLS}
+    config_status = {
+        "local_routing_endpoint": False,
+        "strong_model_hint": False,
+        "max_api_spend_zero": False,
+        "dangerous_command_patterns": False,
+        "approvals_not_off": False,
+    }
+    cli_smoke_attempted = False
+    cli_smoke_ok = False
+    cli_smoke_marker: str | None = None
+    cli_smoke_step_outcomes_delta = 0
+    cli_smoke_log_trace = False
+    cli_smoke_output: str | None = None
+
+    if not hermes_installed:
+        blocking_items.append(
+            f"Hermes CLI '{hermes_binary}' not found in PATH; install Hermes Agent before live readiness can pass."
+        )
+    else:
+        version_result = runner((hermes_binary, "--version"))
+        if not version_result.ok:
+            blocking_items.append(f"`{hermes_binary} --version` failed: {_format_probe_failure(version_result)}")
+        else:
+            parsed_version = _parse_semver(version_result.stdout or version_result.stderr)
+            if parsed_version is None:
+                blocking_items.append(
+                    f"Could not parse Hermes version from `{hermes_binary} --version`: "
+                    f"{version_result.stdout or version_result.stderr or 'empty output'}"
+                )
+            else:
+                hermes_version = ".".join(str(part) for part in parsed_version)
+                hermes_version_ok = parsed_version >= MANIFEST_HERMES_VERSION_FLOOR
+                if parsed_version < MANIFEST_HERMES_VERSION_FLOOR:
+                    blocking_items.append(
+                        f"Hermes {hermes_version} is below the manifest floor "
+                        f"{'.'.join(str(part) for part in MANIFEST_HERMES_VERSION_FLOOR)}; "
+                        "§7.5c still references 0.8.0+ and is now stale."
+                    )
+                elif parsed_version < CHECKLIST_HERMES_VERSION_FLOOR:
+                    blocking_items.append(
+                        f"Hermes {hermes_version} is below the checklist floor "
+                        f"{'.'.join(str(part) for part in CHECKLIST_HERMES_VERSION_FLOOR)}."
+                    )
+
+        profiles_result = runner((hermes_binary, "profile", "list"))
+        if not profiles_result.ok:
+            blocking_items.append(
+                f"`{hermes_binary} profile list` failed: {_format_probe_failure(profiles_result)}"
+            )
+        else:
+            profile_listed = resolved.profile_name in profiles_result.stdout
+            if not profile_listed:
+                blocking_items.append(
+                    f"Hermes profile `{resolved.profile_name}` is not listed by `{hermes_binary} profile list`."
+                )
+
+        tools_result = runner((hermes_binary, "tools", "list"))
+        if not tools_result.ok:
+            blocking_items.append(f"`{hermes_binary} tools list` failed: {_format_probe_failure(tools_result)}")
+        else:
+            live_tools = _extract_named_entries(tools_result.stdout)
+            for tool_name in EXPECTED_SEED_TOOLS:
+                seed_tool_status[tool_name] = tool_name in live_tools
+            missing_seed_tools = [name for name, ok in seed_tool_status.items() if not ok]
+            if missing_seed_tools:
+                blocking_items.append(
+                    f"missing Hermes seed tools: {', '.join(missing_seed_tools)}"
+                )
+
+        config_result = _run_command_candidates(
+            runner,
+            [
+                (hermes_binary, "--profile", resolved.profile_name, "config"),
+                (hermes_binary, "-p", resolved.profile_name, "config"),
+                (hermes_binary, "config"),
+            ],
+        )
+        config_texts = [config_result.stdout]
+        if profile_yaml.is_file():
+            config_texts.append(profile_yaml.read_text(encoding="utf-8"))
+        if not config_result.ok and not profile_yaml.is_file():
+            blocking_items.append(
+                f"Could not inspect Hermes config/profile text: {_format_probe_failure(config_result)}"
+            )
+        else:
+            config_status = _audit_config_texts(config_texts)
+            failed_config_checks = [name for name, ok in config_status.items() if not ok]
+            if failed_config_checks:
+                blocking_items.append(
+                    "config assertions failed: "
+                    f"{', '.join(failed_config_checks)}"
+                )
+
+        if run_cli_smoke:
+            cli_smoke_attempted = True
+            cli_smoke_marker = f"hermes-readiness-{generate_uuid_v7()}"
+            query = smoke_query or _default_cli_smoke_query(cli_smoke_marker)
+            step_count_before = _step_outcome_count(resolved)
+            log_state_before = _capture_log_state(logs_dir)
+            smoke_result = _run_command_candidates(
+                runner,
+                [
+                    (hermes_binary, "--profile", resolved.profile_name, "chat", "-q", query),
+                    (hermes_binary, "-p", resolved.profile_name, "chat", "-q", query),
+                    (hermes_binary, "chat", "-q", query),
+                ],
+            )
+            cli_smoke_output = smoke_result.stdout or smoke_result.stderr or smoke_result.error
+            if not smoke_result.ok:
+                blocking_items.append(
+                    f"CLI smoke command failed: {_format_probe_failure(smoke_result)}"
+                )
+            else:
+                time.sleep(0.05)
+                step_count_after = _step_outcome_count(resolved)
+                cli_smoke_step_outcomes_delta = max(0, step_count_after - step_count_before)
+                cli_smoke_log_trace = _log_trace_present(logs_dir, log_state_before, cli_smoke_marker)
+                missing_cli_evidence: list[str] = []
+                if cli_smoke_step_outcomes_delta < 1:
+                    missing_cli_evidence.append("STEP_OUTCOME evidence")
+                if not cli_smoke_log_trace:
+                    missing_cli_evidence.append("log trace evidence")
+                cli_smoke_ok = not missing_cli_evidence
+                if missing_cli_evidence:
+                    blocking_items.append(
+                        "CLI smoke did not produce "
+                        f"{' and '.join(missing_cli_evidence)}."
+                    )
+
+    return HermesReadinessResult(
+        ok=not blocking_items,
+        config=resolved,
+        hermes_installed=hermes_installed,
+        hermes_version=hermes_version,
+        hermes_version_ok=hermes_version_ok,
+        profile_listed=profile_listed,
+        live_tools=live_tools,
+        seed_tool_status=seed_tool_status,
+        config_status=config_status,
+        path_status=path_status,
+        database_status=database_status,
+        legacy_database_files=legacy_database_files,
+        cli_smoke_attempted=cli_smoke_attempted,
+        cli_smoke_ok=cli_smoke_ok,
+        cli_smoke_marker=cli_smoke_marker,
+        cli_smoke_step_outcomes_delta=cli_smoke_step_outcomes_delta,
+        cli_smoke_log_trace=cli_smoke_log_trace,
+        cli_smoke_output=cli_smoke_output,
+        checkpoint_backup_path=checkpoint_backup_path,
+        blocking_items=blocking_items,
+        drift_items=drift_items,
+        install=install,
+        doctor=doctor,
     )
 
 
@@ -1186,12 +1649,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bootstrap-live", action="store_true", help="Bootstrap the runtime against the selected registry")
     parser.add_argument("--install-profile", action="store_true", help="Install a local Hermes runtime profile bundle")
     parser.add_argument("--doctor", action="store_true", help="Verify runtime layout, databases, and skill registration")
+    parser.add_argument("--readiness", action="store_true", help="Run the real-Hermes readiness checklist against the selected runtime paths")
     parser.add_argument("--operator-workflow", action="store_true", help="Run the operator workflow plus council-backed project smoke test")
     parser.add_argument("--data-dir", default="~/.hermes/data/")
     parser.add_argument("--skills-dir", default="~/.hermes/skills/hybrid-autonomous-ai/")
     parser.add_argument("--checkpoints-dir", default="~/.hermes/skills/hybrid-autonomous-ai/checkpoints/")
     parser.add_argument("--alerts-dir", default="~/.hermes/alerts/")
     parser.add_argument("--profile-name", default="hybrid-autonomous-ai")
+    parser.add_argument("--hermes-bin", default="hermes", help="Override the Hermes CLI binary used for readiness checks")
+    parser.add_argument("--skip-cli-smoke", action="store_true", help="Skip the live Hermes chat smoke test inside --readiness")
+    parser.add_argument("--smoke-query", default=None, help="Override the readiness chat prompt used by --readiness")
     parser.add_argument("--model-name", default="local-default")
     parser.add_argument("--repo-root", default=None, help="Override the repository root used for profile installation")
     parser.add_argument("--task-id", default="stage0-operator-workflow")
@@ -1227,6 +1694,35 @@ def main() -> int:
         print("doctor ok" if result.ok else "doctor failed")
         print(f"missing={','.join(result.missing_items) if result.missing_items else 'none'}")
         print(f"tools={','.join(result.registered_tools)}")
+        return 0 if result.ok else 1
+
+    if args.readiness:
+        result = assess_hermes_readiness(
+            config=config,
+            repo_root=args.repo_root,
+            hermes_binary=args.hermes_bin,
+            run_cli_smoke=not args.skip_cli_smoke,
+            smoke_query=args.smoke_query,
+        )
+        missing_paths = [name for name, ok in result.path_status.items() if not ok]
+        missing_seed_tools = [name for name, ok in result.seed_tool_status.items() if not ok]
+        failed_config_checks = [name for name, ok in result.config_status.items() if not ok]
+        print("readiness ok" if result.ok else "readiness failed")
+        print(f"hermes_installed={'yes' if result.hermes_installed else 'no'}")
+        print(f"hermes_version={result.hermes_version or 'missing'}")
+        print(f"profile_listed={'yes' if result.profile_listed else 'no'}")
+        print(f"path_missing={','.join(missing_paths) if missing_paths else 'none'}")
+        print(f"seed_tools_missing={','.join(missing_seed_tools) if missing_seed_tools else 'none'}")
+        print(f"config_failed={','.join(failed_config_checks) if failed_config_checks else 'none'}")
+        print(f"cli_smoke={'ok' if result.cli_smoke_ok else ('skipped' if not result.cli_smoke_attempted else 'failed')}")
+        print(f"cli_step_outcomes_delta={result.cli_smoke_step_outcomes_delta}")
+        print(f"cli_log_trace={'yes' if result.cli_smoke_log_trace else 'no'}")
+        print(f"checkpoint_backup={result.checkpoint_backup_path or 'none'}")
+        print(f"legacy_db_files={','.join(result.legacy_database_files) if result.legacy_database_files else 'none'}")
+        print(f"doctor_missing={','.join(result.doctor.missing_items) if result.doctor.missing_items else 'none'}")
+        print(f"blocking={'; '.join(result.blocking_items) if result.blocking_items else 'none'}")
+        print(f"drift={'; '.join(result.drift_items) if result.drift_items else 'none'}")
+        print(f"tools={','.join(result.live_tools) if result.live_tools else 'none'}")
         return 0 if result.ok else 1
 
     if args.operator_workflow:

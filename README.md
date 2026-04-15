@@ -21,9 +21,10 @@ Today, this repository includes:
 - research, strategic-memory, opportunity, operator, and observability skills
 - milestone eval harnesses and deterministic fixtures
 - a Hermes runtime integration layer that can prepare a local profile bundle,
-  migrate the databases, bootstrap a runtime, run a doctor check, and prove a
-  deterministic operator workflow plus a council-backed opportunity and
-  phase-gate path against a mock runtime
+  migrate the databases, bootstrap a runtime, run a doctor check, run a
+  real-Hermes readiness check against the operator bootstrap checklist, and
+  prove a deterministic operator workflow plus a council-backed opportunity
+  and phase-gate path against a mock runtime
 - GitHub Actions CI that runs the full test suite on `main`, `codex/**`, and
   pull requests to `main`
 
@@ -111,6 +112,33 @@ Run the deterministic runtime proof:
 ```bash
 python3 -m skills.runtime --operator-workflow
 ```
+
+Run the real-Hermes readiness command:
+
+```bash
+python3 -m skills.runtime --readiness
+```
+
+That command prepares the repo-managed runtime bundle and canonical databases
+under the selected Hermes paths, checks the live Hermes CLI/version/profile/
+seed-tool surface, audits Hermes config/profile text for routing and
+dangerous-command expectations, runs a live Hermes CLI smoke test when Hermes
+is available, verifies `STEP_OUTCOME`/log evidence, creates a deterministic
+data snapshot under the runtime checkpoints directory, and exits clearly when
+Hermes is not installed.
+
+It also reports two current drifts explicitly instead of hiding them:
+
+- `spec/00_manifest.md` declares Hermes `v0.9.0+`, while `spec/s07_hermes_config.md`
+  §7.5c still says `v0.8.0+`
+- `--install-profile` creates the repo-managed runtime bundle under
+  `~/.hermes/skills/.../runtime/`, but it does not yet generate the
+  Hermes-native `~/.hermes/profiles/<profile>/profile.yaml` that §7.5c D1-2
+  still expects
+
+One remaining nuance is still called out by the command itself: the Hermes
+config assertions are heuristic text checks because the repo does not yet own a
+canonical Hermes-native `profile.yaml` generator/schema for §7.5c.
 
 That runtime proof now exercises this chain from a clean layout:
 
