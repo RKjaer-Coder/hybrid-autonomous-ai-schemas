@@ -4,6 +4,8 @@ import datetime
 import json
 from typing import Optional
 
+from immune.judge_lifecycle import JudgeLifecycleManager
+from immune.config import load_config
 from skills.append_buffer import AppendBuffer
 from skills.db_manager import DatabaseManager
 
@@ -13,13 +15,32 @@ class ObservabilitySkill:
         self._db = db_manager
         self._telemetry_buffer = telemetry_buffer
         self._immune_buffer = immune_buffer
+        immune = self._db.get_connection("immune")
+        self._judge_lifecycle = JudgeLifecycleManager(
+            immune.execute("PRAGMA database_list").fetchone()[2],
+            load_config(),
+        )
 
-    def query_immune_verdicts(self, limit: int = 20, outcome: str | None = None) -> list[dict]:
+    def query_immune_verdicts(
+        self,
+        limit: int = 20,
+        outcome: str | None = None,
+        judge_mode: str | None = None,
+    ) -> list[dict]:
         conn = self._db.get_connection("immune")
+        where: list[str] = []
+        params: list[object] = []
         if outcome:
-            rows = conn.execute("SELECT * FROM immune_verdicts WHERE result = ? ORDER BY timestamp DESC LIMIT ?", (outcome, limit)).fetchall()
-        else:
-            rows = conn.execute("SELECT * FROM immune_verdicts ORDER BY timestamp DESC LIMIT ?", (limit,)).fetchall()
+            where.append("result = ?")
+            params.append(outcome)
+        if judge_mode:
+            where.append("judge_mode = ?")
+            params.append(judge_mode)
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        rows = conn.execute(
+            f"SELECT * FROM immune_verdicts {where_sql} ORDER BY timestamp DESC LIMIT ?",
+            (*params, limit),
+        ).fetchall()
         return [dict(r) for r in rows]
 
     def query_telemetry(
@@ -107,6 +128,96 @@ class ObservabilitySkill:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def query_circuit_breakers(
+        self,
+        limit: int = 20,
+        breaker_name: str | None = None,
+        state: str | None = None,
+    ) -> list[dict]:
+        conn = self._db.get_connection("immune")
+        where: list[str] = []
+        params: list[object] = []
+        if breaker_name:
+            where.append("breaker_name = ?")
+            params.append(breaker_name)
+        if state:
+            where.append("state = ?")
+            params.append(state)
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        rows = conn.execute(
+            f"SELECT * FROM circuit_breaker_log {where_sql} ORDER BY timestamp DESC LIMIT ?",
+            (*params, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def recent_compound_breakers(self, limit: int = 10, unresolved_only: bool = False) -> list[dict]:
+        conn = self._db.get_connection("immune")
+        where_sql = "WHERE resolved_at IS NULL" if unresolved_only else ""
+        rows = conn.execute(
+            f"SELECT * FROM compound_breaker_events {where_sql} ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [
+            {
+                "event_id": row["event_id"],
+                "breaker_names": json.loads(row["breaker_names"]),
+                "winner_tier": row["winner_tier"],
+                "winning_action": row["winning_action"],
+                "applied_actions": json.loads(row["applied_actions"]),
+                "suppressed_actions": json.loads(row["suppressed_actions"]),
+                "requires_human": bool(row["requires_human"]),
+                "window_seconds": row["window_seconds"],
+                "window_started_at": row["window_started_at"],
+                "window_ended_at": row["window_ended_at"],
+                "resolution_notes": row["resolution_notes"],
+                "resolved_at": row["resolved_at"],
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
+    def recent_quarantined_responses(self, limit: int = 10, pending_review_only: bool = False) -> list[dict]:
+        immune = self._db.get_connection("immune")
+        where_sql = "WHERE review_status = 'PENDING'" if pending_review_only else ""
+        rows = immune.execute(
+            f"""
+            SELECT *
+            FROM quarantined_responses
+            {where_sql}
+            ORDER BY quarantined_at DESC, quarantine_id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def recent_disputed_costs(self, limit: int = 10) -> list[dict]:
+        financial = self._db.get_connection("financial_ledger")
+        rows = financial.execute(
+            """
+            SELECT record_id, project_id, amount_usd, provider, task_id, correlation_id,
+                   route_decision_id, cost_status, created_at
+            FROM cost_records
+            WHERE cost_status = 'DISPUTED'
+            ORDER BY created_at DESC, record_id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def recent_fallback_judge_verdicts(self, limit: int = 10) -> list[dict]:
+        return self.query_immune_verdicts(limit=limit, judge_mode="FALLBACK")
+
+    def recent_judge_fallback_events(self, limit: int = 10) -> list[dict]:
+        return self._judge_lifecycle.list_events(limit=limit)
+
+    def judge_fallback_review_queue(self, limit: int = 10, review_status: str | None = None) -> list[dict]:
+        return self._judge_lifecycle.list_review_queue(limit=limit, review_status=review_status)
+
+    def judge_deadlock_status(self) -> dict:
+        return self._judge_lifecycle.status()
+
     def recent_digests(self, limit: int = 5, digest_type: str | None = None) -> list[dict]:
         conn = self._db.get_connection("operator_digest")
         where_sql = ""
@@ -158,6 +269,7 @@ class ObservabilitySkill:
     def circuit_breaker_status(self) -> dict:
         telemetry = self._db.get_connection("telemetry")
         operator = self._db.get_connection("operator_digest")
+        immune = self._db.get_connection("immune")
         reliability_rows = telemetry.execute(
             """
             SELECT step_type, skill, reliability_7d
@@ -179,17 +291,35 @@ class ObservabilitySkill:
         unacknowledged_t3 = operator.execute(
             "SELECT COUNT(*) FROM alert_log WHERE tier = 'T3' AND acknowledged = 0"
         ).fetchone()[0]
+        logged_active = immune.execute(
+            """
+            WITH latest_state AS (
+                SELECT breaker_name, state, timestamp,
+                       ROW_NUMBER() OVER (PARTITION BY breaker_name ORDER BY timestamp DESC, event_id DESC) AS rn
+                FROM circuit_breaker_log
+            )
+            SELECT breaker_name
+            FROM latest_state
+            WHERE rn = 1 AND state != 'RESET'
+            ORDER BY breaker_name ASC
+            """
+        ).fetchall()
         overload = self._operator_load_snapshot()["critical_only_recommended"]
+        compound_breakers = self.recent_compound_breakers(limit=3, unresolved_only=True)
         return {
             "critical": critical,
             "degraded": degraded,
             "unacknowledged_t3_alerts": unacknowledged_t3,
             "operator_overload": overload,
+            "logged_active": [row["breaker_name"] for row in logged_active],
+            "recent_compound_events": compound_breakers,
         }
 
     def system_health(self) -> dict:
         operator = self._db.get_connection("operator_digest")
         strategic = self._db.get_connection("strategic_memory")
+        immune = self._db.get_connection("immune")
+        financial = self._db.get_connection("financial_ledger")
         heartbeat = operator.execute(
             "SELECT timestamp FROM operator_heartbeat ORDER BY timestamp DESC LIMIT 1"
         ).fetchone()
@@ -205,10 +335,37 @@ class ObservabilitySkill:
         unacknowledged_t3 = operator.execute(
             "SELECT COUNT(*) FROM alert_log WHERE tier = 'T3' AND acknowledged = 0"
         ).fetchone()[0]
+        quarantine_summary = immune.execute(
+            """
+            SELECT COUNT(*) AS pending_count
+            FROM quarantined_responses
+            WHERE review_status = 'PENDING'
+            """
+        ).fetchone()
+        disputed_summary = financial.execute(
+            """
+            SELECT COUNT(*) AS disputed_count, COALESCE(SUM(amount_usd), 0.0) AS disputed_amount
+            FROM cost_records
+            WHERE cost_status = 'DISPUTED'
+            """
+        ).fetchone()
+        fallback_summary = immune.execute(
+            """
+            SELECT
+                COUNT(*) AS fallback_count,
+                SUM(CASE WHEN result = 'BLOCK' THEN 1 ELSE 0 END) AS blocked_count,
+                MAX(timestamp) AS last_seen_at
+            FROM immune_verdicts
+            WHERE verdict_type = 'judge_output' AND judge_mode = 'FALLBACK'
+            """
+        ).fetchone()
+        judge_deadlock = self._judge_lifecycle.status()
         heartbeat_state = self._heartbeat_state(heartbeat["timestamp"]) if heartbeat is not None else "ABSENT"
         operator_load = self._operator_load_snapshot()
         if heartbeat_state != "ACTIVE":
             recommended_digest_type = "catch_up"
+        elif judge_deadlock["mode"] in {"FALLBACK", "HALTED"} or int(fallback_summary["fallback_count"] or 0):
+            recommended_digest_type = "critical_only"
         elif operator_load["critical_only_recommended"]:
             recommended_digest_type = "critical_only"
         else:
@@ -223,6 +380,22 @@ class ObservabilitySkill:
             "alert_counts": {row["tier"]: row["count"] for row in alert_counts},
             "unacknowledged_t3_alerts": unacknowledged_t3,
             "circuit_breakers": self.circuit_breaker_status(),
+            "quarantined_responses": {
+                "pending_review_count": int(quarantine_summary["pending_count"]),
+                "recent": self.recent_quarantined_responses(limit=3, pending_review_only=True),
+            },
+            "disputed_costs": {
+                "count": int(disputed_summary["disputed_count"]),
+                "amount_usd": float(disputed_summary["disputed_amount"]),
+                "recent": self.recent_disputed_costs(limit=3),
+            },
+            "judge_fallback": {
+                "count": int(fallback_summary["fallback_count"] or 0),
+                "blocked_count": int(fallback_summary["blocked_count"] or 0),
+                "last_seen_at": fallback_summary["last_seen_at"],
+                "recent": self.recent_fallback_judge_verdicts(limit=3),
+            },
+            "judge_deadlock": judge_deadlock,
             "research_health": {
                 "pending_tasks": strategic.execute(
                     "SELECT COUNT(*) FROM research_tasks WHERE status = 'PENDING'"
@@ -317,7 +490,11 @@ def observability_entry(action: str, **kwargs):
     if _SKILL is None:
         raise RuntimeError("observability skill not configured")
     if action == "query_immune_verdicts":
-        return _SKILL.query_immune_verdicts(kwargs.get("limit", 20), kwargs.get("outcome"))
+        return _SKILL.query_immune_verdicts(
+            kwargs.get("limit", 20),
+            kwargs.get("outcome"),
+            kwargs.get("judge_mode"),
+        )
     if action == "query_telemetry":
         return _SKILL.query_telemetry(
             kwargs.get("skill_name"),
@@ -339,6 +516,35 @@ def observability_entry(action: str, **kwargs):
             unacknowledged_only=kwargs.get("unacknowledged_only", False),
             include_suppressed=kwargs.get("include_suppressed", True),
         )
+    if action == "query_circuit_breakers":
+        return _SKILL.query_circuit_breakers(
+            kwargs.get("limit", 20),
+            breaker_name=kwargs.get("breaker_name"),
+            state=kwargs.get("state"),
+        )
+    if action == "recent_compound_breakers":
+        return _SKILL.recent_compound_breakers(
+            kwargs.get("limit", 10),
+            kwargs.get("unresolved_only", False),
+        )
+    if action == "recent_quarantined_responses":
+        return _SKILL.recent_quarantined_responses(
+            kwargs.get("limit", 10),
+            kwargs.get("pending_review_only", False),
+        )
+    if action == "recent_disputed_costs":
+        return _SKILL.recent_disputed_costs(kwargs.get("limit", 10))
+    if action == "recent_fallback_judge_verdicts":
+        return _SKILL.recent_fallback_judge_verdicts(kwargs.get("limit", 10))
+    if action == "recent_judge_fallback_events":
+        return _SKILL.recent_judge_fallback_events(kwargs.get("limit", 10))
+    if action == "judge_fallback_review_queue":
+        return _SKILL.judge_fallback_review_queue(
+            kwargs.get("limit", 10),
+            kwargs.get("review_status"),
+        )
+    if action == "judge_deadlock_status":
+        return _SKILL.judge_deadlock_status()
     if action == "recent_digests":
         return _SKILL.recent_digests(kwargs.get("limit", 5), kwargs.get("digest_type"))
     if action == "reliability_dashboard":

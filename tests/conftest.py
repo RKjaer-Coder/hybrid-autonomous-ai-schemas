@@ -55,7 +55,7 @@ def test_db() -> str:
         CREATE TABLE immune_verdicts (
             verdict_id TEXT, verdict_type TEXT, scan_tier TEXT, session_id TEXT,
             skill_name TEXT, result TEXT, match_pattern TEXT, latency_ms INTEGER,
-            timestamp TEXT
+            judge_mode TEXT, timestamp TEXT
         );
         CREATE TABLE security_alerts (
             alert_id TEXT, source TEXT, severity TEXT, details TEXT,

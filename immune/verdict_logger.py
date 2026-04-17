@@ -32,6 +32,10 @@ class VerdictLogger:
         if not self._closed:
             self._schedule_flush()
 
+    @property
+    def db_path(self) -> str:
+        return self._db_path
+
     def _verify_tables(self) -> None:
         cur = self._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         tables = {r[0] for r in cur.fetchall()}
@@ -92,8 +96,9 @@ class VerdictLogger:
                 v.session_id,
                 v.skill_name,
                 "TIMEOUT" if v.block_reason and v.block_reason.value == "TIMEOUT" else v.outcome.value,
-                v.block_reason.value if v.block_reason else None,
+                v.block_reason.value if v.block_reason else v.block_detail,
                 int(v.latency_ms),
+                v.judge_mode.value,
                 now,
             )
             for v in rows
@@ -102,8 +107,8 @@ class VerdictLogger:
             with self._lock:
                 self._conn.executemany(
                     "INSERT INTO immune_verdicts "
-                    "(verdict_id, verdict_type, scan_tier, session_id, skill_name, result, match_pattern, latency_ms, timestamp) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "(verdict_id, verdict_type, scan_tier, session_id, skill_name, result, match_pattern, latency_ms, judge_mode, timestamp) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     values,
                 )
                 self._conn.commit()

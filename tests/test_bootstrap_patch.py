@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import sqlite3
 import sys
 import time
 import types
 
+from immune import judge
 from immune.bootstrap_patch import _stack_has_immune_wrapper, apply_immune_patch
 from immune.types import BlockReason, ImmuneBlockError, Outcome
 
@@ -140,3 +142,26 @@ def test_stack_parser_handles_structured_stacks():
     assert _stack_has_immune_wrapper(("planner", "immune_system", "shell_command"))
     assert _stack_has_immune_wrapper("planner > immune_system > shell_command")
     assert not _stack_has_immune_wrapper({"stack": ("planner", "shell_command")})
+
+
+def test_patch_can_force_structural_judge_fallback(clean_sheriff_payload, default_config, test_db):
+    _install_fake(lambda **_: {"ok": True, "command": "echo safe"})
+    logger = VerdictLogger(test_db, default_config)
+    assert apply_immune_patch(lambda *_: _pass_verdict(), judge.judge_check, default_config, logger)
+    out = sys.modules["hermes.tools.base"].execute_tool(
+        tool_name="safe_tool",
+        arguments={},
+        skill_name="immune_system",
+        session_id=clean_sheriff_payload.session_id,
+        execution_stack="immune_system",
+        force_judge_structural_fallback=True,
+        judge_fallback_reason="judge_degraded",
+    )
+    assert out["ok"] is True
+    logger.flush()
+    conn = sqlite3.connect(test_db)
+    row = conn.execute(
+        "SELECT judge_mode, match_pattern FROM immune_verdicts WHERE verdict_type = 'judge_output' ORDER BY timestamp DESC LIMIT 1"
+    ).fetchone()
+    assert row[0] == "FALLBACK"
+    assert "judge_degraded" in row[1]

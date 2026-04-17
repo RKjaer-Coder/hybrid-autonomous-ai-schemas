@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 from immune.config import load_config
 from immune.judge import judge_check
+from immune.judge_lifecycle import JudgeLifecycleManager
 from immune.sheriff import sheriff_check, trigger_deep_scan
 from immune.types import ImmuneBlockError, ImmuneConfig, JudgePayload, SheriffPayload
 from immune.verdict_logger import VerdictLogger
@@ -65,6 +66,10 @@ def apply_immune_patch(
         raise ValueError("verdict_logger is required")
     if not config.bootstrap_patch_enabled:
         return True
+    judge_lifecycle = None
+    db_path = getattr(verdict_logger, "db_path", None)
+    if isinstance(db_path, str):
+        judge_lifecycle = JudgeLifecycleManager(db_path, config)
     located = _locate_dispatch()
     if located is None:
         return False
@@ -109,12 +114,31 @@ def apply_immune_patch(
             skill_name=skill_name,
             tool_name=tool_name,
             output=output if isinstance(output, dict) else {"result": output},
+            task_type=kwargs.get("task_type"),
             expected_schema=kwargs.get("expected_schema"),
             max_trust_tier=int(kwargs.get("max_trust_tier", 4)),
             memory_write_target=kwargs.get("memory_write_target"),
+            allow_structural_fallback=bool(
+                kwargs.get("allow_judge_structural_fallback", config.judge_structural_fallback_enabled)
+            ),
+            force_structural_fallback=bool(
+                kwargs.get("force_judge_structural_fallback")
+                or str(kwargs.get("judge_mode", "")).upper() == "FALLBACK"
+                or kwargs.get("judge_degraded", False)
+            ),
+            fallback_reason=kwargs.get("judge_fallback_reason"),
         )
-        jverdict = judge_fn(judge_payload, config)
+        prepared_payload = judge_payload
+        lifecycle_event = None
+        if judge_lifecycle is not None:
+            prepared_payload, lifecycle_event = judge_lifecycle.prepare_payload(judge_payload)
+        if judge_lifecycle is not None and lifecycle_event is not None and lifecycle_event["status"] == "HALTED":
+            jverdict = judge_lifecycle.halted_verdict(prepared_payload)
+        else:
+            jverdict = judge_fn(prepared_payload, config)
         verdict_logger.log_verdict(jverdict)
+        if judge_lifecycle is not None:
+            judge_lifecycle.record_verdict(prepared_payload, jverdict)
         if jverdict.outcome.value == "BLOCK":
             raise ImmuneBlockError(jverdict)
         return output

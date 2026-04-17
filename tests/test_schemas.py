@@ -134,12 +134,120 @@ class SchemaSuiteTests(unittest.TestCase):
                 count += 1
 
         with self.conn("immune_system") as im:
-            im.execute("INSERT INTO immune_verdicts VALUES (?,?,?,?,?,?,?,?,?)", (uid(), 'sheriff_input', 'fast_path', 'session1', 'planner', 'PASS', None, 4, now))
+            im.execute("INSERT INTO immune_verdicts VALUES (?,?,?,?,?,?,?,?,?,?)", (uid(), 'sheriff_input', 'fast_path', 'session1', 'planner', 'PASS', None, 4, now, 'NOT_APPLICABLE'))
             im.execute("INSERT INTO security_alerts VALUES (?,?,?,?,?,?,?,?)", (uid(), 'jwt_failure', 'ALERT', 'detail', 'session1', 0, None, now))
             im.execute("INSERT INTO circuit_breaker_log VALUES (?,?,?,?,?,?,?,?)", (uid(), 'TOOL_FAILURE_STORM', 'ARMED', 'n failures', 'watch', 1, None, now))
+            im.execute(
+                "INSERT INTO compound_breaker_events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    uid(),
+                    json.dumps(["SECURITY_CASCADE", "TOOL_FAILURE_STORM"]),
+                    'S',
+                    'FULL_SYSTEM_HALT',
+                    json.dumps(["FULL_SYSTEM_HALT"]),
+                    json.dumps(["HALT_EXECUTION"]),
+                    1,
+                    60,
+                    now,
+                    now,
+                    None,
+                    None,
+                    now,
+                ),
+            )
             im.execute("INSERT INTO jwt_revocation_log VALUES (?,?,?)", ('jti-1', 'ttl_expiry', now))
+            im.execute(
+                """
+                INSERT INTO quarantined_responses (
+                    quarantine_id, correlation_id, session_id, project_id, task_id,
+                    route_decision_id, cost_record_id, reservation_id, source_breaker,
+                    provider, model_used, payload_format, payload_text, received_at,
+                    quarantined_at, review_status, operator_decision, review_notes,
+                    review_digest_id, reviewed_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    uid(),
+                    'corr-1',
+                    'session1',
+                    None,
+                    'task1',
+                    'decision-1',
+                    'cost-1',
+                    'reservation-1',
+                    'SECURITY_CASCADE',
+                    'openai',
+                    'gpt-test',
+                    'json',
+                    json.dumps({"ok": True}),
+                    now,
+                    now,
+                    'PENDING',
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            )
+            fallback_event_id = uid()
+            im.execute(
+                """
+                INSERT INTO judge_fallback_events (
+                    event_id, trigger_source, status, trigger_reason, block_rate,
+                    blocked_count, total_count, distinct_task_types, started_at,
+                    expires_at, acknowledged_at, ended_at, end_reason, prior_event_id,
+                    operator_alert_id
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    fallback_event_id,
+                    'JUDGE_DEADLOCK',
+                    'ACTIVE',
+                    'deadlock',
+                    0.75,
+                    3,
+                    4,
+                    json.dumps(["planner", "research_domain", "operator_interface"]),
+                    now,
+                    now,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            )
+            im.execute(
+                """
+                INSERT INTO judge_fallback_review_queue (
+                    queue_id, fallback_event_id, source_verdict_id, session_id,
+                    skill_name, tool_name, task_type, output_json, expected_schema_json,
+                    max_trust_tier, memory_write_target, enqueued_at, review_status,
+                    reviewed_at, review_verdict_id, review_outcome, review_reason
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    uid(),
+                    fallback_event_id,
+                    uid(),
+                    'session1',
+                    'operator_interface',
+                    'digest',
+                    'operator_interface',
+                    json.dumps({"command": "echo safe"}),
+                    json.dumps({"type": "object"}),
+                    4,
+                    None,
+                    now,
+                    'PENDING',
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            )
             im.execute("INSERT INTO skill_improvement_log VALUES (?,?,?,?,?,?,?,?,?,?,?)", (uid(), 'research', 'h1', 'h2', 'diff', None, 'why', 'ACTIVE', 0.1, 0, now))
-            count += 5
+            count += 9
 
         with self.conn("financial_ledger") as fl:
             project_id = uid()
@@ -157,11 +265,26 @@ class SchemaSuiteTests(unittest.TestCase):
             fl.execute("INSERT INTO kill_recommendations VALUES (?,?,?,?,?,?,?,?,?,?)", (uid(), project_id, 0.6, uid(), json.dumps([]), 'sum', 'analysis', 'PENDING', 'PROVISIONAL', now))
             fl.execute("INSERT INTO assets VALUES (?,?,?,?,?,?,?,?)", (uid(), project_id, 'tool', 'asset', 'desc', 1, '/tmp/a', now))
             fl.execute("INSERT INTO revenue_records VALUES (?,?,?,?,?,?,?,?)", (uid(), project_id, 100.0, 'web_store', 'automated', now, now, now))
-            fl.execute("INSERT INTO cost_records VALUES (?,?,?,?,?,?,?,?)", (uid(), project_id, 'cloud_api', 30.0, 'desc', 'openai', 'task1', now))
+            fl.execute(
+                """
+                INSERT INTO cost_records (
+                    record_id, project_id, cost_category, amount_usd, description,
+                    provider, task_id, correlation_id, route_decision_id, cost_status, created_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (uid(), project_id, 'cloud_api', 30.0, 'desc', 'openai', 'task1', 'corr-1', 'decision-1', 'DISPUTED', now),
+            )
             fl.execute("INSERT INTO treasury VALUES (?,?,?,?,?,?,?)", (uid(), 'revenue_in', 100.0, 100.0, project_id, 'desc', now))
             fl.execute(
-                "INSERT INTO routing_decisions (decision_id, task_id, chain_id, role, route_selected, model_used, commercial_use_ok, quality_warning, cost_usd, justification, g3_required, g3_status, reservation_id, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (uid(), 'task1', 'chain1', 'Execution', 'local', 'model', 1, 0, 0.0, None, 0, None, None, now),
+                """
+                INSERT INTO routing_decisions (
+                    decision_id, task_id, project_id, session_id, chain_id, correlation_id,
+                    role, route_selected, model_used, commercial_use_ok, quality_warning,
+                    cost_usd, cost_status, justification, g3_required, g3_status,
+                    reservation_id, created_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (uid(), 'task1', project_id, 'session1', 'chain1', 'corr-1', 'Execution', 'local', 'model', 1, 0, 0.0, 'NOT_APPLICABLE', None, 0, None, None, now),
             )
             count += 9
 
@@ -244,7 +367,15 @@ class SchemaSuiteTests(unittest.TestCase):
                 0.5, 'ACTIVE', 0, 0.0, None, json.dumps([]), now, None,
             ))
             fl.execute("INSERT INTO revenue_records VALUES (?,?,?,?,?,?,?,?)", (uid(), pid, 120.0, 'web_store', 'automated', now, now, now))
-            fl.execute("INSERT INTO cost_records VALUES (?,?,?,?,?,?,?,?)", (uid(), pid, 'cloud_api', 20.0, 'cost', 'openai', None, now))
+            fl.execute(
+                """
+                INSERT INTO cost_records (
+                    record_id, project_id, cost_category, amount_usd, description,
+                    provider, task_id, correlation_id, route_decision_id, cost_status, created_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (uid(), pid, 'cloud_api', 20.0, 'cost', 'openai', None, 'corr-pnl', 'decision-pnl', 'DISPUTED', now),
+            )
             row = fl.execute("SELECT revenue_to_date, direct_cost, net_to_date FROM project_pnl WHERE project_id=?", (pid,)).fetchone()
             self.assertEqual(row, (120.0, 20.0, 100.0))
 

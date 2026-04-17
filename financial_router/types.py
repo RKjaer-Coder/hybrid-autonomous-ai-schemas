@@ -42,6 +42,15 @@ class G3Status(Enum):
     EXPIRED = "expired"
 
 
+class CostStatus(Enum):
+    """Conservative accounting status for a routed paid call."""
+
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+    ESTIMATED = "ESTIMATED"
+    FINAL = "FINAL"
+    DISPUTED = "DISPUTED"
+
+
 @dataclass(frozen=True)
 class TaskMetadata:
     """Metadata about the task requesting model routing."""

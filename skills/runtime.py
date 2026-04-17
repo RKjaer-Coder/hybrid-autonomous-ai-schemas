@@ -415,8 +415,8 @@ def _persist_immune_verdict(config: IntegrationConfig, verdict: Any, latency_ms:
             """
             INSERT OR IGNORE INTO immune_verdicts (
                 verdict_id, verdict_type, scan_tier, session_id, skill_name,
-                result, match_pattern, latency_ms, timestamp
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                result, match_pattern, latency_ms, judge_mode, timestamp
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 verdict.verdict_id,
@@ -425,8 +425,9 @@ def _persist_immune_verdict(config: IntegrationConfig, verdict: Any, latency_ms:
                 verdict.session_id,
                 verdict.skill_name,
                 verdict.outcome.value,
-                verdict.block_reason.value if verdict.block_reason else None,
+                verdict.block_reason.value if verdict.block_reason else verdict.block_detail,
                 int(latency_ms),
+                verdict.judge_mode.value,
                 _utc_now(),
             ),
         )

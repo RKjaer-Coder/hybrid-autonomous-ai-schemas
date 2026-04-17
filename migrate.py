@@ -41,10 +41,32 @@ EXPECTED_OBJECTS = {
         },
     },
     "immune_system": {
-        "tables": {"immune_verdicts", "security_alerts", "circuit_breaker_log", "jwt_revocation_log", "skill_improvement_log"},
+        "tables": {
+            "immune_verdicts",
+            "security_alerts",
+            "circuit_breaker_log",
+            "compound_breaker_events",
+            "quarantined_responses",
+            "judge_fallback_events",
+            "judge_fallback_review_queue",
+            "jwt_revocation_log",
+            "skill_improvement_log",
+        },
         "indexes": {
             "idx_immune_verdicts_skill_timestamp", "idx_immune_verdicts_result_timestamp", "idx_immune_verdicts_session_id",
-            "idx_security_alerts_timestamp", "idx_circuit_breaker_name_timestamp", "idx_circuit_breaker_state",
+            "idx_immune_verdicts_judge_mode_timestamp",
+            "idx_security_alerts_timestamp",
+            "idx_circuit_breaker_name_timestamp",
+            "idx_circuit_breaker_state",
+            "idx_compound_breaker_events_created",
+            "idx_compound_breaker_events_winner_tier",
+            "idx_quarantined_responses_correlation_id",
+            "idx_quarantined_responses_review_status",
+            "idx_quarantined_responses_quarantined_at",
+            "idx_judge_fallback_events_status_started",
+            "idx_judge_fallback_events_started_at",
+            "idx_judge_fallback_review_status_enqueued",
+            "idx_judge_fallback_review_event_status",
         },
     },
     "financial_ledger": {
@@ -56,8 +78,9 @@ EXPECTED_OBJECTS = {
             "idx_projects_status", "idx_projects_opportunity_id", "idx_projects_income_mechanism", "idx_phases_project_sequence",
             "idx_phases_status", "idx_kill_signals_project_created", "idx_assets_project_id", "idx_assets_reusable",
             "idx_revenue_records_project_period_start", "idx_cost_records_project_created", "idx_cost_records_cost_category",
-            "idx_treasury_created_at", "idx_treasury_entry_type", "idx_routing_decisions_role_created",
-            "idx_routing_decisions_route_selected",
+            "idx_cost_records_correlation_id", "idx_cost_records_cost_status", "idx_treasury_created_at",
+            "idx_treasury_entry_type", "idx_routing_decisions_role_created", "idx_routing_decisions_route_selected",
+            "idx_routing_decisions_correlation_id", "idx_routing_decisions_cost_status",
         },
     },
     "operator_digest": {
@@ -70,6 +93,59 @@ EXPECTED_OBJECTS = {
         },
     },
 }
+
+
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    return {row[1] for row in conn.execute(f"PRAGMA table_info('{table_name}')").fetchall()}
+
+
+def _ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, ddl: str) -> None:
+    tables = {
+        row[0]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
+    if table_name not in tables:
+        return
+    if column_name in _table_columns(conn, table_name):
+        return
+    conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {ddl}")
+
+
+def _preflight_schema_compat(conn: sqlite3.Connection, schema_name: str) -> None:
+    if schema_name == "immune_system.sql":
+        tables = {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        _ensure_column(
+            conn,
+            "immune_verdicts",
+            "judge_mode",
+            "judge_mode TEXT NOT NULL DEFAULT 'NOT_APPLICABLE' CHECK (judge_mode IN ('NOT_APPLICABLE','NORMAL','FALLBACK'))",
+        )
+        if "immune_verdicts" in tables:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_immune_verdicts_judge_mode_timestamp ON immune_verdicts(judge_mode, timestamp)"
+            )
+        return
+    if schema_name == "financial_ledger.sql":
+        _ensure_column(conn, "cost_records", "correlation_id", "correlation_id TEXT")
+        _ensure_column(conn, "cost_records", "route_decision_id", "route_decision_id TEXT")
+        _ensure_column(
+            conn,
+            "cost_records",
+            "cost_status",
+            "cost_status TEXT NOT NULL DEFAULT 'FINAL' CHECK (cost_status IN ('ESTIMATED','FINAL','DISPUTED'))",
+        )
+        _ensure_column(conn, "routing_decisions", "project_id", "project_id TEXT")
+        _ensure_column(conn, "routing_decisions", "session_id", "session_id TEXT")
+        _ensure_column(conn, "routing_decisions", "correlation_id", "correlation_id TEXT")
+        _ensure_column(
+            conn,
+            "routing_decisions",
+            "cost_status",
+            "cost_status TEXT NOT NULL DEFAULT 'NOT_APPLICABLE' CHECK (cost_status IN ('NOT_APPLICABLE','ESTIMATED','FINAL','DISPUTED'))",
+        )
 
 
 def _schema_hash(schema_path: Path) -> str:
@@ -120,6 +196,7 @@ def apply_schema(db_path: Path, schema_path: Path) -> None:
     with sqlite3.connect(db_path) as conn:
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA foreign_keys=ON;")
+        _preflight_schema_compat(conn, schema_path.name)
         conn.execute("BEGIN")
         for statement in sql.split(";"):
             statement = statement.strip()

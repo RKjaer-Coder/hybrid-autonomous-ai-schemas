@@ -3,7 +3,7 @@ from __future__ import annotations
 import types
 
 from immune import judge, sheriff
-from immune.types import BlockReason, JudgePayload, Outcome, SheriffPayload, generate_uuid_v7
+from immune.types import BlockReason, JudgeMode, JudgePayload, Outcome, SheriffPayload, generate_uuid_v7
 
 
 def test_sheriff_none_payload(default_config):
@@ -66,13 +66,21 @@ def test_judge_none_payload(default_config):
 
 def test_judge_schema_raises(monkeypatch, clean_judge_payload, default_config):
     monkeypatch.setattr(judge, "_validate_schema", lambda *_: (_ for _ in ()).throw(RuntimeError("x")))
-    assert judge.judge_check(clean_judge_payload, default_config).outcome == Outcome.BLOCK
+    cfg = default_config.__class__(**{**default_config.__dict__, "judge_structural_fallback_enabled": False})
+    verdict = judge.judge_check(
+        JudgePayload(**{**clean_judge_payload.__dict__, "allow_structural_fallback": False}),
+        cfg,
+    )
+    assert verdict.outcome == Outcome.BLOCK
+    assert verdict.judge_mode == JudgeMode.NORMAL
 
 
 def test_judge_json_dumps_raises(monkeypatch, clean_judge_payload, default_config):
     monkeypatch.setattr(judge.json, "dumps", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("x")))
     p = JudgePayload(**{**clean_judge_payload.__dict__, "expected_schema": None})
-    assert judge.judge_check(p, default_config).outcome == Outcome.BLOCK
+    verdict = judge.judge_check(p, default_config)
+    assert verdict.outcome == Outcome.PASS
+    assert verdict.judge_mode == JudgeMode.FALLBACK
 
 
 def test_judge_large_output(clean_judge_payload, default_config):
@@ -82,11 +90,15 @@ def test_judge_large_output(clean_judge_payload, default_config):
 
 def test_judge_non_serializable(clean_judge_payload, default_config):
     p = JudgePayload(**{**clean_judge_payload.__dict__, "expected_schema": None, "output": {"x": types.SimpleNamespace(a=1)}})
-    assert judge.judge_check(p, default_config).outcome == Outcome.BLOCK
+    verdict = judge.judge_check(p, default_config)
+    assert verdict.outcome == Outcome.PASS
+    assert verdict.judge_mode == JudgeMode.FALLBACK
 
 
 def test_judge_timeout(monkeypatch, clean_judge_payload, default_config):
-    seq = iter([1, 100_000_000])
+    seq = iter([1, 100_000_000, 100_000_000])
     monkeypatch.setattr(judge.time, "monotonic_ns", lambda: next(seq))
     p = JudgePayload(**{**clean_judge_payload.__dict__, "expected_schema": None})
-    assert judge.judge_check(p, default_config).outcome == Outcome.BLOCK
+    verdict = judge.judge_check(p, default_config)
+    assert verdict.outcome == Outcome.PASS
+    assert verdict.judge_mode == JudgeMode.FALLBACK

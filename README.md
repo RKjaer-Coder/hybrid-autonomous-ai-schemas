@@ -12,7 +12,7 @@ It is still pre-live from a real Hermes deployment perspective.
 
 ## Latest Progress
 
-As of April 15, 2026, GitHub `main` includes the latest validated Hermes
+As of April 16, 2026, GitHub `main` includes the latest validated Hermes
 runtime attachment work:
 
 - repo-owned Hermes profile generation under `~/.hermes/profiles/<profile>/`
@@ -22,9 +22,77 @@ runtime attachment work:
 - deterministic runtime proof coverage for install, bootstrap, workflow, and
   post-workflow doctor checks
 
+On top of that baseline, the current task branch now adds compound-breaker
+audit persistence and operator-facing observability:
+
+- `immune_system.db` now has a durable `compound_breaker_events` table
+- breaker precedence is resolved with the spec's S/H/D/R severity ordering
+- observability can now query raw breaker trips plus unresolved compound events
+- operator digests now surface unresolved compound-breaker events even in
+  `critical_only` mode
+
+This branch now also lands the next planned §6.3a governance/runtime gap:
+
+- `immune_system.db` now persists durable `quarantined_responses` records with
+  correlation IDs and operator-review fields
+- the financial router skill now has an explicit
+  `quarantine_inflight_paid_response` path that marks approved interrupted
+  paid calls `cost_status=DISPUTED`
+- disputed paid calls now persist into `cost_records` so they still count
+  against project P&L under conservative accounting
+- observability and operator digests now surface pending quarantine review and
+  disputed spend instead of leaving those incident states implicit
+
+This branch now also lands the next planned Judge fallback governance gap:
+
+- `immune_system.db` audit rows now carry explicit `judge_mode` state:
+  `NOT_APPLICABLE`, `NORMAL`, or `FALLBACK`
+- Judge now has a minimum structural fallback path for degraded/unavailable
+  validation branches; fallback stays deterministic and tags audit rows
+  `judge_mode=FALLBACK` instead of silently behaving like a normal pass
+- observability and operator system-health surfaces now expose recent fallback
+  Judge incidents, blocked fallback counts, and digest-level incident summaries
+
+This branch now also lands the explicit fallback/restart lifecycle around that
+audited Judge fallback mode:
+
+- `immune_system.db` now persists explicit `judge_fallback_events` and
+  `judge_fallback_review_queue` state instead of treating fallback as an
+  implicit runtime condition
+- automatic `JUDGE_DEADLOCK` triggering now promotes sustained normal-Judge
+  block spikes into a 30-minute audited fallback window
+- the once-per-24h guard now halts into a fail-closed `FULL_SYSTEM_HALT`
+  posture on retrigger instead of oscillating between bypass and deadlock
+- operator and observability surfaces now expose active deadlock state,
+  fallback expiry, restart-required halt state, and retroactive review queue
+  counts
+- fallback-passed outputs are now queued for retroactive full-Judge review
+  when the deadlock is cleared, so fallback passes do not disappear from later
+  audit
+
+That still does not amount to the full target-state restart story from the
+spec:
+
+- deadlock diversity is currently approximated by distinct `skill_name` values
+  rather than a richer persisted task-type taxonomy
+- `FULL_SYSTEM_HALT` is implemented here as an audited fail-closed Judge halt
+  plus breaker state, not as a directly verified Hermes-wide process stop and
+  restart workflow
+- none of this changes the repo's pre-live boundary because Hermes is still
+  not installed and live autonomy has not been re-verified on real hardware
+
+The paid-call lifecycle is also still thinner than the full spec in places:
+Path B per-call G3 approval, post-approval dispatch, and final cost
+reconciliation still do not yet match the richer written architecture end to
+end.
+
 The highest-priority remaining step is still hardware-gated: run the readiness
 flow against a real Hermes installation on the Mac Studio and confirm the live
 CLI/profile surface end to end.
+
+The highest-priority remaining non-hardware governance work is now tightening
+the remaining drift between this repo-level deadlock lifecycle and a live
+Hermes-wide halt/restart contract, not the baseline fallback audit state.
 
 ## What Is In This Repo
 
@@ -32,7 +100,8 @@ Today, this repository includes:
 
 - a five-database SQLite baseline with migrations and drift verification
 - a typed financial router with spend controls and hard approval boundaries
-- an immune subsystem with Sheriff, Judge, bootstrap patching, and verdict logs
+- an immune subsystem with Sheriff, Judge, bootstrap patching, verdict logs,
+  compound-breaker audit persistence, and explicit audited Judge fallback mode
 - council contracts and orchestration support for structured deliberation
 - research, strategic-memory, opportunity, operator, and observability skills
 - milestone eval harnesses and deterministic fixtures

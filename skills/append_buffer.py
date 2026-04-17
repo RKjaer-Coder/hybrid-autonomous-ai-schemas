@@ -33,7 +33,18 @@ IMMUNE_BUFFER_CONFIG = BufferConfig(
     table_name="immune_verdicts",
     max_entries=64,
     flush_interval_ms=100,
-    columns=("verdict_id", "verdict_type", "scan_tier", "session_id", "skill_name", "result", "match_pattern", "latency_ms", "timestamp"),
+    columns=(
+        "verdict_id",
+        "verdict_type",
+        "scan_tier",
+        "session_id",
+        "skill_name",
+        "result",
+        "match_pattern",
+        "latency_ms",
+        "judge_mode",
+        "timestamp",
+    ),
 )
 
 

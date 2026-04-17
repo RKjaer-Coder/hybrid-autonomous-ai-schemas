@@ -27,7 +27,7 @@ def test_missing_table_raises(default_config):
     fd, path = tempfile.mkstemp(suffix=".db")
     conn = sqlite3.connect(path)
     conn.execute(
-        "CREATE TABLE immune_verdicts (verdict_id TEXT, verdict_type TEXT, scan_tier TEXT, session_id TEXT, skill_name TEXT, result TEXT, match_pattern TEXT, latency_ms INTEGER, timestamp TEXT)"
+        "CREATE TABLE immune_verdicts (verdict_id TEXT, verdict_type TEXT, scan_tier TEXT, session_id TEXT, skill_name TEXT, result TEXT, match_pattern TEXT, latency_ms INTEGER, judge_mode TEXT, timestamp TEXT)"
     )
     conn.commit()
     conn.close()

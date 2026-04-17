@@ -25,6 +25,13 @@ class Outcome(Enum):
 
 
 @unique
+class JudgeMode(Enum):
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+    NORMAL = "NORMAL"
+    FALLBACK = "FALLBACK"
+
+
+@unique
 class BlockReason(Enum):
     IPI_DETECTED = "IPI_DETECTED"
     POLICY_VIOLATION = "POLICY_VIOLATION"
@@ -41,6 +48,7 @@ class CircuitBreakerState(Enum):
     ARMED = "ARMED"
     TRIPPED = "TRIPPED"
     COOLDOWN = "COOLDOWN"
+    RESET = "RESET"
 
 
 @unique
@@ -70,9 +78,13 @@ class JudgePayload:
     skill_name: str
     tool_name: str
     output: dict
+    task_type: str | None = None
     expected_schema: dict | None = None
     max_trust_tier: int = 4
     memory_write_target: str | None = None
+    allow_structural_fallback: bool = False
+    force_structural_fallback: bool = False
+    fallback_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -87,6 +99,7 @@ class ImmuneVerdict:
     block_detail: str | None = None
     latency_ms: float = 0.0
     alert_severity: AlertSeverity | None = None
+    judge_mode: JudgeMode | None = None
 
     def __post_init__(self) -> None:
         if self.outcome == Outcome.BLOCK and self.block_reason is None:
@@ -97,6 +110,12 @@ class ImmuneVerdict:
             raise ValueError("latency_ms must be >= 0")
         if self.block_detail is not None and len(self.block_detail) > 200:
             object.__setattr__(self, "block_detail", self.block_detail[:200])
+        if self.check_type == CheckType.JUDGE:
+            object.__setattr__(self, "judge_mode", self.judge_mode or JudgeMode.NORMAL)
+        elif self.judge_mode is None:
+            object.__setattr__(self, "judge_mode", JudgeMode.NOT_APPLICABLE)
+        elif self.judge_mode != JudgeMode.NOT_APPLICABLE:
+            raise ValueError("Only Judge verdicts may set a non-default judge_mode")
 
 
 @dataclass(frozen=True)
@@ -104,6 +123,12 @@ class ImmuneConfig:
     sheriff_fast_path_timeout_ms: float = 50.0
     deep_scan_timeout_ms: float = 500.0
     judge_timeout_ms: float = 50.0
+    judge_structural_fallback_enabled: bool = True
+    judge_deadlock_block_rate_threshold: float = 0.50
+    judge_deadlock_window_seconds: int = 300
+    judge_deadlock_distinct_task_types: int = 3
+    judge_deadlock_fallback_minutes: int = 30
+    judge_deadlock_guard_hours: int = 24
     tool_quarantine_block_rate: float = 0.20
     tool_quarantine_window_seconds: int = 900
     security_cascade_count: int = 3

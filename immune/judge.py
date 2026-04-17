@@ -10,6 +10,7 @@ from immune.types import (
     CheckType,
     ImmuneConfig,
     ImmuneVerdict,
+    JudgeMode,
     JudgePayload,
     Outcome,
     Tier,
@@ -34,6 +35,13 @@ PROMPT_PATTERNS = [
     re.compile(r"You are a", re.IGNORECASE),
     re.compile(r"Your instructions are", re.IGNORECASE),
     re.compile(r"System prompt:", re.IGNORECASE),
+]
+SHELL_DANGER_PATTERNS = [
+    re.compile(r"\brm\s+-rf\b", re.IGNORECASE),
+    re.compile(r"\b(?:curl|wget)\b\s+\S+", re.IGNORECASE),
+    re.compile(r"\b(?:bash|sh|zsh)\s+-c\b", re.IGNORECASE),
+    re.compile(r"\bsudo\b", re.IGNORECASE),
+    re.compile(r"(?:;|&&|\|\|)\s*(?:rm|curl|wget|bash|sh|zsh|python)\b", re.IGNORECASE),
 ]
 
 
@@ -114,29 +122,197 @@ def _safe_scan(text: str) -> bool:
     return False
 
 
+def _normal_judge_check(payload: JudgePayload, config: ImmuneConfig, start: int) -> ImmuneVerdict:
+    if payload.expected_schema is not None:
+        schema_err = _validate_schema(payload.output, payload.expected_schema)
+        if schema_err:
+            return ImmuneVerdict(
+                generate_uuid_v7(),
+                CheckType.JUDGE,
+                Tier.FAST_PATH,
+                payload.skill_name,
+                payload.session_id,
+                Outcome.BLOCK,
+                BlockReason.SCHEMA_VIOLATION,
+                schema_err,
+                (time.monotonic_ns() - start) / 1_000_000,
+                AlertSeverity.IMMUNE_BLOCK_FAST,
+            )
+    claimed = payload.output.get("claimed_trust_tier")
+    if isinstance(claimed, int) and claimed > payload.max_trust_tier:
+        return ImmuneVerdict(
+            generate_uuid_v7(),
+            CheckType.JUDGE,
+            Tier.FAST_PATH,
+            payload.skill_name,
+            payload.session_id,
+            Outcome.BLOCK,
+            BlockReason.TRUST_TIER_VIOLATION,
+            "Output claimed trust tier above max",
+            (time.monotonic_ns() - start) / 1_000_000,
+            AlertSeverity.IMMUNE_BLOCK_FAST,
+        )
+    for text in _iter_strings(payload.output):
+        if _safe_scan(text):
+            return ImmuneVerdict(
+                generate_uuid_v7(),
+                CheckType.JUDGE,
+                Tier.FAST_PATH,
+                payload.skill_name,
+                payload.session_id,
+                Outcome.BLOCK,
+                BlockReason.CONTENT_SAFETY,
+                "Content safety violation",
+                (time.monotonic_ns() - start) / 1_000_000,
+                AlertSeverity.SECURITY_ALERT,
+            )
+    size = len(json.dumps(payload.output))
+    if size > 1_048_576:
+        return ImmuneVerdict(
+            generate_uuid_v7(),
+            CheckType.JUDGE,
+            Tier.FAST_PATH,
+            payload.skill_name,
+            payload.session_id,
+            Outcome.BLOCK,
+            BlockReason.POLICY_VIOLATION,
+            "Output exceeds 1MB",
+            (time.monotonic_ns() - start) / 1_000_000,
+            AlertSeverity.IMMUNE_BLOCK_FAST,
+        )
+    elapsed_ms = (time.monotonic_ns() - start) / 1_000_000
+    if elapsed_ms > config.judge_timeout_ms:
+        return ImmuneVerdict(
+            generate_uuid_v7(),
+            CheckType.JUDGE,
+            Tier.FAST_PATH,
+            payload.skill_name,
+            payload.session_id,
+            Outcome.BLOCK,
+            BlockReason.TIMEOUT,
+            "Judge timeout",
+            elapsed_ms,
+            AlertSeverity.IMMUNE_TIMEOUT,
+        )
+    return ImmuneVerdict(
+        generate_uuid_v7(),
+        CheckType.JUDGE,
+        Tier.FAST_PATH,
+        payload.skill_name,
+        payload.session_id,
+        Outcome.PASS,
+        latency_ms=elapsed_ms,
+    )
+
+
+def _structural_fallback_reason(trigger: str, detail: str | None) -> str:
+    if detail:
+        return f"Judge structural fallback: {trigger} ({detail})"
+    return f"Judge structural fallback: {trigger}"
+
+
+def _structural_fallback_check(payload: JudgePayload, start: int, trigger: str, detail: str | None = None) -> ImmuneVerdict:
+    try:
+        for text in _iter_strings(payload.output):
+            if any(pattern.search(text) for pattern in SHELL_DANGER_PATTERNS):
+                return ImmuneVerdict(
+                    generate_uuid_v7(),
+                    CheckType.JUDGE,
+                    Tier.FAST_PATH,
+                    payload.skill_name,
+                    payload.session_id,
+                    Outcome.BLOCK,
+                    BlockReason.POLICY_VIOLATION,
+                    "Structural fallback blocked shell-dangerous output",
+                    (time.monotonic_ns() - start) / 1_000_000,
+                    AlertSeverity.SECURITY_ALERT,
+                    judge_mode=JudgeMode.FALLBACK,
+                )
+            if _safe_scan(text):
+                return ImmuneVerdict(
+                    generate_uuid_v7(),
+                    CheckType.JUDGE,
+                    Tier.FAST_PATH,
+                    payload.skill_name,
+                    payload.session_id,
+                    Outcome.BLOCK,
+                    BlockReason.CONTENT_SAFETY,
+                    "Structural fallback blocked sensitive output",
+                    (time.monotonic_ns() - start) / 1_000_000,
+                    AlertSeverity.SECURITY_ALERT,
+                    judge_mode=JudgeMode.FALLBACK,
+                )
+        return ImmuneVerdict(
+            generate_uuid_v7(),
+            CheckType.JUDGE,
+            Tier.FAST_PATH,
+            payload.skill_name,
+            payload.session_id,
+            Outcome.PASS,
+            block_detail=_structural_fallback_reason(trigger, detail),
+            latency_ms=(time.monotonic_ns() - start) / 1_000_000,
+            judge_mode=JudgeMode.FALLBACK,
+        )
+    except Exception:
+        return ImmuneVerdict(
+            FALLBACK_UUID,
+            CheckType.JUDGE,
+            Tier.FAST_PATH,
+            getattr(payload, "skill_name", "unknown"),
+            getattr(payload, "session_id", "unknown"),
+            Outcome.BLOCK,
+            BlockReason.INTERNAL_ERROR,
+            "Judge fallback internal error — fail closed",
+            0.0,
+            AlertSeverity.SECURITY_ALERT,
+            judge_mode=JudgeMode.FALLBACK,
+        )
+
+
 def judge_check(payload: JudgePayload, config: ImmuneConfig) -> ImmuneVerdict:
-    """Run Judge output checks, fail closed on exception."""
+    """Run Judge output checks, with explicit structural fallback on degraded paths."""
     try:
         start = time.monotonic_ns()
-        if payload.expected_schema is not None:
-            schema_err = _validate_schema(payload.output, payload.expected_schema)
-            if schema_err:
-                return ImmuneVerdict(generate_uuid_v7(), CheckType.JUDGE, Tier.FAST_PATH, payload.skill_name, payload.session_id, Outcome.BLOCK, BlockReason.SCHEMA_VIOLATION, schema_err, (time.monotonic_ns() - start) / 1_000_000, AlertSeverity.IMMUNE_BLOCK_FAST)
-        claimed = payload.output.get("claimed_trust_tier")
-        if isinstance(claimed, int) and claimed > payload.max_trust_tier:
-            return ImmuneVerdict(generate_uuid_v7(), CheckType.JUDGE, Tier.FAST_PATH, payload.skill_name, payload.session_id, Outcome.BLOCK, BlockReason.TRUST_TIER_VIOLATION, "Output claimed trust tier above max", (time.monotonic_ns() - start) / 1_000_000, AlertSeverity.IMMUNE_BLOCK_FAST)
-        for text in _iter_strings(payload.output):
-            if _safe_scan(text):
-                return ImmuneVerdict(generate_uuid_v7(), CheckType.JUDGE, Tier.FAST_PATH, payload.skill_name, payload.session_id, Outcome.BLOCK, BlockReason.CONTENT_SAFETY, "Content safety violation", (time.monotonic_ns() - start) / 1_000_000, AlertSeverity.SECURITY_ALERT)
-        size = len(json.dumps(payload.output))
-        if size > 1_048_576:
-            return ImmuneVerdict(generate_uuid_v7(), CheckType.JUDGE, Tier.FAST_PATH, payload.skill_name, payload.session_id, Outcome.BLOCK, BlockReason.POLICY_VIOLATION, "Output exceeds 1MB", (time.monotonic_ns() - start) / 1_000_000, AlertSeverity.IMMUNE_BLOCK_FAST)
-        elapsed_ms = (time.monotonic_ns() - start) / 1_000_000
-        if elapsed_ms > config.judge_timeout_ms:
-            return ImmuneVerdict(generate_uuid_v7(), CheckType.JUDGE, Tier.FAST_PATH, payload.skill_name, payload.session_id, Outcome.BLOCK, BlockReason.TIMEOUT, "Judge timeout", elapsed_ms, AlertSeverity.IMMUNE_TIMEOUT)
-        return ImmuneVerdict(generate_uuid_v7(), CheckType.JUDGE, Tier.FAST_PATH, payload.skill_name, payload.session_id, Outcome.PASS, latency_ms=elapsed_ms)
-    except Exception:
-        return ImmuneVerdict(FALLBACK_UUID, CheckType.JUDGE, Tier.FAST_PATH, getattr(payload, "skill_name", "unknown"), getattr(payload, "session_id", "unknown"), Outcome.BLOCK, BlockReason.INTERNAL_ERROR, "Judge internal error — fail closed", 0.0, AlertSeverity.SECURITY_ALERT)
+        if payload.force_structural_fallback:
+            return _structural_fallback_check(payload, start, payload.fallback_reason or "forced")
+        verdict = _normal_judge_check(payload, config, start)
+        fallback_allowed = payload.allow_structural_fallback or config.judge_structural_fallback_enabled
+        if (
+            fallback_allowed
+            and verdict.outcome == Outcome.BLOCK
+            and verdict.block_reason in {BlockReason.TIMEOUT, BlockReason.INTERNAL_ERROR}
+        ):
+            return _structural_fallback_check(
+                payload,
+                start,
+                verdict.block_reason.value,
+                verdict.block_detail,
+            )
+        return verdict
+    except Exception as exc:
+        fallback_allowed = (
+            getattr(payload, "allow_structural_fallback", False)
+            or config.judge_structural_fallback_enabled
+        )
+        if fallback_allowed and payload is not None and hasattr(payload, "output"):
+            return _structural_fallback_check(
+                payload,
+                time.monotonic_ns(),
+                payload.fallback_reason or "normal_judge_unavailable",
+                str(exc),
+            )
+        return ImmuneVerdict(
+            FALLBACK_UUID,
+            CheckType.JUDGE,
+            Tier.FAST_PATH,
+            getattr(payload, "skill_name", "unknown"),
+            getattr(payload, "session_id", "unknown"),
+            Outcome.BLOCK,
+            BlockReason.INTERNAL_ERROR,
+            "Judge internal error — fail closed",
+            0.0,
+            AlertSeverity.SECURITY_ALERT,
+        )
 
 
 if __name__ == "__main__":

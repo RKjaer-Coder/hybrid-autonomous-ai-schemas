@@ -108,11 +108,16 @@ CREATE TABLE IF NOT EXISTS cost_records (
   description TEXT NOT NULL,
   provider TEXT,
   task_id TEXT,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  correlation_id TEXT,
+  route_decision_id TEXT,
+  cost_status TEXT NOT NULL DEFAULT 'FINAL' CHECK (cost_status IN ('ESTIMATED','FINAL','DISPUTED'))
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_cost_records_project_created ON cost_records(project_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_cost_records_cost_category ON cost_records(cost_category);
+CREATE INDEX IF NOT EXISTS idx_cost_records_correlation_id ON cost_records(correlation_id);
+CREATE INDEX IF NOT EXISTS idx_cost_records_cost_status ON cost_records(cost_status, created_at);
 
 CREATE TABLE IF NOT EXISTS treasury (
   entry_id TEXT PRIMARY KEY,
@@ -141,11 +146,17 @@ CREATE TABLE IF NOT EXISTS routing_decisions (
   g3_required INTEGER DEFAULT 0 CHECK (g3_required IN (0, 1)),
   g3_status TEXT CHECK (g3_status IS NULL OR g3_status IN ('PENDING','APPROVED','BLOCKED','EXPIRED')),
   reservation_id TEXT,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  project_id TEXT,
+  session_id TEXT,
+  correlation_id TEXT,
+  cost_status TEXT NOT NULL DEFAULT 'NOT_APPLICABLE' CHECK (cost_status IN ('NOT_APPLICABLE','ESTIMATED','FINAL','DISPUTED'))
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_routing_decisions_role_created ON routing_decisions(role, created_at);
 CREATE INDEX IF NOT EXISTS idx_routing_decisions_route_selected ON routing_decisions(route_selected);
+CREATE INDEX IF NOT EXISTS idx_routing_decisions_correlation_id ON routing_decisions(correlation_id);
+CREATE INDEX IF NOT EXISTS idx_routing_decisions_cost_status ON routing_decisions(cost_status, created_at);
 
 CREATE VIEW IF NOT EXISTS project_pnl AS
 SELECT

@@ -6,6 +6,8 @@ import uuid
 from dataclasses import asdict, dataclass
 from typing import Any, Optional
 
+from immune.config import load_config
+from immune.judge_lifecycle import JudgeLifecycleManager
 from skills.db_manager import DatabaseManager
 
 
@@ -60,6 +62,11 @@ class DigestRecord:
 class OperatorInterfaceSkill:
     def __init__(self, db_manager: DatabaseManager):
         self._db = db_manager
+        immune = self._db.get_connection("immune")
+        self._judge_lifecycle = JudgeLifecycleManager(
+            immune.execute("PRAGMA database_list").fetchone()[2],
+            load_config(),
+        )
 
     def alert(
         self,
@@ -168,6 +175,116 @@ class OperatorInterfaceSkill:
             for row in rows
         ]
 
+    def list_quarantined_responses(
+        self,
+        *,
+        limit: int = 20,
+        pending_review_only: bool = False,
+    ) -> list[dict]:
+        immune = self._db.get_connection("immune")
+        where_sql = "WHERE review_status = 'PENDING'" if pending_review_only else ""
+        rows = immune.execute(
+            f"""
+            SELECT *
+            FROM quarantined_responses
+            {where_sql}
+            ORDER BY quarantined_at DESC, quarantine_id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [self._quarantine_row_to_dict(row) for row in rows]
+
+    def review_quarantined_response(
+        self,
+        quarantine_id: str,
+        decision: str,
+        *,
+        review_notes: str | None = None,
+        review_digest_id: str | None = None,
+        reference_time: str | None = None,
+    ) -> dict:
+        now = self._resolve_now(reference_time)
+        normalized = decision.upper()
+        status_by_decision = {
+            "DISCARD": "DISCARDED",
+            "REPROCESS": "REPROCESS_APPROVED",
+            "REPROCESSED": "REPROCESSED",
+        }
+        if normalized not in status_by_decision:
+            raise ValueError(f"Unknown quarantine review decision: {decision}")
+
+        immune = self._db.get_connection("immune")
+        row = immune.execute(
+            "SELECT quarantine_id FROM quarantined_responses WHERE quarantine_id = ?",
+            (quarantine_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(quarantine_id)
+        immune.execute(
+            """
+            UPDATE quarantined_responses
+            SET review_status = ?,
+                operator_decision = ?,
+                review_notes = ?,
+                review_digest_id = ?,
+                reviewed_at = ?
+            WHERE quarantine_id = ?
+            """,
+            (
+                status_by_decision[normalized],
+                normalized,
+                review_notes,
+                review_digest_id,
+                now,
+                quarantine_id,
+            ),
+        )
+        immune.commit()
+
+        operator = self._db.get_connection("operator_digest")
+        operator.execute(
+            "INSERT INTO operator_heartbeat (entry_id, interaction_type, channel, timestamp) VALUES (?, ?, ?, ?)",
+            (str(uuid.uuid4()), "command", "CLI", now),
+        )
+        operator.commit()
+        updated = immune.execute(
+            "SELECT * FROM quarantined_responses WHERE quarantine_id = ?",
+            (quarantine_id,),
+        ).fetchone()
+        assert updated is not None
+        return self._quarantine_row_to_dict(updated)
+
+    def list_judge_fallback_events(self, *, limit: int = 20) -> list[dict]:
+        return self._judge_lifecycle.list_events(limit=limit)
+
+    def list_judge_fallback_review_queue(
+        self,
+        *,
+        limit: int = 20,
+        review_status: str | None = None,
+    ) -> list[dict]:
+        return self._judge_lifecycle.list_review_queue(limit=limit, review_status=review_status)
+
+    def restart_judge_after_deadlock(
+        self,
+        *,
+        event_id: str | None = None,
+        reference_time: str | None = None,
+    ) -> dict[str, Any]:
+        now = self._resolve_now(reference_time)
+        result = self._judge_lifecycle.restart_after_deadlock(
+            event_id=event_id,
+            reference_time=now,
+        )
+        operator = self._db.get_connection("operator_digest")
+        operator.execute(
+            "INSERT INTO operator_heartbeat (entry_id, interaction_type, channel, timestamp) VALUES (?, ?, ?, ?)",
+            (str(uuid.uuid4()), "command", "CLI", now),
+        )
+        operator.commit()
+        return result
+
     def record_heartbeat(self, interaction_type: str, channel: str = "CLI") -> str:
         entry_id = str(uuid.uuid4())
         now = self._utc_now()
@@ -219,7 +336,7 @@ class OperatorInterfaceSkill:
             operator_state=effective_state,
             load_snapshot=load_snapshot,
         )
-        ordered_names = list(CRITICAL_SECTION_ORDER if effective_type == "critical_only" else DAILY_SECTION_ORDER)
+        ordered_names = list(sections.keys())
         if urgent_pending and "PENDING DECISIONS" in ordered_names:
             ordered_names.remove("PENDING DECISIONS")
             ordered_names.insert(0, "PENDING DECISIONS")
@@ -418,7 +535,18 @@ class OperatorInterfaceSkill:
             ),
         }
         if digest_type == "critical_only":
-            sections = {name: sections[name] for name in CRITICAL_SECTION_ORDER}
+            selected_names = list(CRITICAL_SECTION_ORDER)
+            if (
+                health["compound_breakers"]["recent"]
+                or health["quarantined_responses"]["pending_review_count"]
+                or health["disputed_costs"]["count"]
+                or health["judge_fallback"]["count"]
+                or health["judge_deadlock"]["mode"] in {"FALLBACK", "HALTED"}
+                or health["judge_deadlock"]["review_queue"]["pending"]
+                or health["judge_deadlock"]["review_queue"]["blocked"]
+            ) and "SYSTEM HEALTH" not in selected_names:
+                selected_names.insert(1, "SYSTEM HEALTH")
+            sections = {name: sections[name] for name in selected_names}
         urgent_pending = any(
             self._time_remaining_hours(now_dt, row["expires_at"]) is not None
             and self._time_remaining_hours(now_dt, row["expires_at"]) <= 6.0
@@ -487,10 +615,40 @@ class OperatorInterfaceSkill:
 
     def _system_health_section(self, health: dict[str, Any], operator_state: str) -> str:
         issues: list[str] = []
+        compound_events = health["compound_breakers"]["recent"]
+        if compound_events:
+            primary = compound_events[0]
+            summary = "+".join(primary["breaker_names"]) + "->" + primary["winning_action"]
+            if len(compound_events) > 1:
+                summary += f" (+{len(compound_events) - 1})"
+            issues.append("compound=" + summary)
         if health["circuit_breakers"]["critical"]:
             issues.append("critical=" + ",".join(health["circuit_breakers"]["critical"]))
         if health["circuit_breakers"]["degraded"]:
             issues.append("degraded=" + ",".join(health["circuit_breakers"]["degraded"]))
+        if health["circuit_breakers"]["logged_active"]:
+            issues.append("breaker_log=" + ",".join(health["circuit_breakers"]["logged_active"]))
+        if health["quarantined_responses"]["pending_review_count"]:
+            issues.append(f"quarantine pending={health['quarantined_responses']['pending_review_count']}")
+        if health["disputed_costs"]["count"]:
+            issues.append(
+                "disputed_spend="
+                + f"${health['disputed_costs']['amount_usd']:.2f}/{health['disputed_costs']['count']}"
+            )
+        if health["judge_fallback"]["count"]:
+            issues.append(
+                "judge_fallback recent="
+                + f"{health['judge_fallback']['count']} blocked={health['judge_fallback']['blocked_count']}"
+            )
+        if health["judge_deadlock"]["mode"] == "FALLBACK":
+            expires_at = health["judge_deadlock"]["active_event"]["expires_at"]
+            issues.append(f"judge_deadlock fallback until={expires_at}")
+        if health["judge_deadlock"]["mode"] == "HALTED":
+            issues.append("judge_deadlock HALTED operator_restart_required")
+        if health["judge_deadlock"]["review_queue"]["pending"]:
+            issues.append(f"judge_review pending={health['judge_deadlock']['review_queue']['pending']}")
+        if health["judge_deadlock"]["review_queue"]["blocked"]:
+            issues.append(f"judge_review blocked={health['judge_deadlock']['review_queue']['blocked']}")
         if health["unacknowledged_t3_alerts"]:
             issues.append(f"T3 pending ack={health['unacknowledged_t3_alerts']}")
         if health["research_health"]["stale_tasks"] or health["research_health"]["failed_tasks"]:
@@ -507,6 +665,8 @@ class OperatorInterfaceSkill:
         operator = self._db.get_connection("operator_digest")
         telemetry = self._db.get_connection("telemetry")
         strategic = self._db.get_connection("strategic_memory")
+        immune = self._db.get_connection("immune")
+        financial = self._db.get_connection("financial_ledger")
         degraded_rows = telemetry.execute(
             """
             SELECT step_type, skill, reliability_7d
@@ -528,6 +688,80 @@ class OperatorInterfaceSkill:
         unacknowledged_t3 = operator.execute(
             "SELECT COUNT(*) FROM alert_log WHERE tier = 'T3' AND acknowledged = 0"
         ).fetchone()[0]
+        logged_active_rows = immune.execute(
+            """
+            WITH latest_state AS (
+                SELECT breaker_name, state, timestamp,
+                       ROW_NUMBER() OVER (PARTITION BY breaker_name ORDER BY timestamp DESC, event_id DESC) AS rn
+                FROM circuit_breaker_log
+            )
+            SELECT breaker_name
+            FROM latest_state
+            WHERE rn = 1 AND state != 'RESET'
+            ORDER BY breaker_name ASC
+            """
+        ).fetchall()
+        compound_rows = immune.execute(
+            """
+            SELECT breaker_names, winning_action, created_at
+            FROM compound_breaker_events
+            WHERE resolved_at IS NULL
+            ORDER BY created_at DESC
+            LIMIT 3
+            """
+        ).fetchall()
+        quarantined_rows = immune.execute(
+            """
+            SELECT quarantine_id, correlation_id, project_id, task_id, review_status, quarantined_at
+            FROM quarantined_responses
+            WHERE review_status = 'PENDING'
+            ORDER BY quarantined_at DESC, quarantine_id DESC
+            LIMIT 3
+            """
+        ).fetchall()
+        quarantine_summary = immune.execute(
+            """
+            SELECT COUNT(*) AS pending_count
+            FROM quarantined_responses
+            WHERE review_status = 'PENDING'
+            """
+        ).fetchone()
+        disputed_rows = financial.execute(
+            """
+            SELECT correlation_id, project_id, amount_usd, created_at
+            FROM cost_records
+            WHERE cost_status = 'DISPUTED'
+            ORDER BY created_at DESC, record_id DESC
+            LIMIT 3
+            """
+        ).fetchall()
+        disputed_summary = financial.execute(
+            """
+            SELECT COUNT(*) AS disputed_count, COALESCE(SUM(amount_usd), 0.0) AS disputed_amount
+            FROM cost_records
+            WHERE cost_status = 'DISPUTED'
+            """
+        ).fetchone()
+        fallback_rows = immune.execute(
+            """
+            SELECT verdict_id, session_id, skill_name, result, match_pattern, timestamp
+            FROM immune_verdicts
+            WHERE verdict_type = 'judge_output' AND judge_mode = 'FALLBACK'
+            ORDER BY timestamp DESC, verdict_id DESC
+            LIMIT 3
+            """
+        ).fetchall()
+        fallback_summary = immune.execute(
+            """
+            SELECT
+                COUNT(*) AS fallback_count,
+                SUM(CASE WHEN result = 'BLOCK' THEN 1 ELSE 0 END) AS blocked_count,
+                MAX(timestamp) AS last_seen_at
+            FROM immune_verdicts
+            WHERE verdict_type = 'judge_output' AND judge_mode = 'FALLBACK'
+            """
+        ).fetchone()
+        judge_deadlock = self._judge_lifecycle.status(reference_time=now)
         stale_tasks = strategic.execute(
             "SELECT COUNT(*) FROM research_tasks WHERE status = 'STALE'"
         ).fetchone()[0]
@@ -535,7 +769,37 @@ class OperatorInterfaceSkill:
             "SELECT COUNT(*) FROM research_tasks WHERE status = 'FAILED'"
         ).fetchone()[0]
         return {
-            "circuit_breakers": {"critical": critical, "degraded": degraded},
+            "circuit_breakers": {
+                "critical": critical,
+                "degraded": degraded,
+                "logged_active": [row["breaker_name"] for row in logged_active_rows],
+            },
+            "compound_breakers": {
+                "recent": [
+                    {
+                        "breaker_names": json.loads(row["breaker_names"]),
+                        "winning_action": row["winning_action"],
+                        "created_at": row["created_at"],
+                    }
+                    for row in compound_rows
+                ],
+            },
+            "quarantined_responses": {
+                "pending_review_count": int(quarantine_summary["pending_count"]),
+                "recent": [dict(row) for row in quarantined_rows],
+            },
+            "disputed_costs": {
+                "count": int(disputed_summary["disputed_count"]),
+                "amount_usd": float(disputed_summary["disputed_amount"]),
+                "recent": [dict(row) for row in disputed_rows],
+            },
+            "judge_fallback": {
+                "count": int(fallback_summary["fallback_count"] or 0),
+                "blocked_count": int(fallback_summary["blocked_count"] or 0),
+                "last_seen_at": fallback_summary["last_seen_at"],
+                "recent": [dict(row) for row in fallback_rows],
+            },
+            "judge_deadlock": judge_deadlock,
             "unacknowledged_t3_alerts": unacknowledged_t3,
             "research_health": {
                 "stale_tasks": stale_tasks,
@@ -630,6 +894,31 @@ class OperatorInterfaceSkill:
             "estimated_hours": estimated_hours,
             "critical_only_recommended": estimated_hours > 15.0,
             "sustained_overload": estimated_hours > 15.0 and bool(prior_overload and prior_overload["overload_triggered"]),
+        }
+
+    @staticmethod
+    def _quarantine_row_to_dict(row: Any) -> dict[str, Any]:
+        return {
+            "quarantine_id": row["quarantine_id"],
+            "correlation_id": row["correlation_id"],
+            "session_id": row["session_id"],
+            "project_id": row["project_id"],
+            "task_id": row["task_id"],
+            "route_decision_id": row["route_decision_id"],
+            "cost_record_id": row["cost_record_id"],
+            "reservation_id": row["reservation_id"],
+            "source_breaker": row["source_breaker"],
+            "provider": row["provider"],
+            "model_used": row["model_used"],
+            "payload_format": row["payload_format"],
+            "payload_text": row["payload_text"],
+            "received_at": row["received_at"],
+            "quarantined_at": row["quarantined_at"],
+            "review_status": row["review_status"],
+            "operator_decision": row["operator_decision"],
+            "review_notes": row["review_notes"],
+            "review_digest_id": row["review_digest_id"],
+            "reviewed_at": row["reviewed_at"],
         }
 
     def _trailing_operator_hours(self) -> float:
@@ -815,6 +1104,31 @@ def operator_interface_entry(action: str, **kwargs):
     if action == "acknowledge_digest":
         return _SKILL.acknowledge_digest(
             kwargs["digest_id"],
+            reference_time=kwargs.get("reference_time"),
+        )
+    if action == "list_quarantined_responses":
+        return _SKILL.list_quarantined_responses(
+            limit=kwargs.get("limit", 20),
+            pending_review_only=kwargs.get("pending_review_only", False),
+        )
+    if action == "review_quarantined_response":
+        return _SKILL.review_quarantined_response(
+            kwargs["quarantine_id"],
+            kwargs["decision"],
+            review_notes=kwargs.get("review_notes"),
+            review_digest_id=kwargs.get("review_digest_id"),
+            reference_time=kwargs.get("reference_time"),
+        )
+    if action == "list_judge_fallback_events":
+        return _SKILL.list_judge_fallback_events(limit=kwargs.get("limit", 20))
+    if action == "list_judge_fallback_review_queue":
+        return _SKILL.list_judge_fallback_review_queue(
+            limit=kwargs.get("limit", 20),
+            review_status=kwargs.get("review_status"),
+        )
+    if action == "restart_judge_after_deadlock":
+        return _SKILL.restart_judge_after_deadlock(
+            event_id=kwargs.get("event_id"),
             reference_time=kwargs.get("reference_time"),
         )
     if action == "generate_digest":
