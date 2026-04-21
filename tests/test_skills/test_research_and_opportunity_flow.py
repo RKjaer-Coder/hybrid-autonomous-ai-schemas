@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import json
 
+from harness_variants import HarnessVariantManager
 from skills.council.skill import configure_skill as configure_council_skill
 from skills.db_manager import DatabaseManager
 from skills.hermes_interfaces import MockHermesRuntime
@@ -27,6 +28,7 @@ def test_research_task_lifecycle_and_brief_completion(test_data_dir):
     db = DatabaseManager(str(test_data_dir))
     research = ResearchDomainSkill(db)
     memory = StrategicMemorySkill(db)
+    traces = HarnessVariantManager(str(test_data_dir / "telemetry.db"))
 
     task_id = research.create_task(
         "Market scan",
@@ -72,6 +74,9 @@ def test_research_task_lifecycle_and_brief_completion(test_data_dir):
     assert completed["actual_spend_usd"] == 1.25
     assert completed["follow_up_tasks"] == ["follow-up-1"]
     assert fetched["depth_upgrade"] is True
+    research_traces = traces.list_execution_traces(limit=5, skill_name="research_domain")
+    assert research_traces[0]["role"] == "research_task_completion"
+    assert research_traces[0]["judge_verdict"] == "PASS"
 
 
 def test_research_task_rejects_invalid_completion_brief(test_data_dir):
@@ -97,6 +102,7 @@ def test_opportunity_pipeline_handoff_and_project_backpropagation(test_data_dir)
     db = DatabaseManager(str(test_data_dir))
     pipeline = OpportunityPipelineSkill(db)
     financial = db.get_connection("financial_ledger")
+    traces = HarnessVariantManager(str(test_data_dir / "telemetry.db"))
 
     opportunity_id = pipeline.create_opportunity(
         "Client automation offer",
@@ -144,11 +150,14 @@ def test_opportunity_pipeline_handoff_and_project_backpropagation(test_data_dir)
     assert phases[0]["status"] == "ACTIVE"
     assert closed["status"] == "CLOSED"
     assert closed["learning_record"]["result"] == "positive"
+    opportunity_traces = traces.list_execution_traces(limit=10, skill_name="opportunity_pipeline")
+    assert any(row["role"] == "opportunity_transition" for row in opportunity_traces)
 
 
 def test_phase_gate_context_packet_continue_and_outcome_backpropagation(test_data_dir):
     db = DatabaseManager(str(test_data_dir))
     pipeline = OpportunityPipelineSkill(db)
+    traces = HarnessVariantManager(str(test_data_dir / "telemetry.db"))
     financial = db.get_connection("financial_ledger")
     strategic = db.get_connection("strategic_memory")
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -359,6 +368,9 @@ def test_phase_gate_context_packet_continue_and_outcome_backpropagation(test_dat
     assert calibration["predicted_outcome"] == "PURSUE"
     assert calibration["prediction_correct"] == 1.0
     assert closed["learning_record"]["operator_learning_record"]["result"] == "positive"
+    opportunity_traces = traces.list_execution_traces(limit=10, skill_name="opportunity_pipeline")
+    assert any(row["role"] == "phase_gate_trigger" for row in opportunity_traces)
+    assert any(row["role"] == "phase_gate_verdict" for row in opportunity_traces)
 
 
 def test_phase_gate_pause_kill_and_resume_flow(test_data_dir):
@@ -518,6 +530,7 @@ def test_route_brief_creates_harvest_and_qualified_opportunity_actions(test_data
     research = ResearchDomainSkill(db)
     memory = StrategicMemorySkill(db)
     operator = db.get_connection("operator_digest")
+    traces = HarnessVariantManager(str(test_data_dir / "telemetry.db"))
     now = datetime.datetime.now(datetime.timezone.utc)
     runtime = MockHermesRuntime(data_dir=str(test_data_dir))
     _seed_council(runtime)
@@ -605,3 +618,7 @@ def test_route_brief_creates_harvest_and_qualified_opportunity_actions(test_data
     assert held_route["brief_id"] == held_brief_id
     assert held_route["actions"][0]["type"] == "opportunity_deferred"
     assert json.loads(held_task_row["follow_up_tasks"]) == [held_route["actions"][0]["follow_up_task_id"]]
+    research_traces = traces.list_execution_traces(limit=10, skill_name="research_domain")
+    council_traces = traces.list_execution_traces(limit=10, skill_name="council")
+    assert any(row["role"] == "research_task_routing" for row in research_traces)
+    assert any(row["role"] == "council_deliberation" for row in council_traces)

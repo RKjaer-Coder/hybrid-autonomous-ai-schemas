@@ -1348,3 +1348,47 @@ def test_operator_can_run_replay_eval_from_execution_traces(test_data_dir):
     assert evaluated["eval_result"]["traces_evaluated"] == 3
     assert evaluated["eval_result"]["known_bad_block_rate"] == 1.0
     assert evaluated["eval_result"]["gate_1_pass"] is True
+
+
+def test_replay_readiness_summary_surfaces_threshold_gap(test_data_dir):
+    db = DatabaseManager(str(test_data_dir))
+    observability = ObservabilitySkill(db, None, None)
+    manager = HarnessVariantManager(str(test_data_dir / "telemetry.db"))
+
+    manager.log_execution_trace(
+        ExecutionTrace(
+            trace_id="runtime-ready-gap",
+            task_id="task-gap-1",
+            role="operator_workflow",
+            skill_name="runtime",
+            harness_version="operator_workflow_v1",
+            intent_goal="baseline trace",
+            steps=[],
+            prompt_template="operator_workflow",
+            context_assembled="runtime workflow",
+            retrieval_queries=[],
+            judge_verdict="PASS",
+            judge_reasoning="ok",
+            outcome_score=1.0,
+            cost_usd=0.0,
+            duration_ms=10,
+            training_eligible=True,
+            retention_class="STANDARD",
+            source_chain_id="chain-gap-1",
+            source_session_id="session-gap-1",
+            source_trace_id=None,
+            created_at="2026-04-21T14:00:00+00:00",
+        )
+    )
+
+    health = observability.system_health()
+    replay = health["harness_variants"]["execution_traces"]["replay_readiness"]
+
+    assert replay["status"] == "IMPLEMENTED_BELOW_ACTIVATION_THRESHOLD"
+    assert replay["eligible_source_traces"] == 1
+    assert replay["known_bad_source_traces"] == 0
+    assert replay["distinct_skill_count"] == 1
+    assert replay["minimum_eligible_traces"] == 500
+    assert replay["minimum_known_bad_traces"] == 25
+    assert replay["minimum_distinct_skills"] == 3
+    assert replay["blockers"]

@@ -113,8 +113,10 @@ flow against a real Hermes installation on the Mac Studio and confirm the live
 CLI/profile surface end to end.
 
 The highest-priority remaining non-hardware work is now to widen this replay
-substrate across more repo-owned flows so the §8.3b frontier is driven by
-broader archived evidence instead of primarily the runtime proofs.
+substrate across the remaining high-value repo surfaces, especially
+strategic-memory routing and other non-runtime flows that still do not emit
+first-class `execution_traces`, so the §8.3b frontier keeps moving away from
+runtime-heavy evidence.
 
 ## What Is In This Repo
 
@@ -143,6 +145,11 @@ Today, this repository includes:
 - runtime workflow trace logging beyond the contract harness, so both the
   deterministic operator workflow and replay engine write durable telemetry
   evidence into `telemetry.db`
+- first-class non-runtime trace capture in the research-task completion/routing,
+  opportunity-transition/phase-gate, and council-deliberation paths
+- explicit replay-readiness guardrails in system-health/operator surfaces, so
+  the repo can distinguish "replay implemented" from "replay sufficiently
+  broad to trust at activation scale"
 - GitHub Actions CI that runs the full test suite on `main`, `codex/**`, and
   pull requests to `main`
 

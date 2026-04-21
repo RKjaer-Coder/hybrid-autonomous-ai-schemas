@@ -6,6 +6,7 @@ import uuid
 from dataclasses import asdict, dataclass
 from typing import Any, Optional
 
+from harness_variants import HarnessVariantManager
 from skills.db_manager import DatabaseManager
 
 
@@ -42,6 +43,7 @@ class ResearchTaskRecord:
 class ResearchDomainSkill:
     def __init__(self, db_manager: DatabaseManager):
         self._db = db_manager
+        self._harness_variants = HarnessVariantManager(str(db_manager.data_dir / "telemetry.db"))
 
     def create_task(
         self,
@@ -160,16 +162,55 @@ class ResearchDomainSkill:
                 (output_brief_id,),
             ).fetchone()
             if brief is None:
+                self._log_trace(
+                    task_id=task_id,
+                    role="research_task_completion",
+                    action_name="complete_task",
+                    intent_goal=f"Complete research task {task_id}",
+                    payload={"error": f"missing_brief:{output_brief_id}"},
+                    context_assembled=f"task_id={task_id}",
+                    retrieval_queries=[],
+                    judge_verdict="FAIL",
+                    judge_reasoning=f"Brief {output_brief_id} was not found.",
+                )
                 raise KeyError(output_brief_id)
             if brief["task_id"] != task_id:
+                self._log_trace(
+                    task_id=task_id,
+                    role="research_task_completion",
+                    action_name="complete_task",
+                    intent_goal=f"Complete research task {task_id}",
+                    payload={"error": "brief_task_mismatch", "brief_id": output_brief_id},
+                    context_assembled=f"task_id={task_id}",
+                    retrieval_queries=[],
+                    judge_verdict="FAIL",
+                    judge_reasoning="Completion brief did not belong to the task.",
+                )
                 raise ValueError("brief does not belong to task")
-        return self._transition_task(
+        result = self._transition_task(
             task_id,
             "COMPLETE",
             output_brief_id=output_brief_id,
             actual_spend_usd=actual_spend_usd,
             follow_up_tasks=follow_up_tasks,
         )
+        self._log_trace(
+            task_id=task_id,
+            role="research_task_completion",
+            action_name="complete_task",
+            intent_goal=f"Complete research task {result['title']}",
+            payload={
+                "status": result["status"],
+                "output_brief_id": result["output_brief_id"],
+                "actual_spend_usd": result["actual_spend_usd"],
+                "follow_up_tasks": result["follow_up_tasks"],
+            },
+            context_assembled=result["brief"],
+            retrieval_queries=result["tags"],
+            judge_reasoning="Research task completed and persisted.",
+            source_chain_id=task_id,
+        )
+        return result
 
     def route_task_output(
         self,
@@ -181,16 +222,40 @@ class ResearchDomainSkill:
     ) -> dict[str, Any]:
         task = self._fetch_task(task_id)
         if task["output_brief_id"] is None:
+            self._log_trace(
+                task_id=task_id,
+                role="research_task_routing",
+                action_name="route_task_output",
+                intent_goal=f"Route research output for task {task['title']}",
+                payload={"error": "missing_output_brief"},
+                context_assembled=task["brief"],
+                retrieval_queries=task["tags"],
+                judge_verdict="FAIL",
+                judge_reasoning="Task had no output brief to route.",
+                source_chain_id=task_id,
+            )
             raise ValueError("task has no output brief to route")
         from skills.strategic_memory.skill import StrategicMemorySkill
 
         memory = StrategicMemorySkill(self._db)
-        return memory.route_brief(
+        result = memory.route_brief(
             task["output_brief_id"],
             target_interface=target_interface,
             harvest_prompt=harvest_prompt,
             include_council_review=include_council_review,
         )
+        self._log_trace(
+            task_id=task_id,
+            role="research_task_routing",
+            action_name="route_task_output",
+            intent_goal=f"Route research output for task {task['title']}",
+            payload=result,
+            context_assembled=task["brief"],
+            retrieval_queries=task["tags"],
+            judge_reasoning="Research task output routed into downstream operator or opportunity flow.",
+            source_chain_id=task_id,
+        )
+        return result
 
     def _transition_task(
         self,
@@ -267,6 +332,36 @@ class ResearchDomainSkill:
     @staticmethod
     def _utc_now() -> str:
         return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
+
+    def _log_trace(
+        self,
+        *,
+        task_id: str,
+        role: str,
+        action_name: str,
+        intent_goal: str,
+        payload: Any,
+        context_assembled: str,
+        retrieval_queries: list[str],
+        judge_verdict: str = "PASS",
+        judge_reasoning: str | None = None,
+        source_chain_id: str | None = None,
+    ) -> None:
+        if not self._harness_variants.available:
+            return
+        self._harness_variants.log_skill_action_trace(
+            task_id=task_id,
+            role=role,
+            skill_name="research_domain",
+            action_name=action_name,
+            intent_goal=intent_goal,
+            action_payload=payload,
+            context_assembled=context_assembled,
+            retrieval_queries=retrieval_queries,
+            judge_verdict=judge_verdict,
+            judge_reasoning=judge_reasoning,
+            source_chain_id=source_chain_id,
+        )
 
 
 _SKILL: Optional[ResearchDomainSkill] = None

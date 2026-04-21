@@ -44,6 +44,10 @@ class DatabaseManager:
         self._data_dir = Path(data_dir)
         self._local = threading.local()
 
+    @property
+    def data_dir(self) -> Path:
+        return self._data_dir
+
     def get_connection(self, db_name: str) -> sqlite3.Connection:
         if db_name not in DATABASE_CONFIGS:
             raise KeyError(f"Unknown database: {db_name}")

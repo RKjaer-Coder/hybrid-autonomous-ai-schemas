@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 from council.context_budget import build_context_packet
 from council.types import DEFAULT_ROLE_WEIGHTS, DecisionType, Recommendation
+from harness_variants import HarnessVariantManager
 from skills.db_manager import DatabaseManager
 
 
@@ -57,6 +58,7 @@ class OpportunityRecord:
 class OpportunityPipelineSkill:
     def __init__(self, db_manager: DatabaseManager):
         self._db = db_manager
+        self._harness_variants = HarnessVariantManager(str(db_manager.data_dir / "telemetry.db"))
 
     def create_opportunity(
         self,
@@ -142,9 +144,35 @@ class OpportunityPipelineSkill:
         conn = self._db.get_connection("strategic_memory")
         row = conn.execute("SELECT * FROM opportunity_records WHERE opportunity_id = ?", (opportunity_id,)).fetchone()
         if row is None:
+            self._log_trace(
+                task_id=opportunity_id,
+                role="opportunity_transition",
+                action_name="transition_opportunity",
+                intent_goal=f"Transition opportunity {opportunity_id}",
+                payload={"error": "missing_opportunity", "new_status": new_status},
+                context_assembled=f"opportunity_id={opportunity_id}",
+                judge_verdict="FAIL",
+                judge_reasoning="Opportunity was not found.",
+                source_chain_id=opportunity_id,
+            )
             raise KeyError(opportunity_id)
         current_status = row["status"]
         if new_status not in VALID_OPPORTUNITY_TRANSITIONS.get(current_status, set()):
+            self._log_trace(
+                task_id=opportunity_id,
+                role="opportunity_transition",
+                action_name="transition_opportunity",
+                intent_goal=f"Transition opportunity {row['title']}",
+                payload={
+                    "error": "invalid_transition",
+                    "current_status": current_status,
+                    "new_status": new_status,
+                },
+                context_assembled=row["thesis"],
+                judge_verdict="FAIL",
+                judge_reasoning=f"Invalid opportunity transition {current_status} -> {new_status}.",
+                source_chain_id=opportunity_id,
+            )
             raise ValueError(f"invalid transition {current_status} -> {new_status}")
         conn.execute(
             """
@@ -170,7 +198,24 @@ class OpportunityPipelineSkill:
             ),
         )
         conn.commit()
-        return self._fetch_opportunity(opportunity_id)
+        result = self._fetch_opportunity(opportunity_id)
+        self._log_trace(
+            task_id=opportunity_id,
+            role="opportunity_transition",
+            action_name="transition_opportunity",
+            intent_goal=f"Transition opportunity {result['title']}",
+            payload={
+                "status": result["status"],
+                "validation_spend": result["validation_spend"],
+                "project_id": result["project_id"],
+                "council_verdict_id": result["council_verdict_id"],
+            },
+            context_assembled=result["thesis"],
+            retrieval_queries=result["provenance_links"],
+            judge_reasoning=f"Opportunity moved to {result['status']}.",
+            source_chain_id=opportunity_id,
+        )
+        return result
 
     def handoff_to_project(
         self,
@@ -341,7 +386,7 @@ class OpportunityPipelineSkill:
         )
         financial.commit()
         operator.commit()
-        return {
+        result = {
             "gate_id": gate_id,
             "project_id": project_id,
             "phase_id": phase["phase_id"],
@@ -351,6 +396,17 @@ class OpportunityPipelineSkill:
             "council_tier": council_tier,
             "context_packet": context_packet,
         }
+        self._log_trace(
+            task_id=project_id,
+            role="phase_gate_trigger",
+            action_name="trigger_phase_gate",
+            intent_goal=f"Trigger phase gate for {project['name']}",
+            payload=result,
+            context_assembled=json.dumps(context_packet, sort_keys=True),
+            judge_reasoning=f"Phase gate {effective_gate_type} triggered for {phase['name']}.",
+            source_chain_id=project_id,
+        )
+        return result
 
     def apply_phase_gate_verdict(
         self,
@@ -366,6 +422,17 @@ class OpportunityPipelineSkill:
         failure_analysis: str | None = None,
     ) -> dict[str, Any]:
         if verdict not in PHASE_GATE_VERDICTS:
+            self._log_trace(
+                task_id=project_id,
+                role="phase_gate_verdict",
+                action_name="apply_phase_gate_verdict",
+                intent_goal=f"Apply phase gate verdict for {project_id}",
+                payload={"error": "invalid_verdict", "verdict": verdict},
+                context_assembled=f"project_id={project_id}",
+                judge_verdict="FAIL",
+                judge_reasoning=f"Invalid phase gate verdict {verdict}.",
+                source_chain_id=project_id,
+            )
             raise ValueError(f"invalid phase gate verdict: {verdict}")
         now = self._utc_now()
         financial = self._db.get_connection("financial_ledger")
@@ -464,19 +531,41 @@ class OpportunityPipelineSkill:
             financial.commit()
             strategic.commit()
             operator.commit()
-            return {
+            result = {
                 "project": self._fetch_project(financial, project_id),
                 "phase": self._fetch_phase(financial, phase["phase_id"]),
                 "recommendation_id": recommendation_id,
                 "g2_gate_id": g2_gate_id,
             }
+            self._log_trace(
+                task_id=project_id,
+                role="phase_gate_verdict",
+                action_name="apply_phase_gate_verdict",
+                intent_goal=f"Apply phase gate verdict for {project['name']}",
+                payload=result,
+                context_assembled=json.dumps(gate_result, sort_keys=True),
+                judge_reasoning="Phase gate produced a kill recommendation and G2 gate.",
+                source_chain_id=project_id,
+            )
+            return result
         financial.commit()
         strategic.commit()
         operator.commit()
-        return {
+        result = {
             "project": self._fetch_project(financial, project_id),
             "phase": self._fetch_phase(financial, phase["phase_id"]),
         }
+        self._log_trace(
+            task_id=project_id,
+            role="phase_gate_verdict",
+            action_name="apply_phase_gate_verdict",
+            intent_goal=f"Apply phase gate verdict for {project['name']}",
+            payload=result,
+            context_assembled=json.dumps(gate_result, sort_keys=True),
+            judge_reasoning=f"Phase gate verdict {verdict} applied.",
+            source_chain_id=project_id,
+        )
+        return result
 
     def resume_project(
         self,
@@ -728,7 +817,7 @@ class OpportunityPipelineSkill:
                     "phase_id": phase["phase_id"],
                     "name": phase["name"],
                     "sequence": phase["sequence"],
-                    "scope": phase["scope"],
+                "scope": phase["scope"],
                     "success_criteria": json.loads(phase["success_criteria"]),
                     "compute_budget": json.loads(phase["compute_budget"]),
                     "compute_consumed": json.loads(phase["compute_consumed"]),
@@ -1200,6 +1289,36 @@ class OpportunityPipelineSkill:
     @staticmethod
     def _utc_now() -> str:
         return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
+
+    def _log_trace(
+        self,
+        *,
+        task_id: str,
+        role: str,
+        action_name: str,
+        intent_goal: str,
+        payload: Any,
+        context_assembled: str,
+        judge_verdict: str = "PASS",
+        judge_reasoning: str | None = None,
+        retrieval_queries: list[str] | None = None,
+        source_chain_id: str | None = None,
+    ) -> None:
+        if not self._harness_variants.available:
+            return
+        self._harness_variants.log_skill_action_trace(
+            task_id=task_id,
+            role=role,
+            skill_name="opportunity_pipeline",
+            action_name=action_name,
+            intent_goal=intent_goal,
+            action_payload=payload,
+            context_assembled=context_assembled,
+            retrieval_queries=retrieval_queries,
+            judge_verdict=judge_verdict,
+            judge_reasoning=judge_reasoning,
+            source_chain_id=source_chain_id,
+        )
 
 
 _SKILL: Optional[OpportunityPipelineSkill] = None

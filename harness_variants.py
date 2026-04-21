@@ -61,6 +61,10 @@ _RISK_VARIANT_CUES = {
     "network": 0.03,
     "sudo": 0.1,
 }
+REPLAY_ACTIVATION_MIN_ELIGIBLE_TRACES = 500
+REPLAY_ACTIVATION_MIN_KNOWN_BAD_TRACES = 25
+REPLAY_ACTIVATION_MIN_DISTINCT_SKILLS = 3
+DEFAULT_REPLAY_SAMPLE_TARGET = 50
 
 
 def _parse_ts(value: str) -> datetime.datetime:
@@ -262,6 +266,69 @@ class HarnessVariantManager:
         assert row is not None
         return self._trace_row_to_dict(row)
 
+    def log_skill_action_trace(
+        self,
+        *,
+        task_id: str,
+        role: str,
+        skill_name: str,
+        action_name: str,
+        intent_goal: str,
+        action_payload: Any,
+        context_assembled: str,
+        retrieval_queries: list[str] | None = None,
+        harness_version: str | None = None,
+        judge_verdict: str = "PASS",
+        judge_reasoning: str | None = None,
+        outcome_score: float | None = None,
+        training_eligible: bool | None = None,
+        retention_class: str | None = None,
+        source_chain_id: str | None = None,
+        source_session_id: str | None = None,
+        source_trace_id: str | None = None,
+        model_used: str = "repo-skill",
+        duration_ms: int = 0,
+        cost_usd: float = 0.0,
+        created_at: str | None = None,
+    ) -> dict[str, Any]:
+        verdict = judge_verdict.upper()
+        eligible = training_eligible if training_eligible is not None else verdict == "PASS"
+        trace = ExecutionTrace(
+            trace_id=str(uuid.uuid4()),
+            task_id=task_id,
+            role=role,
+            skill_name=skill_name,
+            harness_version=harness_version or f"{skill_name}_{action_name}_v1",
+            intent_goal=intent_goal,
+            steps=[
+                ExecutionTraceStep(
+                    step_index=1,
+                    tool_call=f"{skill_name}.{action_name}",
+                    tool_result=json.dumps(action_payload, sort_keys=True, default=str)[:4096],
+                    tool_result_file=None,
+                    tokens_in=0,
+                    tokens_out=0,
+                    latency_ms=duration_ms,
+                    model_used=model_used,
+                )
+            ],
+            prompt_template=action_name,
+            context_assembled=context_assembled,
+            retrieval_queries=list(retrieval_queries or []),
+            judge_verdict=verdict,
+            judge_reasoning=judge_reasoning or ("Trace logged successfully." if verdict == "PASS" else "Action failed."),
+            outcome_score=outcome_score if outcome_score is not None else (1.0 if verdict == "PASS" else 0.0),
+            cost_usd=cost_usd,
+            duration_ms=duration_ms,
+            training_eligible=eligible,
+            retention_class=retention_class or ("STANDARD" if verdict == "PASS" else "FAILURE_AUDIT"),
+            source_chain_id=source_chain_id,
+            source_session_id=source_session_id,
+            source_trace_id=source_trace_id,
+            created_at=created_at or self._now(None),
+        )
+        return self.log_execution_trace(trace)
+
     def list_execution_traces(
         self,
         *,
@@ -304,6 +371,10 @@ class HarnessVariantManager:
                 "total_count": 0,
                 "training_eligible_count": 0,
                 "failure_audit_count": 0,
+                "source_trace_count": 0,
+                "replay_trace_count": 0,
+                "distinct_skill_count": 0,
+                "replay_readiness": self.replay_readiness_summary(),
                 "recent": [],
             }
         with self._connect() as conn:
@@ -312,7 +383,10 @@ class HarnessVariantManager:
                 SELECT
                     COUNT(*) AS total_count,
                     SUM(CASE WHEN training_eligible = 1 THEN 1 ELSE 0 END) AS training_eligible_count,
-                    SUM(CASE WHEN retention_class = 'FAILURE_AUDIT' THEN 1 ELSE 0 END) AS failure_audit_count
+                    SUM(CASE WHEN retention_class = 'FAILURE_AUDIT' THEN 1 ELSE 0 END) AS failure_audit_count,
+                    SUM(CASE WHEN source_trace_id IS NULL THEN 1 ELSE 0 END) AS source_trace_count,
+                    SUM(CASE WHEN source_trace_id IS NOT NULL THEN 1 ELSE 0 END) AS replay_trace_count,
+                    COUNT(DISTINCT skill_name) AS distinct_skill_count
                 FROM execution_traces
                 """
             ).fetchone()
@@ -321,7 +395,106 @@ class HarnessVariantManager:
             "total_count": int(row["total_count"] or 0),
             "training_eligible_count": int(row["training_eligible_count"] or 0),
             "failure_audit_count": int(row["failure_audit_count"] or 0),
+            "source_trace_count": int(row["source_trace_count"] or 0),
+            "replay_trace_count": int(row["replay_trace_count"] or 0),
+            "distinct_skill_count": int(row["distinct_skill_count"] or 0),
+            "replay_readiness": self.replay_readiness_summary(),
             "recent": self.list_execution_traces(limit=3),
+        }
+
+    def replay_readiness_summary(self) -> dict[str, Any]:
+        if not self._available:
+            return {
+                "available": False,
+                "status": "UNAVAILABLE",
+                "minimum_eligible_traces": REPLAY_ACTIVATION_MIN_ELIGIBLE_TRACES,
+                "minimum_known_bad_traces": REPLAY_ACTIVATION_MIN_KNOWN_BAD_TRACES,
+                "minimum_distinct_skills": REPLAY_ACTIVATION_MIN_DISTINCT_SKILLS,
+                "sample_target": DEFAULT_REPLAY_SAMPLE_TARGET,
+                "eligible_source_traces": 0,
+                "known_bad_source_traces": 0,
+                "distinct_skill_count": 0,
+                "blockers": ["telemetry_unavailable"],
+                "skill_coverage": [],
+            }
+        with self._connect() as conn:
+            counts = conn.execute(
+                """
+                SELECT
+                    SUM(
+                        CASE
+                            WHEN source_trace_id IS NULL
+                             AND training_eligible = 1
+                             AND judge_verdict = 'PASS'
+                            THEN 1 ELSE 0
+                        END
+                    ) AS eligible_source_traces,
+                    SUM(
+                        CASE
+                            WHEN source_trace_id IS NULL
+                             AND (training_eligible = 0 OR judge_verdict != 'PASS' OR retention_class = 'FAILURE_AUDIT')
+                            THEN 1 ELSE 0
+                        END
+                    ) AS known_bad_source_traces,
+                    COUNT(DISTINCT CASE WHEN source_trace_id IS NULL THEN skill_name END) AS distinct_skill_count
+                FROM execution_traces
+                """
+            ).fetchone()
+            coverage_rows = conn.execute(
+                """
+                SELECT
+                    skill_name,
+                    SUM(
+                        CASE
+                            WHEN source_trace_id IS NULL
+                             AND training_eligible = 1
+                             AND judge_verdict = 'PASS'
+                            THEN 1 ELSE 0
+                        END
+                    ) AS eligible_source_traces,
+                    SUM(
+                        CASE
+                            WHEN source_trace_id IS NULL
+                             AND (training_eligible = 0 OR judge_verdict != 'PASS' OR retention_class = 'FAILURE_AUDIT')
+                            THEN 1 ELSE 0
+                        END
+                    ) AS known_bad_source_traces
+                FROM execution_traces
+                WHERE source_trace_id IS NULL
+                GROUP BY skill_name
+                ORDER BY eligible_source_traces DESC, known_bad_source_traces DESC, skill_name ASC
+                LIMIT 10
+                """
+            ).fetchall()
+        eligible = int(counts["eligible_source_traces"] or 0)
+        known_bad = int(counts["known_bad_source_traces"] or 0)
+        distinct_skills = int(counts["distinct_skill_count"] or 0)
+        blockers: list[str] = []
+        if eligible < REPLAY_ACTIVATION_MIN_ELIGIBLE_TRACES:
+            blockers.append(f"eligible_traces {eligible}/{REPLAY_ACTIVATION_MIN_ELIGIBLE_TRACES}")
+        if known_bad < REPLAY_ACTIVATION_MIN_KNOWN_BAD_TRACES:
+            blockers.append(f"known_bad_traces {known_bad}/{REPLAY_ACTIVATION_MIN_KNOWN_BAD_TRACES}")
+        if distinct_skills < REPLAY_ACTIVATION_MIN_DISTINCT_SKILLS:
+            blockers.append(f"distinct_skills {distinct_skills}/{REPLAY_ACTIVATION_MIN_DISTINCT_SKILLS}")
+        return {
+            "available": True,
+            "status": "READY_FOR_BROADER_REPLAY" if not blockers else "IMPLEMENTED_BELOW_ACTIVATION_THRESHOLD",
+            "minimum_eligible_traces": REPLAY_ACTIVATION_MIN_ELIGIBLE_TRACES,
+            "minimum_known_bad_traces": REPLAY_ACTIVATION_MIN_KNOWN_BAD_TRACES,
+            "minimum_distinct_skills": REPLAY_ACTIVATION_MIN_DISTINCT_SKILLS,
+            "sample_target": DEFAULT_REPLAY_SAMPLE_TARGET,
+            "eligible_source_traces": eligible,
+            "known_bad_source_traces": known_bad,
+            "distinct_skill_count": distinct_skills,
+            "blockers": blockers,
+            "skill_coverage": [
+                {
+                    "skill_name": row["skill_name"],
+                    "eligible_source_traces": int(row["eligible_source_traces"] or 0),
+                    "known_bad_source_traces": int(row["known_bad_source_traces"] or 0),
+                }
+                for row in coverage_rows
+            ],
         }
 
     def propose_variant(

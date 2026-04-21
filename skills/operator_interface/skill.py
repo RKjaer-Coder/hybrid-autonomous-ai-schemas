@@ -1057,6 +1057,14 @@ class OperatorInterfaceSkill:
                 + f"{health['harness_variants']['execution_traces']['total_count']}"
                 + f"/eligible:{health['harness_variants']['execution_traces']['training_eligible_count']}"
             )
+        replay_readiness = health["harness_variants"]["execution_traces"]["replay_readiness"]
+        if replay_readiness["available"] and replay_readiness["status"] != "READY_FOR_BROADER_REPLAY":
+            issues.append(
+                "replay_readiness="
+                + f"{replay_readiness['eligible_source_traces']}/{replay_readiness['minimum_eligible_traces']}"
+                + f" bad:{replay_readiness['known_bad_source_traces']}/{replay_readiness['minimum_known_bad_traces']}"
+                + f" skills:{replay_readiness['distinct_skill_count']}/{replay_readiness['minimum_distinct_skills']}"
+            )
         if health["unacknowledged_t3_alerts"]:
             issues.append(f"T3 pending ack={health['unacknowledged_t3_alerts']}")
         if health["research_health"]["stale_tasks"] or health["research_health"]["failed_tasks"]:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from harness_variants import HarnessVariantManager
 from skills.council.skill import CouncilSkill
 from skills.db_manager import DatabaseManager
 from skills.hermes_interfaces import MockHermesRuntime
@@ -25,6 +26,9 @@ def test_tier1_deliberation_runs_and_persists(test_data_dir):
     conn = db.get_connection("strategic_memory")
     n = conn.execute("SELECT COUNT(*) FROM council_verdicts").fetchone()[0]
     assert n == 1
+    traces = HarnessVariantManager(str(test_data_dir / "telemetry.db")).list_execution_traces(limit=5, skill_name="council")
+    assert traces[0]["role"] == "council_deliberation"
+    assert traces[0]["judge_verdict"] == "PASS"
 
 
 def test_context_budget_enforced(test_data_dir):
@@ -34,6 +38,9 @@ def test_context_budget_enforced(test_data_dir):
     s = CouncilSkill(rt, db)
     with pytest.raises(ValueError):
         s.deliberate("opportunity_screen", "subj-1", "word " * 5000)
+    traces = HarnessVariantManager(str(test_data_dir / "telemetry.db")).list_execution_traces(limit=5, skill_name="council")
+    assert traces[0]["judge_verdict"] == "FAIL"
+    assert traces[0]["retention_class"] == "FAILURE_AUDIT"
 
 
 def test_auto_escalation_confidence_lt_point_60(test_data_dir):
