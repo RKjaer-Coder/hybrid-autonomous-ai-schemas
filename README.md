@@ -272,10 +272,10 @@ runs a live Hermes CLI smoke test when Hermes is available, verifies
 `STEP_OUTCOME`/log evidence, creates a deterministic data snapshot under the
 runtime checkpoints directory, and exits clearly when Hermes is not installed.
 
-It also reports two current drifts explicitly instead of hiding them:
+It also reports the remaining runtime/spec drift explicitly instead of hiding it:
 
-- `spec/00_manifest.md` declares Hermes `v0.9.0+`, while `spec/s07_hermes_config.md`
-  §7.5c still says `v0.8.0+`
+- the repo runtime now targets Hermes `v0.10.0+`, so any lingering `v0.8.x`
+  or `v0.9.x` wording should be treated as stale
 - `spec/s07_hermes_config.md` §7.5c D1-2 still names
   `~/.hermes/profiles/<profile>/profile.yaml`, while current Hermes docs/profile
   commands center `config.yaml` inside the profile directory, so the repo now
@@ -307,6 +307,15 @@ That runtime proof now exercises this chain from a clean layout:
 `heartbeat -> immune check -> route -> research brief -> opportunity routing ->
 harvest request -> council review -> project handoff -> phase gate ->
 operator alert -> digest -> observability readback`
+
+The runtime bundle now also includes:
+
+- a machine-readable milestone status surface: `python3 -m skills.runtime --milestone-status`
+- a Hermes Workspace-oriented operator snapshot: `python3 -m skills.runtime --workspace-overview`
+- deterministic task-loop and research-cron proofs:
+  `python3 -m skills.runtime --task-loop-proof` and
+  `python3 -m skills.runtime --research-cron-proof`
+- a one-command repo-side bootstrap pass: `python3 -m skills.runtime --bootstrap-stack`
 
 If you only want to bootstrap and verify the databases directly:
 

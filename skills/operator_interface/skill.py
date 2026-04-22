@@ -13,6 +13,8 @@ from immune.judge_lifecycle import JudgeLifecycleManager
 from runtime_control import RuntimeControlManager
 from skills.db_manager import DatabaseManager
 from skills.financial_router.skill import FinancialRouterSkill
+from skills.config import IntegrationConfig
+from skills.milestone_status import evaluate_milestone_status
 
 
 DAILY_SECTION_ORDER = [
@@ -380,6 +382,43 @@ class OperatorInterfaceSkill:
 
     def runtime_status(self) -> dict[str, Any]:
         return self._runtime_control.status()
+
+    def milestone_status(self) -> dict[str, Any]:
+        config = IntegrationConfig(data_dir=str(self._db.data_dir))
+        return evaluate_milestone_status(config, db_manager=self._db)
+
+    def workspace_overview(self) -> dict[str, Any]:
+        now = self._utc_now()
+        load_snapshot = self._record_operator_load_snapshot(now)
+        health = self._system_health_snapshot(now, load_snapshot)
+        operator = self._db.get_connection("operator_digest")
+        pending = operator.execute(
+            """
+            SELECT item_type, label, priority, expires_at
+            FROM (
+                SELECT 'gate' AS item_type, gate_type AS label, gate_type AS priority, expires_at
+                FROM gate_log
+                WHERE status = 'PENDING'
+                UNION ALL
+                SELECT 'harvest' AS item_type, target_interface AS label, priority, expires_at
+                FROM harvest_requests
+                WHERE status = 'PENDING'
+            )
+            ORDER BY expires_at ASC
+            LIMIT 10
+            """
+        ).fetchall()
+        return {
+            "runtime_status": self.runtime_status(),
+            "pending_decisions": [dict(row) for row in pending],
+            "pending_g3_requests": self.list_g3_approval_requests(limit=5, status="PENDING", reference_time=now),
+            "pending_quarantines": self.list_quarantined_responses(limit=5, pending_review_only=True),
+            "execution_traces": self.list_execution_traces(limit=5),
+            "harness_frontier": self.harness_frontier(limit=5),
+            "replay_readiness": health["harness_variants"]["execution_traces"]["replay_readiness"],
+            "judge_deadlock": health["judge_deadlock"],
+            "milestone_health": self.milestone_status(),
+        }
 
     def list_runtime_halt_events(
         self,
@@ -1590,6 +1629,10 @@ def operator_interface_entry(action: str, **kwargs):
         )
     if action == "runtime_status":
         return _SKILL.runtime_status()
+    if action == "milestone_status":
+        return _SKILL.milestone_status()
+    if action == "workspace_overview":
+        return _SKILL.workspace_overview()
     if action == "list_runtime_halt_events":
         return _SKILL.list_runtime_halt_events(
             limit=kwargs.get("limit", 20),

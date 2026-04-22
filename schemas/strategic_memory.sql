@@ -83,6 +83,26 @@ CREATE TABLE IF NOT EXISTS research_tasks (
 CREATE INDEX IF NOT EXISTS idx_research_tasks_domain_priority_status ON research_tasks(domain, priority, status);
 CREATE INDEX IF NOT EXISTS idx_research_tasks_status_stale_after ON research_tasks(status, stale_after);
 
+CREATE TABLE IF NOT EXISTS standing_briefs (
+  standing_brief_id TEXT PRIMARY KEY,
+  domain INTEGER NOT NULL CHECK (domain BETWEEN 1 AND 5),
+  title TEXT NOT NULL,
+  brief TEXT NOT NULL,
+  cron_expr TEXT NOT NULL,
+  target_interface TEXT NOT NULL,
+  include_council_review INTEGER DEFAULT 0 CHECK (include_council_review IN (0, 1)),
+  status TEXT NOT NULL CHECK (status IN ('ACTIVE', 'PAUSED', 'ARCHIVED')),
+  tags TEXT DEFAULT '[]' CHECK (json_valid(tags)),
+  last_task_id TEXT,
+  last_job_id TEXT,
+  last_run_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_standing_briefs_status_domain ON standing_briefs(status, domain);
+CREATE INDEX IF NOT EXISTS idx_standing_briefs_updated_at ON standing_briefs(updated_at);
+
 CREATE TABLE IF NOT EXISTS intelligence_briefs (
   brief_id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL REFERENCES research_tasks(task_id),

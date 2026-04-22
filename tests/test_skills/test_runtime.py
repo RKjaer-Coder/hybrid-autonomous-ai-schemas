@@ -12,6 +12,7 @@ from skills.runtime import (
     VERSION_DRIFT_NOTE,
     ExternalCommandResult,
     assess_hermes_readiness,
+    bootstrap_stack,
     bootstrap_runtime,
     doctor_runtime,
     exercise_hermes_contract,
@@ -20,6 +21,8 @@ from skills.runtime import (
     main as runtime_main,
     migrate_runtime_databases,
     prepare_runtime_directories,
+    run_research_cron_proof,
+    run_task_loop_proof,
     run_operator_workflow,
 )
 
@@ -118,13 +121,24 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
     assert manifest["repo_root"] == str(repo_root.resolve())
     assert manifest["profile_config_path"] == str(profile_config_path)
     assert manifest["spec_profile_path"] == str(spec_profile_path)
+    assert Path(manifest["network_controls_path"]).is_file()
+    assert Path(manifest["gateway_manifest_path"]).is_file()
+    assert Path(manifest["workspace_manifest_path"]).is_file()
+    assert Path(manifest["operator_validation_checklist_path"]).is_file()
     assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["profile_name"] == "hybrid-test"
     assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["routing"]["max_api_spend_usd"] == 0.0
+    assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["network_controls"]["proxy_bind_url"] == "http://127.0.0.1:8877"
+    assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["workspace"]["enabled"] is True
     assert profile_config["approvals"]["mode"] == "manual"
     assert spec_profile["profile"] == "hybrid-test"
     assert spec_profile["limits"]["max_api_spend_usd"] == 0.0
+    assert spec_profile["network_controls"]["proxy_bind_url"] == "http://127.0.0.1:8877"
     assert "readiness" in manifest["commands"]
     assert "contract_harness" in manifest["commands"]
+    assert "bootstrap_stack" in manifest["commands"]
+    assert "task_loop_proof" in manifest["commands"]
+    assert "research_cron_proof" in manifest["commands"]
+    assert "milestone_status" in manifest["commands"]
     assert sorted(Path(path).name for path in result.linked_skill_paths) == ["immune_system", "strategic_memory"]
     for launcher_path in result.launcher_paths.values():
         launcher = Path(launcher_path)
@@ -253,7 +267,7 @@ def test_assess_hermes_readiness_passes_with_live_hermes_signals(tmp_path, monke
     def runner(argv):
         key = tuple(argv)
         if key == ("hermes", "--version"):
-            return ExternalCommandResult(True, key, 0, "Hermes Agent 0.9.1", "")
+            return ExternalCommandResult(True, key, 0, "Hermes Agent 0.10.0", "")
         if key == ("hermes", "profile", "list"):
             return ExternalCommandResult(True, key, 0, "default\nhybrid-test\n", "")
         if key == ("hermes", "tools", "list"):
@@ -291,7 +305,7 @@ def test_assess_hermes_readiness_passes_with_live_hermes_signals(tmp_path, monke
 
     assert result.ok is True
     assert result.hermes_installed is True
-    assert result.hermes_version == "0.9.1"
+    assert result.hermes_version == "0.10.0"
     assert result.profile_listed is True
     assert all(result.seed_tool_status.values())
     assert all(result.config_status.values())
@@ -377,7 +391,7 @@ def test_assess_hermes_readiness_fails_when_live_config_contract_drifts(tmp_path
     def runner(argv):
         key = tuple(argv)
         if key == ("hermes", "--version"):
-            return ExternalCommandResult(True, key, 0, "Hermes Agent 0.9.1", "")
+            return ExternalCommandResult(True, key, 0, "Hermes Agent 0.10.0", "")
         if key == ("hermes", "profile", "list"):
             return ExternalCommandResult(True, key, 0, "hybrid-test\n", "")
         if key == ("hermes", "tools", "list"):
@@ -429,7 +443,7 @@ def test_assess_hermes_readiness_cli_smoke_checks_step_outcome_and_logs(tmp_path
     def runner(argv):
         key = tuple(argv)
         if key == ("hermes", "--version"):
-            return ExternalCommandResult(True, key, 0, "Hermes Agent 0.9.1", "")
+            return ExternalCommandResult(True, key, 0, "Hermes Agent 0.10.0", "")
         if key == ("hermes", "profile", "list"):
             return ExternalCommandResult(True, key, 0, "hybrid-test\n", "")
         if key == ("hermes", "tools", "list"):
@@ -475,6 +489,47 @@ def test_assess_hermes_readiness_cli_smoke_checks_step_outcome_and_logs(tmp_path
     assert result.cli_smoke_log_trace is True
     assert result.cli_smoke_output == result.cli_smoke_marker
     assert Path(result.checkpoint_backup_path).is_file()
+
+
+def test_task_loop_and_research_cron_proofs_emit_runtime_evidence(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+        profile_name="hybrid-test",
+    )
+    rt = MockHermesRuntime(data_dir=str(tmp_path / "data"))
+
+    task_loop = run_task_loop_proof(config=cfg, repo_root=str(tmp_path), tool_registry=rt)
+    research_cron = run_research_cron_proof(config=cfg, repo_root=str(tmp_path), tool_registry=rt)
+
+    assert task_loop.ok is True
+    assert task_loop.task_id is not None
+    assert task_loop.brief_id is not None
+    assert "opportunity_created" in task_loop.route_summary["action_types"]
+    assert research_cron.ok is True
+    assert research_cron.standing_brief_id is not None
+    assert research_cron.scheduled_job_id is not None
+    assert research_cron.queued_task_id is not None
+
+
+def test_bootstrap_stack_returns_machine_readable_milestone_status(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+        profile_name="hybrid-test",
+    )
+    rt = MockHermesRuntime(data_dir=str(tmp_path / "data"))
+
+    result = bootstrap_stack(config=cfg, repo_root=str(tmp_path), tool_registry=rt)
+
+    assert result.ok is True
+    assert result.milestone_status["milestones"]["M2"]["implemented"] is True
+    assert result.milestone_status["milestones"]["M3"]["proof_status"] == "PASS"
+    assert result.milestone_status["milestones"]["M5"]["proof_status"] == "PASS"
 
 
 def test_run_operator_workflow_installs_profile_before_final_doctor(tmp_path):

@@ -1,4 +1,4 @@
-"""Hermes v0.8.0 bootstrap entrypoint for immune patch integration."""
+"""Hermes v0.10.0+ bootstrap entrypoint for immune patch integration."""
 
 from __future__ import annotations
 
