@@ -727,6 +727,7 @@ class OperatorInterfaceSkill:
     ) -> dict[str, Any]:
         now = self._resolve_now(reference_time)
         matching = self._harness_variants.get_variant(variant_id)
+        replay_readiness = self._harness_variants.replay_readiness_summary()
         result = self._harness_variants.record_eval_result(
             variant_id,
             VariantEvalResult(
@@ -752,8 +753,8 @@ class OperatorInterfaceSkill:
                 traces_evaluated=traces_evaluated,
                 compute_cost_cu=compute_cost_cu,
                 eval_duration_ms=eval_duration_ms,
-                replay_readiness_status="READY_FOR_BROADER_REPLAY",
-                replay_readiness_blockers=[],
+                replay_readiness_status=replay_readiness["status"],
+                replay_readiness_blockers=list(replay_readiness["blockers"]),
                 operator_acknowledged_below_threshold=False,
                 created_at=now,
             ),

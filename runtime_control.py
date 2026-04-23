@@ -98,25 +98,7 @@ class RuntimeControlManager:
             self._ensure_state_row_locked(conn, now)
             existing = self._active_halt_locked(conn)
             if existing is not None:
-                result = self._row_to_halt(existing)
-                self._log_trace(
-                    task_id=result["halt_id"],
-                    role="runtime_halt_reused",
-                    action_name="activate_halt",
-                    intent_goal=f"Re-surface existing runtime halt {result['halt_id']}.",
-                    payload={**result, "requested_source": source, "requested_halt_reason": halt_reason},
-                    context_assembled=(
-                        f"existing_halt_id={result['halt_id']}; source={source}; "
-                        f"requested_halt_reason={halt_reason}"
-                    ),
-                    judge_verdict="FAIL",
-                    judge_reasoning="Runtime halt was already active and remained fail-closed.",
-                    training_eligible=False,
-                    retention_class="FAILURE_AUDIT",
-                    outcome_score=0.0,
-                    created_at=now,
-                )
-                return result
+                return self._row_to_halt(existing)
             halt_id = str(uuid.uuid4())
             conn.execute(
                 """

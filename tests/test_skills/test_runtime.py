@@ -5,6 +5,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
+from harness_variants import HarnessVariantManager
 from runtime_control import RuntimeControlManager
 from skills.config import IntegrationConfig
 from skills.hermes_interfaces import HermesSessionContext, MockHermesRuntime
@@ -66,6 +67,30 @@ def test_runtime_control_manager_does_not_create_telemetry_db_when_missing(tmp_p
 
     assert manager.available is True
     assert not telemetry_db.exists()
+
+
+def test_runtime_control_reuses_active_halt_without_logging_extra_trace(tmp_path):
+    cfg = IntegrationConfig(data_dir=str(tmp_path / "data"))
+    migrate_runtime_databases(cfg)
+
+    manager = RuntimeControlManager(str(tmp_path / "data" / "operator_digest.db"))
+    traces = HarnessVariantManager(str(tmp_path / "data" / "telemetry.db"))
+
+    first = manager.activate_halt(
+        source="MANUAL_TEST",
+        halt_reason="runtime_halt_contract_test",
+        reference_time="2026-04-23T10:00:00+00:00",
+    )
+    second = manager.activate_halt(
+        source="MANUAL_TEST",
+        halt_reason="runtime_halt_contract_test",
+        reference_time="2026-04-23T10:01:00+00:00",
+    )
+
+    runtime_traces = traces.list_execution_traces(limit=10, skill_name="runtime")
+
+    assert second["halt_id"] == first["halt_id"]
+    assert [row["role"] for row in runtime_traces] == ["runtime_halt_activation"]
 
 
 def test_make_session_context_uses_resolved_profile_and_data_dir(tmp_path):

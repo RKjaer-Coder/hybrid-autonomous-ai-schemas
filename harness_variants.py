@@ -66,6 +66,24 @@ REPLAY_ACTIVATION_MIN_KNOWN_BAD_TRACES = 25
 REPLAY_ACTIVATION_MIN_DISTINCT_SKILLS = 3
 DEFAULT_REPLAY_SAMPLE_TARGET = 50
 REPLAY_ENFORCEMENT_MODE = "FAIL_CLOSED_UNLESS_OPERATOR_ACKNOWLEDGED"
+REPLAY_ACTIVATION_EXCLUDED_ROLES = {
+    "immune_judge_check",
+    "immune_sheriff_check",
+    "judge_deadlock_clear",
+    "judge_deadlock_fallback_activation",
+    "judge_deadlock_halt",
+    "judge_deadlock_retro_review",
+    "judge_deadlock_review_enqueue",
+    "operator_alert_acknowledgement",
+    "operator_digest_acknowledgement",
+    "operator_judge_deadlock_restart",
+    "operator_quarantine_review",
+    "operator_runtime_restart",
+    "runtime_halt_activation",
+    "runtime_halt_reused",
+    "runtime_restart_blocked",
+    "runtime_restart_completed",
+}
 
 
 def _parse_ts(value: str) -> datetime.datetime:
@@ -99,6 +117,11 @@ def _population_std(values: list[float]) -> float:
     average = _mean(values)
     variance = sum((value - average) ** 2 for value in values) / len(values)
     return math.sqrt(variance)
+
+
+def _activation_role_sql(column: str = "role") -> str:
+    excluded = ", ".join(f"'{role}'" for role in sorted(REPLAY_ACTIVATION_EXCLUDED_ROLES))
+    return f"{column} NOT IN ({excluded})"
 
 
 @dataclass(frozen=True)
@@ -425,29 +448,31 @@ class HarnessVariantManager:
             }
         with self._connect() as conn:
             counts = conn.execute(
-                """
+                f"""
                 SELECT
                     SUM(
                         CASE
                             WHEN source_trace_id IS NULL
                              AND training_eligible = 1
                              AND judge_verdict = 'PASS'
+                             AND {_activation_role_sql()}
                             THEN 1 ELSE 0
                         END
                     ) AS eligible_source_traces,
                     SUM(
                         CASE
                             WHEN source_trace_id IS NULL
+                             AND {_activation_role_sql()}
                              AND (training_eligible = 0 OR judge_verdict != 'PASS' OR retention_class = 'FAILURE_AUDIT')
                             THEN 1 ELSE 0
                         END
                     ) AS known_bad_source_traces,
-                    COUNT(DISTINCT CASE WHEN source_trace_id IS NULL THEN skill_name END) AS distinct_skill_count
+                    COUNT(DISTINCT CASE WHEN source_trace_id IS NULL AND {_activation_role_sql()} THEN skill_name END) AS distinct_skill_count
                 FROM execution_traces
                 """
             ).fetchone()
             coverage_rows = conn.execute(
-                """
+                f"""
                 SELECT
                     skill_name,
                     SUM(
@@ -455,18 +480,20 @@ class HarnessVariantManager:
                             WHEN source_trace_id IS NULL
                              AND training_eligible = 1
                              AND judge_verdict = 'PASS'
+                             AND {_activation_role_sql()}
                             THEN 1 ELSE 0
                         END
                     ) AS eligible_source_traces,
                     SUM(
                         CASE
                             WHEN source_trace_id IS NULL
+                             AND {_activation_role_sql()}
                              AND (training_eligible = 0 OR judge_verdict != 'PASS' OR retention_class = 'FAILURE_AUDIT')
                             THEN 1 ELSE 0
                         END
                     ) AS known_bad_source_traces
                 FROM execution_traces
-                WHERE source_trace_id IS NULL
+                WHERE source_trace_id IS NULL AND {_activation_role_sql()}
                 GROUP BY skill_name
                 ORDER BY eligible_source_traces DESC, known_bad_source_traces DESC, skill_name ASC
                 LIMIT 10
@@ -920,11 +947,13 @@ class HarnessVariantManager:
         if known_bad:
             where_sql = (
                 "skill_name = ? AND source_trace_id IS NULL AND created_at <= ? "
+                f"AND {_activation_role_sql()} "
                 "AND (training_eligible = 0 OR judge_verdict != 'PASS' OR retention_class = 'FAILURE_AUDIT')"
             )
         else:
             where_sql = (
                 "skill_name = ? AND training_eligible = 1 AND judge_verdict = 'PASS' "
+                f"AND {_activation_role_sql()} "
                 "AND source_trace_id IS NULL AND created_at <= ?"
             )
         with self._connect() as conn:

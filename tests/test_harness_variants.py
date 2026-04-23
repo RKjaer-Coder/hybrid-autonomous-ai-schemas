@@ -330,3 +330,89 @@ def test_harness_variant_replay_eval_requires_explicit_ack_below_threshold(tmp_p
         assert "explicit operator acknowledgement is required" in str(exc)
     else:
         raise AssertionError("expected below-threshold replay to require explicit acknowledgement")
+
+
+def test_replay_readiness_excludes_control_plane_roles(tmp_path):
+    manager = _telemetry_manager(tmp_path)
+
+    manager.log_execution_trace(
+        ExecutionTrace(
+            trace_id="runtime-eligible-1",
+            task_id="task-eligible-1",
+            role="runtime_contract",
+            skill_name="runtime",
+            harness_version="contract-v1",
+            intent_goal="seed activation corpus",
+            steps=[],
+            prompt_template="runtime contract",
+            context_assembled="runtime corpus",
+            retrieval_queries=[],
+            judge_verdict="PASS",
+            judge_reasoning="ok",
+            outcome_score=1.0,
+            cost_usd=0.0,
+            duration_ms=10,
+            training_eligible=True,
+            retention_class="STANDARD",
+            source_chain_id="chain-eligible-1",
+            source_session_id="session-eligible-1",
+            source_trace_id=None,
+            created_at="2026-04-21T15:00:00+00:00",
+        )
+    )
+    manager.log_execution_trace(
+        ExecutionTrace(
+            trace_id="operator-ack-1",
+            task_id="task-operator-1",
+            role="operator_digest_acknowledgement",
+            skill_name="operator_interface",
+            harness_version="operator_acknowledgement_v1",
+            intent_goal="acknowledge digest",
+            steps=[],
+            prompt_template="acknowledge_digest",
+            context_assembled="digest bookkeeping",
+            retrieval_queries=[],
+            judge_verdict="PASS",
+            judge_reasoning="ok",
+            outcome_score=1.0,
+            cost_usd=0.0,
+            duration_ms=5,
+            training_eligible=True,
+            retention_class="STANDARD",
+            source_chain_id="chain-operator-1",
+            source_session_id="session-operator-1",
+            source_trace_id=None,
+            created_at="2026-04-21T15:01:00+00:00",
+        )
+    )
+    manager.log_execution_trace(
+        ExecutionTrace(
+            trace_id="runtime-halt-1",
+            task_id="task-runtime-halt-1",
+            role="runtime_halt_activation",
+            skill_name="runtime",
+            harness_version="runtime_activate_halt_v1",
+            intent_goal="halt runtime",
+            steps=[],
+            prompt_template="activate_halt",
+            context_assembled="runtime recovery",
+            retrieval_queries=[],
+            judge_verdict="FAIL",
+            judge_reasoning="halted",
+            outcome_score=0.0,
+            cost_usd=0.0,
+            duration_ms=5,
+            training_eligible=False,
+            retention_class="FAILURE_AUDIT",
+            source_chain_id="chain-runtime-halt-1",
+            source_session_id="session-runtime-halt-1",
+            source_trace_id=None,
+            created_at="2026-04-21T15:02:00+00:00",
+        )
+    )
+
+    readiness = manager.replay_readiness_summary()
+
+    assert readiness["eligible_source_traces"] == 1
+    assert readiness["known_bad_source_traces"] == 0
+    assert readiness["distinct_skill_count"] == 1

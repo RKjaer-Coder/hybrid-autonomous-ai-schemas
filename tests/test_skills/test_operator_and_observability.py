@@ -1301,6 +1301,8 @@ def test_operator_and_observability_surface_harness_variants_and_traces(test_dat
     assert traces[0]["trace_id"] == "trace-runtime-1"
     assert variants[0]["variant_id"] == proposed["variant_id"]
     assert frontier[0]["variant_id"] == proposed["variant_id"]
+    assert variants[0]["eval_result"]["replay_readiness_status"] == "IMPLEMENTED_BELOW_ACTIVATION_THRESHOLD"
+    assert variants[0]["eval_result"]["replay_readiness_blockers"]
     assert health["harness_variants"]["execution_traces"]["total_count"] == 1
     assert health["harness_variants"]["execution_traces"]["training_eligible_count"] == 1
     assert health["harness_variants"]["variants"]["promoted_count"] == 1
@@ -1504,6 +1506,58 @@ def test_operator_replay_eval_requires_ack_and_emits_alert(test_data_dir):
     ).fetchone()
     assert alert["alert_type"] == "REPLAY_READINESS_ACK_REQUIRED"
     assert "blocked below activation threshold" in alert["content"]
+
+
+def test_operator_acknowledgements_do_not_change_replay_readiness(test_data_dir):
+    db = DatabaseManager(str(test_data_dir))
+    operator = OperatorInterfaceSkill(db)
+    observability = ObservabilitySkill(db, None, None)
+    manager = HarnessVariantManager(str(test_data_dir / "telemetry.db"))
+    now = _now()
+
+    manager.log_execution_trace(
+        ExecutionTrace(
+            trace_id="activation-baseline-1",
+            task_id="activation-task-1",
+            role="runtime_contract",
+            skill_name="runtime",
+            harness_version="contract-v1",
+            intent_goal="seed activation corpus",
+            steps=[],
+            prompt_template="runtime contract",
+            context_assembled="runtime corpus",
+            retrieval_queries=[],
+            judge_verdict="PASS",
+            judge_reasoning="ok",
+            outcome_score=1.0,
+            cost_usd=0.0,
+            duration_ms=10,
+            training_eligible=True,
+            retention_class="STANDARD",
+            source_chain_id="activation-chain-1",
+            source_session_id="activation-session-1",
+            source_trace_id=None,
+            created_at=_ts(now),
+        )
+    )
+
+    before = observability.system_health()["harness_variants"]["execution_traces"]["replay_readiness"]
+    alert_id = operator.alert("T3", "TEST_ACK", "ack me", reference_time=_ts(now + datetime.timedelta(minutes=1)))
+    digest = operator.generate_digest(digest_type="critical_only", operator_state="ACTIVE")
+    operator.acknowledge_alert(alert_id, reference_time=_ts(now + datetime.timedelta(minutes=2)))
+    operator.acknowledge_digest(digest["digest_id"], reference_time=_ts(now + datetime.timedelta(minutes=3)))
+    after = observability.system_health()["harness_variants"]["execution_traces"]["replay_readiness"]
+
+    operator_traces = manager.list_execution_traces(limit=10, skill_name="operator_interface")
+
+    assert before["eligible_source_traces"] == 1
+    assert before["known_bad_source_traces"] == 0
+    assert before["distinct_skill_count"] == 1
+    assert after["eligible_source_traces"] == before["eligible_source_traces"]
+    assert after["known_bad_source_traces"] == before["known_bad_source_traces"]
+    assert after["distinct_skill_count"] == before["distinct_skill_count"]
+    assert any(row["role"] == "operator_alert_acknowledgement" for row in operator_traces)
+    assert any(row["role"] == "operator_digest_acknowledgement" for row in operator_traces)
 
 
 def test_operator_and_observability_surface_workspace_overview_and_milestone_health(test_data_dir):
