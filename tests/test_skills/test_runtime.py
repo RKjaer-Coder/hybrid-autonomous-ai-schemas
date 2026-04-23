@@ -13,6 +13,7 @@ from skills.runtime import (
     VERSION_DRIFT_NOTE,
     ExternalCommandResult,
     assess_hermes_readiness,
+    build_mac_studio_day_one_handoff,
     bootstrap_stack,
     bootstrap_runtime,
     doctor_runtime,
@@ -22,7 +23,9 @@ from skills.runtime import (
     main as runtime_main,
     migrate_runtime_databases,
     prepare_runtime_directories,
+    replay_readiness_report,
     run_research_cron_proof,
+    run_evidence_factory,
     run_task_loop_proof,
     run_operator_workflow,
 )
@@ -165,6 +168,9 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
     assert Path(manifest["gateway_manifest_path"]).is_file()
     assert Path(manifest["workspace_manifest_path"]).is_file()
     assert Path(manifest["operator_validation_checklist_path"]).is_file()
+    assert Path(manifest["evidence_factory_manifest_path"]).is_file()
+    assert Path(manifest["replay_readiness_report_path"]).is_file()
+    assert Path(manifest["mac_studio_day_one_handoff_path"]).is_file()
     assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["profile_name"] == "hybrid-test"
     assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["repo_contract_version"] == 1
     assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["routing"]["max_api_spend_usd"] == 0.0
@@ -194,6 +200,9 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
     assert "bootstrap_stack" in manifest["commands"]
     assert "task_loop_proof" in manifest["commands"]
     assert "research_cron_proof" in manifest["commands"]
+    assert "evidence_factory" in manifest["commands"]
+    assert "replay_readiness_report" in manifest["commands"]
+    assert "mac_studio_day_one" in manifest["commands"]
     assert "milestone_status" in manifest["commands"]
     assert sorted(Path(path).name for path in result.linked_skill_paths) == ["immune_system", "strategic_memory"]
     for launcher_path in result.launcher_paths.values():
@@ -222,6 +231,9 @@ def test_doctor_runtime_reports_ready_runtime(tmp_path):
     assert result.profile_validation.ok is True
     assert result.path_status["readiness_launcher"] is True
     assert result.path_status["contract_harness_launcher"] is True
+    assert result.path_status["evidence_factory_launcher"] is True
+    assert result.path_status["replay_readiness_report_launcher"] is True
+    assert result.path_status["mac_studio_day_one_launcher"] is True
 
 
 def test_exercise_hermes_contract_runs_full_lifecycle_and_logs_trace(tmp_path):
@@ -659,6 +671,92 @@ def test_run_operator_workflow_fails_closed_when_runtime_is_halted(tmp_path):
             (result.trace_id,),
         ).fetchone()
     assert trace_row == ("operator_workflow", "FAIL", "FAILURE_AUDIT")
+
+
+def test_replay_readiness_report_writes_runtime_artifact(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+
+    report = replay_readiness_report(cfg, repo_root=str(tmp_path))
+
+    assert report["artifact_path"].endswith("replay_readiness_report.json")
+    assert Path(report["artifact_path"]).is_file()
+    assert report["minimum_eligible_traces"] == 500
+    assert report["minimum_known_bad_traces"] == 25
+    assert report["minimum_distinct_skills"] == 3
+
+
+def test_run_evidence_factory_generates_cross_skill_evidence(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+    runtime = MockHermesRuntime(data_dir=str(tmp_path / "data"))
+
+    result = run_evidence_factory(
+        config=cfg,
+        repo_root=str(tmp_path),
+        tool_registry=runtime,
+        cycles=1,
+        report_limit=8,
+    )
+
+    assert result.ok is True
+    assert result.generated_trace_count > 0
+    assert result.generated_activation_trace_count > 0
+    assert result.generated_known_bad_trace_count > 0
+    assert Path(result.report_path).is_file()
+    assert any(item.scenario_id == "research_to_opportunity_flow" and item.ok for item in result.scenario_results)
+    assert any(item.scenario_id == "invalid_brief_completion" and item.ok for item in result.scenario_results)
+    readiness = result.replay_report
+    assert readiness["eligible_source_traces"] > 0
+    assert readiness["known_bad_source_traces"] > 0
+    assert readiness["distinct_skill_count"] >= 3
+
+    with sqlite3.connect(tmp_path / "data" / "telemetry.db") as conn:
+        role_rows = conn.execute(
+            """
+            SELECT role, judge_verdict
+            FROM execution_traces
+            WHERE role IN ('evidence_research_to_opportunity_flow', 'evidence_invalid_brief_completion')
+            ORDER BY created_at ASC
+            """
+        ).fetchall()
+    assert ("evidence_research_to_opportunity_flow", "PASS") in role_rows
+    assert ("evidence_invalid_brief_completion", "FAIL") in role_rows
+
+
+def test_build_mac_studio_day_one_handoff_writes_handoff_bundle(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+    runtime = MockHermesRuntime(data_dir=str(tmp_path / "data"))
+
+    result = build_mac_studio_day_one_handoff(
+        config=cfg,
+        repo_root=str(tmp_path),
+        tool_registry=runtime,
+        cycles=1,
+        report_limit=8,
+    )
+
+    assert result.ok is True
+    assert result.bootstrap_stack.ok is True
+    assert result.evidence_batch.ok is True
+    assert Path(result.handoff_path).is_file()
+    handoff_text = Path(result.handoff_path).read_text(encoding="utf-8")
+    assert "Mac Studio Day-One Handoff" in handoff_text
+    assert "--bootstrap-stack" in handoff_text
+    assert "--evidence-factory" in handoff_text
 
 
 def test_runtime_main_bootstrap_live_flag_executes_bootstrap(tmp_path, monkeypatch, capsys):

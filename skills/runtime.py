@@ -84,6 +84,8 @@ CONFIG_SURFACE_UNCERTAINTY_NOTE = (
     "validates the §7.5c dangerous-command set as a repo-owned contract until "
     "live Hermes proves the exact upstream key shape."
 )
+DEFAULT_EVIDENCE_CYCLES = 5
+DEFAULT_REPLAY_REPORT_LIMIT = 10
 
 
 @dataclass(frozen=True)
@@ -277,6 +279,46 @@ class BootstrapStackResult:
     task_loop_proof: TaskLoopProofResult
     research_cron_proof: ResearchCronProofResult
     milestone_status: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class EvidenceScenarioResult:
+    scenario_id: str
+    cycle_index: int
+    classification: str
+    ok: bool
+    trace_id: str | None
+    produced_skill_families: list[str]
+    issues: list[str]
+    details: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class EvidenceBatchResult:
+    ok: bool
+    config: IntegrationConfig
+    bootstrap: RuntimeBootstrapResult
+    doctor: RuntimeDoctorResult
+    cycles: int
+    scenario_results: list[EvidenceScenarioResult]
+    generated_trace_count: int
+    generated_source_trace_count: int
+    generated_activation_trace_count: int
+    generated_known_bad_trace_count: int
+    replay_report: dict[str, Any]
+    report_path: str
+
+
+@dataclass(frozen=True)
+class MacStudioDayOneResult:
+    ok: bool
+    install: RuntimeProfileInstallResult
+    doctor: RuntimeDoctorResult
+    bootstrap_stack: BootstrapStackResult
+    evidence_batch: EvidenceBatchResult
+    replay_report: dict[str, Any]
+    handoff_path: str
+    issues: list[str]
 
 
 def _utc_now() -> str:
@@ -645,6 +687,9 @@ def _runtime_launcher_paths(config: IntegrationConfig) -> dict[str, Path]:
         "contract_harness": bin_dir / "contract_harness_runtime.sh",
         "task_loop_proof": bin_dir / "task_loop_proof.sh",
         "research_cron_proof": bin_dir / "research_cron_proof.sh",
+        "evidence_factory": bin_dir / "evidence_factory.sh",
+        "replay_readiness_report": bin_dir / "replay_readiness_report.sh",
+        "mac_studio_day_one": bin_dir / "mac_studio_day_one.sh",
         "gateway": bin_dir / "start_gateway.sh",
         "workspace": bin_dir / "start_workspace.sh",
         "operator_checklist": bin_dir / "operator_validation_checklist.sh",
@@ -700,6 +745,63 @@ def _runtime_gateway_manifest_path(config: IntegrationConfig) -> Path:
 
 def _runtime_workspace_manifest_path(config: IntegrationConfig) -> Path:
     return runtime_support_artifact_paths(config)["workspace_manifest"]
+
+
+def _runtime_evidence_factory_manifest_path(config: IntegrationConfig) -> Path:
+    return runtime_support_artifact_paths(config)["evidence_factory_manifest"]
+
+
+def _runtime_replay_readiness_report_path(config: IntegrationConfig) -> Path:
+    return runtime_support_artifact_paths(config)["replay_readiness_report"]
+
+
+def _runtime_mac_studio_day_one_handoff_path(config: IntegrationConfig) -> Path:
+    return runtime_support_artifact_paths(config)["mac_studio_day_one_handoff"]
+
+
+def _evidence_factory_scenario_catalog() -> list[dict[str, str]]:
+    return [
+        {
+            "scenario_id": "operator_workflow",
+            "classification": "activation_positive",
+            "description": "Runs the council-backed operator workflow smoke test.",
+        },
+        {
+            "scenario_id": "task_loop_proof",
+            "classification": "activation_positive",
+            "description": "Exercises deterministic research task creation, brief writeback, routing, and judge review.",
+        },
+        {
+            "scenario_id": "research_cron_proof",
+            "classification": "activation_positive",
+            "description": "Creates, schedules, and queues a standing brief run.",
+        },
+        {
+            "scenario_id": "research_to_opportunity_flow",
+            "classification": "activation_positive",
+            "description": "Routes a high-quality brief through opportunity creation and council review.",
+        },
+        {
+            "scenario_id": "opportunity_project_flow",
+            "classification": "activation_positive",
+            "description": "Walks an opportunity through qualification, project handoff, and learning backpropagation.",
+        },
+        {
+            "scenario_id": "invalid_brief_completion",
+            "classification": "known_bad",
+            "description": "Confirms a task cannot complete with a brief belonging to another task.",
+        },
+        {
+            "scenario_id": "archived_standing_brief_queue",
+            "classification": "known_bad",
+            "description": "Confirms archived standing briefs cannot queue fresh runs.",
+        },
+        {
+            "scenario_id": "invalid_opportunity_transition",
+            "classification": "known_bad",
+            "description": "Confirms the opportunity state machine rejects invalid jumps.",
+        },
+    ]
 
 
 @contextlib.contextmanager
@@ -962,6 +1064,101 @@ def _write_env_launcher(path: Path, lines: list[str]) -> None:
     path.chmod(0o755)
 
 
+def _write_replay_readiness_report_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
+    artifact = dict(payload)
+    artifact.setdefault("generated_at", _utc_now())
+    artifact.setdefault("artifact_path", str(_runtime_replay_readiness_report_path(config)))
+    _write_json_yaml(_runtime_replay_readiness_report_path(config), artifact)
+
+
+def _write_mac_studio_day_one_handoff(
+    config: IntegrationConfig,
+    repo_root: Path,
+    *,
+    install: RuntimeProfileInstallResult | None = None,
+    evidence_batch: EvidenceBatchResult | None = None,
+    bootstrap_stack_result: BootstrapStackResult | None = None,
+    replay_report: dict[str, Any] | None = None,
+) -> None:
+    manifest = _read_json_yaml(_runtime_profile_manifest_path(config)) or {}
+    commands = manifest.get("commands", {})
+    lines = [
+        "# Mac Studio Day-One Handoff",
+        "",
+        f"Generated: {_utc_now()}",
+        "",
+        "## Goal",
+        "",
+        "Use this package to rehearse the repo-local substrate now and to cut over quickly once Hermes is available on the Mac Studio.",
+        "",
+        "## Day-One Sequence",
+        "",
+        f"1. Install/runtime bundle: `{commands.get('bootstrap_stack', _command_string(config, '--bootstrap-stack', repo_root))}`",
+        f"2. Grow replay corpus: `{commands.get('evidence_factory', _command_string(config, '--evidence-factory', repo_root))}`",
+        f"3. Inspect replay coverage: `{commands.get('replay_readiness_report', _command_string(config, '--replay-readiness-report', repo_root))}`",
+        f"4. When Hermes is installed, run live readiness: `{commands.get('readiness', _command_string(config, '--readiness', repo_root))}`",
+        f"5. Open the workspace/operator view: `{commands.get('workspace_overview', _command_string(config, '--workspace-overview', repo_root))}`",
+        "",
+        "## Runtime Artifacts",
+        "",
+        f"- Profile manifest: `{_runtime_profile_manifest_path(config)}`",
+        f"- Operator checklist: `{_runtime_operator_validation_checklist_path(config)}`",
+        f"- Evidence manifest: `{_runtime_evidence_factory_manifest_path(config)}`",
+        f"- Replay readiness report: `{_runtime_replay_readiness_report_path(config)}`",
+        "",
+    ]
+    if install is not None:
+        lines.extend(
+            [
+                "## Installed Bundle",
+                "",
+                f"- Profile dir: `{install.profile_dir}`",
+                f"- Config path: `{install.profile_config_path}`",
+                f"- Linked skills: `{len(install.linked_skill_paths)}`",
+                "",
+            ]
+        )
+    if bootstrap_stack_result is not None:
+        lines.extend(
+            [
+                "## Rehearsal Status",
+                "",
+                f"- Bootstrap stack: `{'PASS' if bootstrap_stack_result.ok else 'FAIL'}`",
+                f"- Operator workflow: `{'PASS' if bootstrap_stack_result.operator_workflow.ok else 'FAIL'}`",
+                f"- Contract harness: `{'PASS' if bootstrap_stack_result.contract_harness.ok else 'FAIL'}`",
+                f"- Task loop proof: `{'PASS' if bootstrap_stack_result.task_loop_proof.ok else 'FAIL'}`",
+                f"- Research cron proof: `{'PASS' if bootstrap_stack_result.research_cron_proof.ok else 'FAIL'}`",
+                "",
+            ]
+        )
+    if evidence_batch is not None:
+        lines.extend(
+            [
+                "## Evidence Batch",
+                "",
+                f"- Cycles: `{evidence_batch.cycles}`",
+                f"- Scenarios passed: `{sum(1 for item in evidence_batch.scenario_results if item.ok)}/{len(evidence_batch.scenario_results)}`",
+                f"- Generated traces: `{evidence_batch.generated_trace_count}`",
+                f"- Generated activation traces: `{evidence_batch.generated_activation_trace_count}`",
+                f"- Generated known-bad traces: `{evidence_batch.generated_known_bad_trace_count}`",
+                "",
+            ]
+        )
+    if replay_report is not None:
+        lines.extend(
+            [
+                "## Replay Readiness Snapshot",
+                "",
+                f"- Status: `{replay_report.get('status', 'UNKNOWN')}`",
+                f"- Eligible traces: `{replay_report.get('eligible_source_traces', 0)}/{replay_report.get('minimum_eligible_traces', 0)}`",
+                f"- Known-bad traces: `{replay_report.get('known_bad_source_traces', 0)}/{replay_report.get('minimum_known_bad_traces', 0)}`",
+                f"- Distinct skills: `{replay_report.get('distinct_skill_count', 0)}/{replay_report.get('minimum_distinct_skills', 0)}`",
+                "",
+            ]
+        )
+    _runtime_mac_studio_day_one_handoff_path(config).write_text("\n".join(lines), encoding="utf-8")
+
+
 def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path) -> None:
     contract = HermesProfileContract(config=config, repo_root=str(repo_root))
     artifacts = runtime_support_artifact_paths(config)
@@ -993,23 +1190,48 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
         "workspace_snapshot_command": _command_string(config, "--workspace-overview", repo_root),
         "milestone_status_command": _command_string(config, "--milestone-status", repo_root),
     }
+    evidence_doc = {
+        "generated_at": _utc_now(),
+        "command": _command_string(config, "--evidence-factory", repo_root),
+        "recommended_cycles": DEFAULT_EVIDENCE_CYCLES,
+        "report_command": _command_string(config, "--replay-readiness-report", repo_root),
+        "scenarios": _evidence_factory_scenario_catalog(),
+    }
     checklist_lines = [
         "# Operator Validation Checklist",
         "",
         "1. Run the generated bootstrap stack command.",
         "2. Confirm `doctor` passes and all canonical databases are in WAL mode.",
         "3. Confirm the repo-local contract harness passes.",
-        "4. Confirm the task-loop and research-cron proofs pass.",
-        "5. If Hermes is installed, run readiness and verify the live profile/config surface.",
-        "6. Open the Hermes Workspace and confirm gates, traces, quarantine review, replay readiness, runtime halt state, and milestone health are visible.",
+        "4. Run the evidence factory and inspect the replay readiness report.",
+        "5. Confirm the task-loop and research-cron proofs pass.",
+        "6. If Hermes is installed, run readiness and verify the live profile/config surface.",
+        "7. Open the Hermes Workspace and confirm gates, traces, quarantine review, replay readiness, runtime halt state, and milestone health are visible.",
     ]
     _write_json_yaml(_runtime_network_controls_path(config), network_doc)
     _write_json_yaml(_runtime_gateway_manifest_path(config), gateway_doc)
     _write_json_yaml(_runtime_workspace_manifest_path(config), workspace_doc)
+    _write_json_yaml(_runtime_evidence_factory_manifest_path(config), evidence_doc)
+    _write_replay_readiness_report_artifact(
+        config,
+        {
+            "available": False,
+            "status": "UNAVAILABLE",
+            "operator_ack_required_below_threshold": True,
+            "minimum_eligible_traces": 500,
+            "minimum_known_bad_traces": 25,
+            "minimum_distinct_skills": 3,
+            "eligible_source_traces": 0,
+            "known_bad_source_traces": 0,
+            "distinct_skill_count": 0,
+            "blockers": ["telemetry_unavailable"],
+        },
+    )
     _runtime_operator_validation_checklist_path(config).write_text(
         "\n".join(checklist_lines) + "\n",
         encoding="utf-8",
     )
+    _write_mac_studio_day_one_handoff(config, repo_root)
 
 
 def _symlink_skill_directory(source: Path, dest: Path) -> None:
@@ -1065,6 +1287,9 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
         "gateway_manifest_path": str(_runtime_gateway_manifest_path(resolved)),
         "workspace_manifest_path": str(_runtime_workspace_manifest_path(resolved)),
         "operator_validation_checklist_path": str(_runtime_operator_validation_checklist_path(resolved)),
+        "evidence_factory_manifest_path": str(_runtime_evidence_factory_manifest_path(resolved)),
+        "replay_readiness_report_path": str(_runtime_replay_readiness_report_path(resolved)),
+        "mac_studio_day_one_handoff_path": str(_runtime_mac_studio_day_one_handoff_path(resolved)),
         "data_dir": resolved.data_dir,
         "skills_dir": resolved.skills_dir,
         "checkpoints_dir": resolved.checkpoints_dir,
@@ -1080,6 +1305,9 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
             "contract_harness": _command_string(resolved, "--contract-harness", root),
             "task_loop_proof": _command_string(resolved, "--task-loop-proof", root),
             "research_cron_proof": _command_string(resolved, "--research-cron-proof", root),
+            "evidence_factory": _command_string(resolved, "--evidence-factory", root),
+            "replay_readiness_report": _command_string(resolved, "--replay-readiness-report", root),
+            "mac_studio_day_one": _command_string(resolved, "--mac-studio-day-one", root),
             "milestone_status": _command_string(resolved, "--milestone-status", root),
             "workspace_overview": _command_string(resolved, "--workspace-overview", root),
         },
@@ -1104,6 +1332,9 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
     _write_launcher(launcher_paths["contract_harness"], resolved, root, "--contract-harness")
     _write_launcher(launcher_paths["task_loop_proof"], resolved, root, "--task-loop-proof")
     _write_launcher(launcher_paths["research_cron_proof"], resolved, root, "--research-cron-proof")
+    _write_launcher(launcher_paths["evidence_factory"], resolved, root, "--evidence-factory")
+    _write_launcher(launcher_paths["replay_readiness_report"], resolved, root, "--replay-readiness-report")
+    _write_launcher(launcher_paths["mac_studio_day_one"], resolved, root, "--mac-studio-day-one")
     _write_launcher(launcher_paths["milestone_status"], resolved, root, "--milestone-status")
     _write_launcher(launcher_paths["workspace_overview"], resolved, root, "--workspace-overview")
     _write_launcher(launcher_paths["operator_checklist"], resolved, root, "--operator-checklist")
@@ -1220,6 +1451,9 @@ def doctor_runtime(
         "gateway_manifest": _runtime_gateway_manifest_path(resolved).is_file(),
         "workspace_manifest": _runtime_workspace_manifest_path(resolved).is_file(),
         "operator_validation_checklist": _runtime_operator_validation_checklist_path(resolved).is_file(),
+        "evidence_factory_manifest": _runtime_evidence_factory_manifest_path(resolved).is_file(),
+        "replay_readiness_report": _runtime_replay_readiness_report_path(resolved).is_file(),
+        "mac_studio_day_one_handoff": _runtime_mac_studio_day_one_handoff_path(resolved).is_file(),
         "bootstrap_launcher": launcher_paths["bootstrap"].is_file(),
         "bootstrap_stack_launcher": launcher_paths["bootstrap_stack"].is_file(),
         "doctor_launcher": launcher_paths["doctor"].is_file(),
@@ -1228,6 +1462,9 @@ def doctor_runtime(
         "contract_harness_launcher": launcher_paths["contract_harness"].is_file(),
         "task_loop_proof_launcher": launcher_paths["task_loop_proof"].is_file(),
         "research_cron_proof_launcher": launcher_paths["research_cron_proof"].is_file(),
+        "evidence_factory_launcher": launcher_paths["evidence_factory"].is_file(),
+        "replay_readiness_report_launcher": launcher_paths["replay_readiness_report"].is_file(),
+        "mac_studio_day_one_launcher": launcher_paths["mac_studio_day_one"].is_file(),
         "gateway_launcher": launcher_paths["gateway"].is_file(),
         "workspace_launcher": launcher_paths["workspace"].is_file(),
         "operator_checklist_launcher": launcher_paths["operator_checklist"].is_file(),
@@ -1969,6 +2206,7 @@ def workspace_overview(config: IntegrationConfig | None = None) -> dict[str, Any
         "execution_traces": operator.list_execution_traces(limit=5),
         "harness_frontier": operator.harness_frontier(limit=5),
         "replay_readiness": health["harness_variants"]["execution_traces"]["replay_readiness"],
+        "replay_readiness_report_path": str(_runtime_replay_readiness_report_path(resolved)),
         "milestone_health": evaluate_milestone_status(resolved, db_manager=db),
         "workspace_manifest_path": str(_runtime_workspace_manifest_path(resolved)),
         "gateway_manifest_path": str(_runtime_gateway_manifest_path(resolved)),
@@ -2002,6 +2240,667 @@ def bootstrap_stack(
         task_loop_proof=task_loop,
         research_cron_proof=research_cron,
         milestone_status=milestone_status,
+    )
+
+
+def _scenario_step(step_index: int, tool_call: str, payload: Any, *, model_used: str = "evidence-factory") -> ExecutionTraceStep:
+    return ExecutionTraceStep(
+        step_index=step_index,
+        tool_call=tool_call,
+        tool_result=json.dumps(payload, sort_keys=True, default=str)[:4096],
+        tool_result_file=None,
+        tokens_in=0,
+        tokens_out=0,
+        latency_ms=0,
+        model_used=model_used,
+    )
+
+
+def _log_evidence_scenario_trace(
+    config: IntegrationConfig,
+    *,
+    scenario_id: str,
+    cycle_index: int,
+    classification: str,
+    scenario_ok: bool,
+    steps: list[ExecutionTraceStep],
+    details: dict[str, Any],
+    issues: list[str],
+) -> str:
+    trace_id = generate_uuid_v7()
+    is_known_bad = classification == "known_bad"
+    judge_verdict = "FAIL" if is_known_bad or not scenario_ok else "PASS"
+    judge_reasoning = (
+        "Known-bad scenario failed safely and produced audit-grade evidence."
+        if is_known_bad and scenario_ok
+        else ("Evidence scenario completed." if scenario_ok else "Evidence scenario exposed blocking issues.")
+    )
+    _log_execution_trace(
+        config,
+        ExecutionTrace(
+            trace_id=trace_id,
+            task_id=f"evidence-{scenario_id}-{cycle_index}",
+            role=f"evidence_{scenario_id}",
+            skill_name="runtime",
+            harness_version="evidence_factory_v1",
+            intent_goal=f"Evidence factory scenario: {scenario_id}",
+            steps=steps,
+            prompt_template=scenario_id,
+            context_assembled=json.dumps(
+                {
+                    "classification": classification,
+                    "details": details,
+                    "issues": issues,
+                },
+                sort_keys=True,
+                default=str,
+            )[:2048],
+            retrieval_queries=["evidence_factory", scenario_id, classification],
+            judge_verdict=judge_verdict,
+            judge_reasoning=judge_reasoning,
+            outcome_score=1.0 if scenario_ok and not is_known_bad else 0.0,
+            cost_usd=0.0,
+            duration_ms=sum(step.latency_ms for step in steps),
+            training_eligible=scenario_ok and not is_known_bad,
+            retention_class="STANDARD" if scenario_ok and not is_known_bad else "FAILURE_AUDIT",
+            source_chain_id=f"evidence-cycle-{cycle_index}",
+            source_session_id=None,
+            source_trace_id=None,
+            created_at=_utc_now(),
+        ),
+    )
+    return trace_id
+
+
+def _run_evidence_research_to_opportunity_flow(
+    config: IntegrationConfig,
+    runtime: HermesToolRegistry,
+    *,
+    cycle_index: int,
+) -> EvidenceScenarioResult:
+    from skills.council.skill import configure_skill as configure_council_skill
+    from skills.db_manager import DatabaseManager
+    from skills.research_domain.skill import ResearchDomainSkill
+    from skills.strategic_memory.skill import StrategicMemorySkill
+
+    db = DatabaseManager(config.data_dir)
+    steps: list[ExecutionTraceStep] = []
+    issues: list[str] = []
+    try:
+        _seed_mock_council_roles(runtime)
+        configure_council_skill(runtime, db)
+        _seed_mock_council_synthesis(
+            runtime,
+            decision_type="opportunity_screen",
+            recommendation="PURSUE",
+            confidence=0.74,
+            reasoning_summary="The brief is sufficiently corroborated to advance into validation.",
+            dissenting_views="The opportunity looks real, but it still needs broader execution evidence.",
+            risk_watch=["brief quality drift", "validation throughput"],
+        )
+        operator = db.get_connection("operator_digest")
+        operator.execute(
+            "INSERT INTO operator_heartbeat VALUES (?, ?, ?, ?)",
+            (
+                f"evidence-heartbeat-{generate_uuid_v7()}",
+                "command",
+                "CLI",
+                _utc_now(),
+            ),
+        )
+        operator.commit()
+
+        research = ResearchDomainSkill(db)
+        memory = StrategicMemorySkill(db)
+        task_id = research.create_task(
+            f"Evidence opportunity scan {cycle_index}",
+            "Collect a routable brief with enough sourcing to trigger the opportunity pipeline.",
+            priority="P1_HIGH",
+            tags=["evidence", "opportunity", f"cycle-{cycle_index}"],
+        )
+        steps.append(_scenario_step(1, "research_domain.create_task", {"task_id": task_id}))
+        brief_id = memory.write_brief(
+            task_id,
+            f"Evidence opportunity brief {cycle_index}",
+            "A reusable opportunity looks viable and is sufficiently grounded to enter council review.",
+            confidence=0.79,
+            actionability="ACTION_RECOMMENDED",
+            action_type="opportunity_feed",
+            depth_tier="FULL",
+            source_urls=[
+                f"https://example.com/evidence/{cycle_index}",
+                f"https://api.example.com/evidence/{cycle_index}",
+            ],
+            source_assessments=[
+                {
+                    "url": f"https://example.com/evidence/{cycle_index}",
+                    "relevance": 0.82,
+                    "freshness": "2026-04-23",
+                    "source_type": "tier2_web",
+                },
+                {
+                    "url": f"https://api.example.com/evidence/{cycle_index}",
+                    "relevance": 0.91,
+                    "freshness": "2026-04-23",
+                    "source_type": "tier1_api",
+                },
+            ],
+            uncertainty_statement="The market need looks real, but the exact acquisition channel mix still needs validation over a broader window.",
+            counter_thesis="The opportunity could still be weaker than it appears if the visible demand is concentrated in a narrow early-adopter segment.",
+            tags=["evidence", "opportunity", f"cycle-{cycle_index}"],
+        )
+        steps.append(_scenario_step(2, "strategic_memory.write_brief", {"brief_id": brief_id}))
+        route = research.route_task_output(task_id, include_council_review=True)
+        steps.append(_scenario_step(3, "research_domain.route_task_output", route))
+        action_types = [action["type"] for action in route["actions"]]
+        if "opportunity_created" not in action_types:
+            issues.append("route_task_output did not create an opportunity")
+        if "council_review_created" not in action_types:
+            issues.append("route_task_output did not trigger council review")
+        details = {
+            "task_id": task_id,
+            "brief_id": brief_id,
+            "action_types": action_types,
+        }
+        trace_id = _log_evidence_scenario_trace(
+            config,
+            scenario_id="research_to_opportunity_flow",
+            cycle_index=cycle_index,
+            classification="activation_positive",
+            scenario_ok=not issues,
+            steps=steps,
+            details=details,
+            issues=issues,
+        )
+        return EvidenceScenarioResult(
+            scenario_id="research_to_opportunity_flow",
+            cycle_index=cycle_index,
+            classification="activation_positive",
+            ok=not issues,
+            trace_id=trace_id,
+            produced_skill_families=["research_domain", "strategic_memory", "council"],
+            issues=issues,
+            details=details,
+        )
+    finally:
+        db.close_all()
+
+
+def _run_evidence_opportunity_project_flow(
+    config: IntegrationConfig,
+    *,
+    cycle_index: int,
+) -> EvidenceScenarioResult:
+    from skills.db_manager import DatabaseManager
+    from skills.opportunity_pipeline.skill import OpportunityPipelineSkill
+
+    db = DatabaseManager(config.data_dir)
+    steps: list[ExecutionTraceStep] = []
+    issues: list[str] = []
+    try:
+        pipeline = OpportunityPipelineSkill(db)
+        opportunity_id = pipeline.create_opportunity(
+            f"Evidence project opportunity {cycle_index}",
+            "Convert a validated opportunity into a tracked project and preserve the learning loop.",
+            income_mechanism="software_product",
+            detected_by="research_prompted",
+            cashflow_estimate={"low": 250, "mid": 900, "high": 1500, "currency": "USD", "period": "month"},
+            provenance_links=[f"evidence-brief-{cycle_index}"],
+        )
+        steps.append(_scenario_step(1, "opportunity_pipeline.create_opportunity", {"opportunity_id": opportunity_id}))
+        for step_index, status in enumerate(("SCREENED", "QUALIFIED", "IN_VALIDATION", "GO_NO_GO"), start=2):
+            transitioned = pipeline.transition_opportunity(
+                opportunity_id,
+                status,
+                validation_spend=0.0 if status == "IN_VALIDATION" else None,
+                validation_report="Evidence batch transition." if status in {"IN_VALIDATION", "GO_NO_GO"} else None,
+            )
+            steps.append(
+                _scenario_step(
+                    step_index,
+                    "opportunity_pipeline.transition_opportunity",
+                    {"status": transitioned["status"], "updated_at": transitioned["updated_at"]},
+                )
+            )
+        handoff = pipeline.handoff_to_project(opportunity_id, project_name=f"Evidence Project {cycle_index}")
+        steps.append(_scenario_step(6, "opportunity_pipeline.handoff_to_project", handoff))
+        closed = pipeline.close_from_project(
+            handoff["project_id"],
+            project_status="COMPLETE",
+            learning_record={"result": "positive", "note": "Evidence batch project loop completed cleanly."},
+        )
+        steps.append(_scenario_step(7, "opportunity_pipeline.close_from_project", closed))
+        if handoff["opportunity"]["status"] != "ACTIVE":
+            issues.append("project handoff did not activate the opportunity")
+        if closed["status"] != "CLOSED":
+            issues.append("project closure did not backpropagate the learning record")
+        details = {
+            "opportunity_id": opportunity_id,
+            "project_id": handoff["project_id"],
+            "status": closed["status"],
+        }
+        trace_id = _log_evidence_scenario_trace(
+            config,
+            scenario_id="opportunity_project_flow",
+            cycle_index=cycle_index,
+            classification="activation_positive",
+            scenario_ok=not issues,
+            steps=steps,
+            details=details,
+            issues=issues,
+        )
+        return EvidenceScenarioResult(
+            scenario_id="opportunity_project_flow",
+            cycle_index=cycle_index,
+            classification="activation_positive",
+            ok=not issues,
+            trace_id=trace_id,
+            produced_skill_families=["opportunity_pipeline"],
+            issues=issues,
+            details=details,
+        )
+    finally:
+        db.close_all()
+
+
+def _run_evidence_invalid_brief_completion(
+    config: IntegrationConfig,
+    *,
+    cycle_index: int,
+) -> EvidenceScenarioResult:
+    from skills.db_manager import DatabaseManager
+    from skills.research_domain.skill import ResearchDomainSkill
+    from skills.strategic_memory.skill import StrategicMemorySkill
+
+    db = DatabaseManager(config.data_dir)
+    steps: list[ExecutionTraceStep] = []
+    issues: list[str] = []
+    blocked = False
+    error_message = ""
+    try:
+        research = ResearchDomainSkill(db)
+        memory = StrategicMemorySkill(db)
+        task_id = research.create_task(f"Evidence invalid completion {cycle_index}", "Primary task")
+        other_task_id = research.create_task(f"Evidence mismatched brief {cycle_index}", "Secondary task")
+        other_brief_id = memory.write_brief(other_task_id, "Mismatched brief", "This brief belongs elsewhere.")
+        research.start_task(task_id)
+        steps.extend(
+            [
+                _scenario_step(1, "research_domain.create_task", {"task_id": task_id}),
+                _scenario_step(2, "research_domain.create_task", {"task_id": other_task_id}),
+                _scenario_step(3, "strategic_memory.write_brief", {"brief_id": other_brief_id}),
+                _scenario_step(4, "research_domain.start_task", {"task_id": task_id}),
+            ]
+        )
+        try:
+            research.complete_task(task_id, output_brief_id=other_brief_id)
+            issues.append("mismatched brief completion unexpectedly succeeded")
+        except ValueError as exc:
+            blocked = True
+            error_message = str(exc)
+            steps.append(_scenario_step(5, "research_domain.complete_task", {"blocked": True, "error": error_message}))
+            if "does not belong" not in error_message:
+                issues.append("mismatched brief failure reason drifted")
+        details = {
+            "task_id": task_id,
+            "other_task_id": other_task_id,
+            "blocked": blocked,
+            "error": error_message,
+        }
+        scenario_ok = blocked and not issues
+        trace_id = _log_evidence_scenario_trace(
+            config,
+            scenario_id="invalid_brief_completion",
+            cycle_index=cycle_index,
+            classification="known_bad",
+            scenario_ok=scenario_ok,
+            steps=steps,
+            details=details,
+            issues=issues,
+        )
+        return EvidenceScenarioResult(
+            scenario_id="invalid_brief_completion",
+            cycle_index=cycle_index,
+            classification="known_bad",
+            ok=scenario_ok,
+            trace_id=trace_id,
+            produced_skill_families=["research_domain", "strategic_memory"],
+            issues=issues,
+            details=details,
+        )
+    finally:
+        db.close_all()
+
+
+def _run_evidence_archived_standing_brief_queue(
+    config: IntegrationConfig,
+    runtime: HermesToolRegistry,
+    *,
+    cycle_index: int,
+) -> EvidenceScenarioResult:
+    from skills.db_manager import DatabaseManager
+    from skills.research_domain.skill import ResearchDomainSkill
+
+    db = DatabaseManager(config.data_dir)
+    steps: list[ExecutionTraceStep] = []
+    issues: list[str] = []
+    blocked = False
+    error_message = ""
+    try:
+        research = ResearchDomainSkill(db)
+        standing = research.create_standing_brief(
+            f"Archived standing brief {cycle_index}",
+            "This brief should never queue once archived.",
+            "0 9 * * 1",
+            target_interface="Hermes Workspace",
+            include_council_review=False,
+            tags=["evidence", "known-bad", f"cycle-{cycle_index}"],
+        )
+        research.schedule_standing_brief(standing["standing_brief_id"], runtime, model="local-default")
+        archived = research.update_standing_brief_status(standing["standing_brief_id"], "ARCHIVED")
+        steps.extend(
+            [
+                _scenario_step(1, "research_domain.create_standing_brief", {"standing_brief_id": standing["standing_brief_id"]}),
+                _scenario_step(2, "research_domain.schedule_standing_brief", {"standing_brief_id": standing["standing_brief_id"]}),
+                _scenario_step(3, "research_domain.update_standing_brief_status", {"status": archived["status"]}),
+            ]
+        )
+        try:
+            research.queue_standing_brief_run(standing["standing_brief_id"])
+            issues.append("archived standing brief unexpectedly queued a run")
+        except ValueError as exc:
+            blocked = True
+            error_message = str(exc)
+            steps.append(_scenario_step(4, "research_domain.queue_standing_brief_run", {"blocked": True, "error": error_message}))
+            if "not active" not in error_message:
+                issues.append("archived standing brief failure reason drifted")
+        details = {
+            "standing_brief_id": standing["standing_brief_id"],
+            "blocked": blocked,
+            "error": error_message,
+        }
+        scenario_ok = blocked and not issues
+        trace_id = _log_evidence_scenario_trace(
+            config,
+            scenario_id="archived_standing_brief_queue",
+            cycle_index=cycle_index,
+            classification="known_bad",
+            scenario_ok=scenario_ok,
+            steps=steps,
+            details=details,
+            issues=issues,
+        )
+        return EvidenceScenarioResult(
+            scenario_id="archived_standing_brief_queue",
+            cycle_index=cycle_index,
+            classification="known_bad",
+            ok=scenario_ok,
+            trace_id=trace_id,
+            produced_skill_families=["research_domain"],
+            issues=issues,
+            details=details,
+        )
+    finally:
+        db.close_all()
+
+
+def _run_evidence_invalid_opportunity_transition(
+    config: IntegrationConfig,
+    *,
+    cycle_index: int,
+) -> EvidenceScenarioResult:
+    from skills.db_manager import DatabaseManager
+    from skills.opportunity_pipeline.skill import OpportunityPipelineSkill
+
+    db = DatabaseManager(config.data_dir)
+    steps: list[ExecutionTraceStep] = []
+    issues: list[str] = []
+    blocked = False
+    error_message = ""
+    try:
+        pipeline = OpportunityPipelineSkill(db)
+        opportunity_id = pipeline.create_opportunity(
+            f"Invalid transition opportunity {cycle_index}",
+            "Force the state machine to reject an invalid jump.",
+            income_mechanism="client_work",
+            detected_by="research_prompted",
+        )
+        steps.append(_scenario_step(1, "opportunity_pipeline.create_opportunity", {"opportunity_id": opportunity_id}))
+        try:
+            pipeline.transition_opportunity(opportunity_id, "GO_NO_GO")
+            issues.append("invalid opportunity transition unexpectedly succeeded")
+        except ValueError as exc:
+            blocked = True
+            error_message = str(exc)
+            steps.append(_scenario_step(2, "opportunity_pipeline.transition_opportunity", {"blocked": True, "error": error_message}))
+            if "invalid transition" not in error_message:
+                issues.append("invalid opportunity transition failure reason drifted")
+        details = {
+            "opportunity_id": opportunity_id,
+            "blocked": blocked,
+            "error": error_message,
+        }
+        scenario_ok = blocked and not issues
+        trace_id = _log_evidence_scenario_trace(
+            config,
+            scenario_id="invalid_opportunity_transition",
+            cycle_index=cycle_index,
+            classification="known_bad",
+            scenario_ok=scenario_ok,
+            steps=steps,
+            details=details,
+            issues=issues,
+        )
+        return EvidenceScenarioResult(
+            scenario_id="invalid_opportunity_transition",
+            cycle_index=cycle_index,
+            classification="known_bad",
+            ok=scenario_ok,
+            trace_id=trace_id,
+            produced_skill_families=["opportunity_pipeline"],
+            issues=issues,
+            details=details,
+        )
+    finally:
+        db.close_all()
+
+
+def replay_readiness_report(
+    config: IntegrationConfig | None = None,
+    *,
+    repo_root: str | None = None,
+    limit: int = DEFAULT_REPLAY_REPORT_LIMIT,
+) -> dict[str, Any]:
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    root = Path(repo_root).expanduser().resolve() if repo_root else _repo_root()
+    prepare_runtime_directories(resolved)
+    migrate_runtime_databases(resolved)
+    install_runtime_profile(resolved, repo_root=str(root))
+    manager = HarnessVariantManager(str(Path(resolved.data_dir) / "telemetry.db"))
+    report = manager.replay_readiness_report(limit=limit)
+    payload = {
+        **report,
+        "artifact_path": str(_runtime_replay_readiness_report_path(resolved)),
+        "profile_manifest_path": str(_runtime_profile_manifest_path(resolved)),
+        "workspace_manifest_path": str(_runtime_workspace_manifest_path(resolved)),
+        "evidence_factory_manifest_path": str(_runtime_evidence_factory_manifest_path(resolved)),
+    }
+    _write_replay_readiness_report_artifact(resolved, payload)
+    return payload
+
+
+def run_evidence_factory(
+    *,
+    config: IntegrationConfig | None = None,
+    repo_root: str | None = None,
+    tool_registry: HermesToolRegistry | None = None,
+    cycles: int = DEFAULT_EVIDENCE_CYCLES,
+    report_limit: int = DEFAULT_REPLAY_REPORT_LIMIT,
+) -> EvidenceBatchResult:
+    if cycles <= 0:
+        raise ValueError("cycles must be positive")
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    root = Path(repo_root).expanduser().resolve() if repo_root else _repo_root()
+    registry = tool_registry or MockHermesRuntime(data_dir=resolved.data_dir)
+    install_runtime_profile(resolved, repo_root=str(root))
+    bootstrap = bootstrap_runtime(registry, config=resolved, model_name="evidence-factory")
+    doctor = doctor_runtime(registry, config=resolved, bootstrap_if_needed=False)
+    _seed_mock_council_roles(registry)
+
+    manager = HarnessVariantManager(str(Path(resolved.data_dir) / "telemetry.db"))
+    before_summary = manager.execution_trace_summary()
+    before_report = manager.replay_readiness_report(limit=report_limit)
+
+    scenario_results: list[EvidenceScenarioResult] = []
+    for cycle_index in range(1, cycles + 1):
+        operator = run_operator_workflow(
+            registry,
+            config=resolved,
+            model_name="evidence-factory",
+            task_id=f"evidence-operator-workflow-{cycle_index}",
+            title=f"Evidence operator workflow {cycle_index}",
+            summary="Drive the repo-local operator workflow to generate activation-relevant multi-skill evidence.",
+        )
+        scenario_results.append(
+            EvidenceScenarioResult(
+                scenario_id="operator_workflow",
+                cycle_index=cycle_index,
+                classification="activation_positive",
+                ok=operator.ok,
+                trace_id=operator.trace_id,
+                produced_skill_families=["runtime", "financial_router", "immune_system", "strategic_memory", "council", "operator_interface"],
+                issues=[] if operator.ok else [operator.error or "operator workflow failed"],
+                details={
+                    "routing_tier": operator.routing_tier,
+                    "phase_gate_verdict": operator.phase_gate_verdict,
+                    "digest_id": operator.digest_id,
+                },
+            )
+        )
+
+        task_loop = run_task_loop_proof(config=resolved, repo_root=str(root), tool_registry=registry)
+        scenario_results.append(
+            EvidenceScenarioResult(
+                scenario_id="task_loop_proof",
+                cycle_index=cycle_index,
+                classification="activation_positive",
+                ok=task_loop.ok,
+                trace_id=task_loop.trace_id,
+                produced_skill_families=["runtime", "research_domain", "strategic_memory", "immune_system"],
+                issues=list(task_loop.issues),
+                details={
+                    "task_id": task_loop.task_id,
+                    "brief_id": task_loop.brief_id,
+                    "route_summary": task_loop.route_summary,
+                },
+            )
+        )
+
+        research_cron = run_research_cron_proof(config=resolved, repo_root=str(root), tool_registry=registry)
+        scenario_results.append(
+            EvidenceScenarioResult(
+                scenario_id="research_cron_proof",
+                cycle_index=cycle_index,
+                classification="activation_positive",
+                ok=research_cron.ok,
+                trace_id=research_cron.trace_id,
+                produced_skill_families=["runtime", "research_domain"],
+                issues=list(research_cron.issues),
+                details={
+                    "standing_brief_id": research_cron.standing_brief_id,
+                    "queued_task_id": research_cron.queued_task_id,
+                },
+            )
+        )
+
+        scenario_results.append(_run_evidence_research_to_opportunity_flow(resolved, registry, cycle_index=cycle_index))
+        scenario_results.append(_run_evidence_opportunity_project_flow(resolved, cycle_index=cycle_index))
+        scenario_results.append(_run_evidence_invalid_brief_completion(resolved, cycle_index=cycle_index))
+        scenario_results.append(_run_evidence_archived_standing_brief_queue(resolved, registry, cycle_index=cycle_index))
+        scenario_results.append(_run_evidence_invalid_opportunity_transition(resolved, cycle_index=cycle_index))
+
+    after_summary = manager.execution_trace_summary()
+    after_report = replay_readiness_report(config=resolved, repo_root=str(root), limit=report_limit)
+    generated_trace_count = int(after_summary["total_count"]) - int(before_summary["total_count"])
+    generated_source_trace_count = int(after_summary["source_trace_count"]) - int(before_summary["source_trace_count"])
+    generated_activation_trace_count = int(after_report["activation_source_trace_count"]) - int(before_report["activation_source_trace_count"])
+    generated_known_bad_trace_count = int(after_report["known_bad_source_traces"]) - int(before_report["known_bad_source_traces"])
+    result = EvidenceBatchResult(
+        ok=bootstrap.ok and doctor.ok and all(item.ok for item in scenario_results),
+        config=resolved,
+        bootstrap=bootstrap,
+        doctor=doctor,
+        cycles=cycles,
+        scenario_results=scenario_results,
+        generated_trace_count=generated_trace_count,
+        generated_source_trace_count=generated_source_trace_count,
+        generated_activation_trace_count=generated_activation_trace_count,
+        generated_known_bad_trace_count=generated_known_bad_trace_count,
+        replay_report=after_report,
+        report_path=str(_runtime_replay_readiness_report_path(resolved)),
+    )
+
+    evidence_manifest = _read_json_yaml(_runtime_evidence_factory_manifest_path(resolved)) or {}
+    evidence_manifest["last_run"] = {
+        "generated_at": _utc_now(),
+        "cycles": cycles,
+        "scenario_count": len(scenario_results),
+        "scenario_passed": sum(1 for item in scenario_results if item.ok),
+        "generated_trace_count": generated_trace_count,
+        "generated_activation_trace_count": generated_activation_trace_count,
+        "generated_known_bad_trace_count": generated_known_bad_trace_count,
+        "report_path": result.report_path,
+    }
+    _write_json_yaml(_runtime_evidence_factory_manifest_path(resolved), evidence_manifest)
+    return result
+
+
+def build_mac_studio_day_one_handoff(
+    *,
+    config: IntegrationConfig | None = None,
+    repo_root: str | None = None,
+    tool_registry: HermesToolRegistry | None = None,
+    cycles: int = DEFAULT_EVIDENCE_CYCLES,
+    report_limit: int = DEFAULT_REPLAY_REPORT_LIMIT,
+) -> MacStudioDayOneResult:
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    root = Path(repo_root).expanduser().resolve() if repo_root else _repo_root()
+    registry = tool_registry or MockHermesRuntime(data_dir=resolved.data_dir)
+    install = install_runtime_profile(resolved, repo_root=str(root))
+    stack = bootstrap_stack(config=resolved, repo_root=str(root), tool_registry=registry)
+    doctor = stack.doctor
+    evidence = run_evidence_factory(
+        config=resolved,
+        repo_root=str(root),
+        tool_registry=registry,
+        cycles=cycles,
+        report_limit=report_limit,
+    )
+    report = replay_readiness_report(config=resolved, repo_root=str(root), limit=report_limit)
+    issues: list[str] = []
+    if not doctor.ok:
+        issues.append("doctor failed")
+    if not stack.ok:
+        issues.append("bootstrap stack failed")
+    if not evidence.ok:
+        issues.append("evidence batch failed")
+    _write_mac_studio_day_one_handoff(
+        resolved,
+        root,
+        install=install,
+        evidence_batch=evidence,
+        bootstrap_stack_result=stack,
+        replay_report=report,
+    )
+    return MacStudioDayOneResult(
+        ok=not issues,
+        install=install,
+        doctor=doctor,
+        bootstrap_stack=stack,
+        evidence_batch=evidence,
+        replay_report=report,
+        handoff_path=str(_runtime_mac_studio_day_one_handoff_path(resolved)),
+        issues=issues,
     )
 
 
@@ -2913,6 +3812,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--contract-harness", action="store_true", help="Run the repo-local Hermes contract harness without requiring live Hermes")
     parser.add_argument("--task-loop-proof", action="store_true", help="Run the deterministic research task-loop proof")
     parser.add_argument("--research-cron-proof", action="store_true", help="Run the standing-brief cron proof")
+    parser.add_argument("--evidence-factory", action="store_true", help="Run the production evidence batch across positive and known-bad scenarios")
+    parser.add_argument("--replay-readiness-report", action="store_true", help="Print the detailed replay-readiness coverage report")
+    parser.add_argument("--mac-studio-day-one", action="store_true", help="Generate the one-command Mac Studio rehearsal and handoff package")
     parser.add_argument("--milestone-status", action="store_true", help="Print machine-readable milestone build/proof status")
     parser.add_argument("--workspace-overview", action="store_true", help="Print a Hermes Workspace-oriented operator snapshot")
     parser.add_argument("--operator-checklist", action="store_true", help="Print the operator validation checklist path")
@@ -2928,6 +3830,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo-root", default=None, help="Override the repository root used for profile installation")
     parser.add_argument("--task-id", default="stage0-operator-workflow")
     parser.add_argument("--title", default="Operator workflow smoke test")
+    parser.add_argument("--evidence-cycles", type=int, default=DEFAULT_EVIDENCE_CYCLES, help="How many times to run the evidence scenario suite")
+    parser.add_argument("--report-limit", type=int, default=DEFAULT_REPLAY_REPORT_LIMIT, help="How many coverage rows to include in replay-readiness reports")
     parser.add_argument(
         "--summary",
         default="Validated bootstrap, routing, council-backed opportunity review, and operator alert smoke test.",
@@ -3036,6 +3940,63 @@ def main() -> int:
         print(f"scheduled_job_id={result.scheduled_job_id or 'none'}")
         print(f"queued_task_id={result.queued_task_id or 'none'}")
         print(f"trace_id={result.trace_id or 'none'}")
+        print(f"issues={'; '.join(result.issues) if result.issues else 'none'}")
+        return 0 if result.ok else 1
+
+    if args.evidence_factory:
+        result = run_evidence_factory(
+            config=config,
+            repo_root=args.repo_root,
+            tool_registry=runtime,
+            cycles=args.evidence_cycles,
+            report_limit=args.report_limit,
+        )
+        passed = sum(1 for item in result.scenario_results if item.ok)
+        print("evidence factory ok" if result.ok else "evidence factory failed")
+        print(f"cycles={result.cycles}")
+        print(f"scenarios={passed}/{len(result.scenario_results)}")
+        print(f"generated_traces={result.generated_trace_count}")
+        print(f"generated_source_traces={result.generated_source_trace_count}")
+        print(f"generated_activation_traces={result.generated_activation_trace_count}")
+        print(f"generated_known_bad_traces={result.generated_known_bad_trace_count}")
+        print(
+            "replay="
+            f"{result.replay_report['eligible_source_traces']}/"
+            f"{result.replay_report['minimum_eligible_traces']} eligible,"
+            f"{result.replay_report['known_bad_source_traces']}/"
+            f"{result.replay_report['minimum_known_bad_traces']} known_bad,"
+            f"{result.replay_report['distinct_skill_count']}/"
+            f"{result.replay_report['minimum_distinct_skills']} skills"
+        )
+        print(f"report_path={result.report_path}")
+        return 0 if result.ok else 1
+
+    if args.replay_readiness_report:
+        print(json.dumps(replay_readiness_report(config, repo_root=args.repo_root, limit=args.report_limit), indent=2, sort_keys=True))
+        return 0
+
+    if args.mac_studio_day_one:
+        result = build_mac_studio_day_one_handoff(
+            config=config,
+            repo_root=args.repo_root,
+            tool_registry=runtime,
+            cycles=args.evidence_cycles,
+            report_limit=args.report_limit,
+        )
+        print("mac studio day one ok" if result.ok else "mac studio day one failed")
+        print(f"doctor={'ok' if result.doctor.ok else 'failed'}")
+        print(f"bootstrap_stack={'ok' if result.bootstrap_stack.ok else 'failed'}")
+        print(f"evidence_factory={'ok' if result.evidence_batch.ok else 'failed'}")
+        print(
+            "replay="
+            f"{result.replay_report['eligible_source_traces']}/"
+            f"{result.replay_report['minimum_eligible_traces']} eligible,"
+            f"{result.replay_report['known_bad_source_traces']}/"
+            f"{result.replay_report['minimum_known_bad_traces']} known_bad,"
+            f"{result.replay_report['distinct_skill_count']}/"
+            f"{result.replay_report['minimum_distinct_skills']} skills"
+        )
+        print(f"handoff_path={result.handoff_path}")
         print(f"issues={'; '.join(result.issues) if result.issues else 'none'}")
         return 0 if result.ok else 1
 

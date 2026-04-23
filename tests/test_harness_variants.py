@@ -412,7 +412,12 @@ def test_replay_readiness_excludes_control_plane_roles(tmp_path):
     )
 
     readiness = manager.replay_readiness_summary()
+    report = manager.replay_readiness_report(limit=5)
 
     assert readiness["eligible_source_traces"] == 1
     assert readiness["known_bad_source_traces"] == 0
     assert readiness["distinct_skill_count"] == 1
+    assert report["activation_source_trace_count"] == 1
+    assert report["excluded_role_counts"][0]["role"] == "operator_digest_acknowledgement"
+    assert report["coverage_gaps"][0]["metric"] == "eligible_source_traces"
+    assert report["skills_without_known_bad"] == ["runtime"]

@@ -22,6 +22,10 @@ substrates, but live Hermes attachment on the target machine is still pending.
   and readiness/doctor flows
 - Replayable `execution_traces` across runtime, council, research,
   opportunity, and strategic-memory routing/writeback paths
+- Production evidence factory for repeated multi-skill corpus growth plus
+  detailed replay-readiness reporting
+- Mac Studio day-one handoff bundle that composes bootstrap proofs, evidence
+  growth, and cutover commands into one generated package
 - §8.3b harness-variant substrate with replay-readiness guardrails and
   explicit operator acknowledgement for below-threshold shadow replay
 - CI on `main`, `codex/**`, and PRs to `main`
@@ -80,6 +84,18 @@ Run the deterministic runtime proof:
 python3 -m skills.runtime --operator-workflow
 ```
 
+Grow the replay corpus with production scenarios:
+
+```bash
+python3 -m skills.runtime --evidence-factory
+```
+
+Print the detailed replay-readiness coverage report:
+
+```bash
+python3 -m skills.runtime --replay-readiness-report
+```
+
 Run the repo-local Hermes contract harness:
 
 ```bash
@@ -100,6 +116,7 @@ python3 -m eval.runner --milestone M4
 python3 -m eval.runner --milestone M5
 python3 -m skills.runtime --doctor
 python3 -m skills.runtime --bootstrap-live
+python3 -m skills.runtime --mac-studio-day-one
 ```
 
 ## Working Description

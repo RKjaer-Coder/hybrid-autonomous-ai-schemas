@@ -111,6 +111,18 @@ def _mean(values: list[float]) -> float:
     return sum(values) / len(values)
 
 
+def _progress_snapshot(metric: str, current: int, target: int) -> dict[str, Any]:
+    remaining = max(target - current, 0)
+    percent = 1.0 if target <= 0 else min(current / target, 1.0)
+    return {
+        "metric": metric,
+        "current": current,
+        "target": target,
+        "remaining": remaining,
+        "percent_complete": round(percent, 4),
+    }
+
+
 def _population_std(values: list[float]) -> float:
     if len(values) < 2:
         return 0.0
@@ -530,6 +542,120 @@ class HarnessVariantManager:
                 }
                 for row in coverage_rows
             ],
+        }
+
+    def replay_readiness_report(self, *, limit: int = 10) -> dict[str, Any]:
+        summary = self.replay_readiness_summary()
+        if not self._available:
+            return {
+                **summary,
+                "generated_at": self._now(None),
+                "activation_source_trace_count": 0,
+                "coverage_gaps": [
+                    _progress_snapshot("eligible_source_traces", 0, REPLAY_ACTIVATION_MIN_ELIGIBLE_TRACES),
+                    _progress_snapshot("known_bad_source_traces", 0, REPLAY_ACTIVATION_MIN_KNOWN_BAD_TRACES),
+                    _progress_snapshot("distinct_skill_count", 0, REPLAY_ACTIVATION_MIN_DISTINCT_SKILLS),
+                ],
+                "activation_role_counts": [],
+                "excluded_role_counts": [],
+                "known_bad_by_skill": [],
+                "skills_without_known_bad": [],
+            }
+
+        with self._connect() as conn:
+            activation_count = conn.execute(
+                f"""
+                SELECT COUNT(*) AS activation_source_trace_count
+                FROM execution_traces
+                WHERE source_trace_id IS NULL AND {_activation_role_sql()}
+                """
+            ).fetchone()
+            activation_roles = conn.execute(
+                f"""
+                SELECT skill_name, role, COUNT(*) AS trace_count
+                FROM execution_traces
+                WHERE source_trace_id IS NULL AND {_activation_role_sql()}
+                GROUP BY skill_name, role
+                ORDER BY trace_count DESC, skill_name ASC, role ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            excluded_roles = conn.execute(
+                f"""
+                SELECT role, COUNT(*) AS trace_count
+                FROM execution_traces
+                WHERE source_trace_id IS NULL AND NOT ({_activation_role_sql()})
+                GROUP BY role
+                ORDER BY trace_count DESC, role ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            known_bad_rows = conn.execute(
+                f"""
+                SELECT skill_name, COUNT(*) AS trace_count
+                FROM execution_traces
+                WHERE source_trace_id IS NULL
+                  AND {_activation_role_sql()}
+                  AND (training_eligible = 0 OR judge_verdict != 'PASS' OR retention_class = 'FAILURE_AUDIT')
+                GROUP BY skill_name
+                ORDER BY trace_count DESC, skill_name ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+
+        skill_coverage = list(summary["skill_coverage"])
+        skills_without_known_bad = [
+            row["skill_name"]
+            for row in skill_coverage
+            if int(row["eligible_source_traces"] or 0) > 0 and int(row["known_bad_source_traces"] or 0) == 0
+        ]
+        return {
+            **summary,
+            "generated_at": self._now(None),
+            "activation_source_trace_count": int(activation_count["activation_source_trace_count"] or 0),
+            "coverage_gaps": [
+                _progress_snapshot(
+                    "eligible_source_traces",
+                    int(summary["eligible_source_traces"]),
+                    REPLAY_ACTIVATION_MIN_ELIGIBLE_TRACES,
+                ),
+                _progress_snapshot(
+                    "known_bad_source_traces",
+                    int(summary["known_bad_source_traces"]),
+                    REPLAY_ACTIVATION_MIN_KNOWN_BAD_TRACES,
+                ),
+                _progress_snapshot(
+                    "distinct_skill_count",
+                    int(summary["distinct_skill_count"]),
+                    REPLAY_ACTIVATION_MIN_DISTINCT_SKILLS,
+                ),
+            ],
+            "activation_role_counts": [
+                {
+                    "skill_name": row["skill_name"],
+                    "role": row["role"],
+                    "trace_count": int(row["trace_count"] or 0),
+                }
+                for row in activation_roles
+            ],
+            "excluded_role_counts": [
+                {
+                    "role": row["role"],
+                    "trace_count": int(row["trace_count"] or 0),
+                }
+                for row in excluded_roles
+            ],
+            "known_bad_by_skill": [
+                {
+                    "skill_name": row["skill_name"],
+                    "trace_count": int(row["trace_count"] or 0),
+                }
+                for row in known_bad_rows
+            ],
+            "skills_without_known_bad": skills_without_known_bad[:limit],
         }
 
     def propose_variant(

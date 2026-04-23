@@ -14,6 +14,9 @@ SUPPORT_ARTIFACT_FILENAMES = {
     "gateway_manifest": "gateway_manifest.json",
     "workspace_manifest": "workspace_manifest.json",
     "operator_validation_checklist": "operator_validation_checklist.md",
+    "evidence_factory_manifest": "evidence_factory_manifest.json",
+    "replay_readiness_report": "replay_readiness_report.json",
+    "mac_studio_day_one_handoff": "mac_studio_day_one_handoff.md",
 }
 
 
@@ -40,6 +43,9 @@ def _runtime_launcher_paths(config: IntegrationConfig) -> dict[str, Path]:
         "contract_harness": bin_dir / "contract_harness_runtime.sh",
         "task_loop_proof": bin_dir / "task_loop_proof.sh",
         "research_cron_proof": bin_dir / "research_cron_proof.sh",
+        "evidence_factory": bin_dir / "evidence_factory.sh",
+        "replay_readiness_report": bin_dir / "replay_readiness_report.sh",
+        "mac_studio_day_one": bin_dir / "mac_studio_day_one.sh",
         "gateway": bin_dir / "start_gateway.sh",
         "workspace": bin_dir / "start_workspace.sh",
         "operator_checklist": bin_dir / "operator_validation_checklist.sh",

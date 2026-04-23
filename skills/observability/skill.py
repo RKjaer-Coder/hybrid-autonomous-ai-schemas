@@ -288,6 +288,9 @@ class ObservabilitySkill:
             "variants": self._harness_variants.summary(),
         }
 
+    def replay_readiness_report(self) -> dict:
+        return self._harness_variants.replay_readiness_report()
+
     def reliability_dashboard(self, limit: int = 20) -> dict:
         telemetry = self._db.get_connection("telemetry")
         reliability_rows = telemetry.execute(
@@ -707,6 +710,8 @@ def observability_entry(action: str, **kwargs):
         )
     if action == "harness_variant_summary":
         return _SKILL.harness_variant_summary()
+    if action == "replay_readiness_report":
+        return _SKILL.replay_readiness_report()
     if action == "recent_digests":
         return _SKILL.recent_digests(kwargs.get("limit", 5), kwargs.get("digest_type"))
     if action == "reliability_dashboard":
