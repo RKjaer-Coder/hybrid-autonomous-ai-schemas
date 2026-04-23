@@ -1392,3 +1392,46 @@ def test_replay_readiness_summary_surfaces_threshold_gap(test_data_dir):
     assert replay["minimum_known_bad_traces"] == 25
     assert replay["minimum_distinct_skills"] == 3
     assert replay["blockers"]
+
+
+def test_operator_and_observability_surface_workspace_overview_and_milestone_health(test_data_dir):
+    db = DatabaseManager(str(test_data_dir))
+    operator = OperatorInterfaceSkill(db)
+    observability = ObservabilitySkill(db, None, None)
+    manager = HarnessVariantManager(str(test_data_dir / "telemetry.db"))
+
+    manager.log_execution_trace(
+        ExecutionTrace(
+            trace_id="workspace-trace-1",
+            task_id="workspace-task-1",
+            role="runtime_contract",
+            skill_name="runtime",
+            harness_version="contract-v1",
+            intent_goal="workspace proof",
+            steps=[],
+            prompt_template="workspace proof",
+            context_assembled="workspace proof",
+            retrieval_queries=[],
+            judge_verdict="PASS",
+            judge_reasoning="ok",
+            outcome_score=1.0,
+            cost_usd=0.0,
+            duration_ms=10,
+            training_eligible=True,
+            retention_class="STANDARD",
+            source_chain_id="workspace-chain-1",
+            source_session_id="workspace-session-1",
+            source_trace_id=None,
+            created_at="2026-04-22T10:00:00+00:00",
+        )
+    )
+
+    operator_view = operator.workspace_overview()
+    observability_view = observability.workspace_overview()
+
+    assert "milestone_health" in operator_view
+    assert "runtime_status" in operator_view
+    assert "replay_readiness" in operator_view
+    assert "milestone_health" in observability_view
+    assert "system_health" in observability_view
+    assert observability.milestone_health()["milestones"]["M1"]["implemented"] is True

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from immune.patterns.policy_signatures import CONSTRUCTION_ALLOWLIST
+from immune.patterns.policy_signatures import CONSTRUCTION_ALLOWLIST, NETWORK_TOOLS
 from skills.config import IntegrationConfig
 
 PROFILE_CONFIG_SKILL_KEY = "hybrid_autonomous_ai"
@@ -68,12 +68,47 @@ class HermesProfileContract:
             "logs_dir": str(Path(self.config.data_dir).expanduser().resolve().parent / "logs"),
         }
 
+    def network_controls(self) -> dict[str, Any]:
+        return {
+            "proxy_bind_url": self.config.proxy_bind_url,
+            "outbound_allowlist": {
+                "domains": list(self.config.outbound_allowlist_domains),
+                "ports": list(self.config.outbound_allowlist_ports),
+                "schemes": sorted(CONSTRUCTION_ALLOWLIST.permitted_schemes),
+            },
+            "seed_network_tools": sorted(NETWORK_TOOLS),
+        }
+
+    def gateway_mapping(self) -> dict[str, Any]:
+        return {
+            "url": self.config.hermes_gateway_url,
+            "enabled": True,
+            "expected_tools": ["web_search", "web_fetch", "image_generation", "browser_automation", "tts"],
+        }
+
+    def workspace_mapping(self) -> dict[str, Any]:
+        return {
+            "url": self.config.hermes_workspace_url,
+            "enabled": True,
+            "preferred_surfaces": [
+                "gates",
+                "execution_traces",
+                "quarantines",
+                "replay_readiness",
+                "runtime_halt_state",
+                "milestone_health",
+            ],
+        }
+
     def skill_config(self) -> dict[str, Any]:
         return {
             "profile_name": self.config.profile_name,
             "repo_contract_version": 1,
             "construction_phase": self.config.construction_phase,
             "runtime": self.runtime_mapping(),
+            "network_controls": self.network_controls(),
+            "gateway": self.gateway_mapping(),
+            "workspace": self.workspace_mapping(),
             "routing": {
                 "local_endpoint": DEFAULT_LOCAL_BASE_URL,
                 "local_model": DEFAULT_LOCAL_MODEL,
@@ -142,6 +177,9 @@ class HermesProfileContract:
             },
             "dangerous_commands": self.representative_dangerous_commands,
             "runtime": self.runtime_mapping(),
+            "network_controls": self.network_controls(),
+            "gateway": self.gateway_mapping(),
+            "workspace": self.workspace_mapping(),
         }
 
     def generated_checks(
@@ -180,6 +218,18 @@ class HermesProfileContract:
                 nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "runtime") or {},
                 self.runtime_mapping(),
             ),
+            "network_controls": contains_subset(
+                nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "network_controls") or {},
+                self.network_controls(),
+            ),
+            "gateway_mapping": contains_subset(
+                nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "gateway") or {},
+                self.gateway_mapping(),
+            ),
+            "workspace_mapping": contains_subset(
+                nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "workspace") or {},
+                self.workspace_mapping(),
+            ),
         }
 
     def live_config_checks(self, actual_config_doc: dict[str, Any] | None) -> dict[str, bool]:
@@ -210,5 +260,17 @@ class HermesProfileContract:
             "runtime_paths": contains_subset(
                 nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "runtime") or {},
                 self.runtime_mapping(),
+            ),
+            "network_controls": contains_subset(
+                nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "network_controls") or {},
+                self.network_controls(),
+            ),
+            "gateway_mapping": contains_subset(
+                nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "gateway") or {},
+                self.gateway_mapping(),
+            ),
+            "workspace_mapping": contains_subset(
+                nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "workspace") or {},
+                self.workspace_mapping(),
             ),
         }

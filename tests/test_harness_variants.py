@@ -171,7 +171,7 @@ def test_harness_variant_lifecycle_and_frontier(tmp_path):
     assert scope_violation["status"] == "REJECTED"
     assert scope_violation["reject_reason"] == "SCOPE_VIOLATION"
 
-    summary = manager.summary()
+    summary = manager.summary(reference_time="2026-04-21T13:05:00+00:00")
     assert summary["active_count"] == 0
     assert summary["promoted_count"] == 1
     assert summary["rejected_24h"] == 3

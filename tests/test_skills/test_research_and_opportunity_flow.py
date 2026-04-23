@@ -98,6 +98,31 @@ def test_research_task_rejects_invalid_completion_brief(test_data_dir):
         raise AssertionError("expected mismatched brief validation failure")
 
 
+def test_standing_brief_can_schedule_and_queue_runs(test_data_dir):
+    db = DatabaseManager(str(test_data_dir))
+    research = ResearchDomainSkill(db)
+    runtime = MockHermesRuntime(data_dir=str(test_data_dir))
+    traces = HarnessVariantManager(str(test_data_dir / "telemetry.db"))
+
+    standing = research.create_standing_brief(
+        "Standing Market Scan",
+        "Watch the market and produce an operator-routable brief.",
+        "0 9 * * 1",
+        target_interface="Hermes Workspace",
+        include_council_review=True,
+        tags=["market", "standing"],
+    )
+    scheduled = research.schedule_standing_brief(standing["standing_brief_id"], runtime, model="local-default")
+    queued = research.queue_standing_brief_run(standing["standing_brief_id"])
+
+    assert standing["status"] == "ACTIVE"
+    assert scheduled["job_id"] in runtime.scheduled_jobs
+    assert queued["standing_brief"]["last_task_id"] == queued["task"]["task_id"]
+    assert queued["task"]["status"] == "PENDING"
+    standing_traces = traces.list_execution_traces(limit=5, skill_name="research_domain")
+    assert standing_traces[0]["role"] == "standing_brief_run"
+
+
 def test_opportunity_pipeline_handoff_and_project_backpropagation(test_data_dir):
     db = DatabaseManager(str(test_data_dir))
     pipeline = OpportunityPipelineSkill(db)

@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import datetime
 import json
-from typing import Optional
+from typing import Any, Optional
 
 from harness_variants import HarnessVariantManager
 from immune.judge_lifecycle import JudgeLifecycleManager
 from immune.config import load_config
 from runtime_control import RuntimeControlManager
 from skills.append_buffer import AppendBuffer
+from skills.config import IntegrationConfig
 from skills.db_manager import DatabaseManager
 from skills.financial_router.skill import FinancialRouterSkill
+from skills.milestone_status import evaluate_milestone_status
 
 
 class ObservabilitySkill:
@@ -483,6 +485,22 @@ class ObservabilitySkill:
             "recommended_digest_type": recommended_digest_type,
         }
 
+    def milestone_health(self) -> dict[str, Any]:
+        config = IntegrationConfig(data_dir=str(self._db.data_dir))
+        return evaluate_milestone_status(config, db_manager=self._db)
+
+    def workspace_overview(self) -> dict[str, Any]:
+        health = self.system_health()
+        return {
+            "system_health": health,
+            "runtime_status": self.runtime_status(),
+            "recent_quarantines": self.recent_quarantined_responses(limit=5, pending_review_only=True),
+            "recent_g3_requests": self.recent_g3_approval_requests(limit=5, status="PENDING"),
+            "recent_execution_traces": self.execution_traces(limit=5),
+            "harness_frontier": self.harness_frontier(limit=5),
+            "milestone_health": self.milestone_health(),
+        }
+
     def _operator_load_snapshot(self) -> dict:
         operator = self._db.get_connection("operator_digest")
         now = datetime.datetime.now(datetime.timezone.utc)
@@ -664,4 +682,8 @@ def observability_entry(action: str, **kwargs):
         return _SKILL.circuit_breaker_status()
     if action == "system_health":
         return _SKILL.system_health()
+    if action == "milestone_health":
+        return _SKILL.milestone_health()
+    if action == "workspace_overview":
+        return _SKILL.workspace_overview()
     raise ValueError(f"Unknown action: {action}")

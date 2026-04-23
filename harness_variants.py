@@ -819,7 +819,7 @@ class HarnessVariantManager:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def summary(self) -> dict[str, Any]:
+    def summary(self, *, reference_time: str | None = None) -> dict[str, Any]:
         if not self._available:
             return {
                 "available": False,
@@ -831,7 +831,12 @@ class HarnessVariantManager:
                 "frontier": [],
                 "recent": [],
             }
-        cutoff = _to_iso(datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24))
+        now = (
+            _parse_ts(reference_time)
+            if reference_time is not None
+            else datetime.datetime.now(datetime.timezone.utc)
+        )
+        cutoff = _to_iso(now - datetime.timedelta(hours=24))
         with self._connect() as conn:
             counts = conn.execute(
                 """

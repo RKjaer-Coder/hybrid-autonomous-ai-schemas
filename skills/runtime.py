@@ -45,6 +45,7 @@ from skills.bootstrap import BootstrapOrchestrator
 from skills.config import IntegrationConfig
 from skills.db_manager import CANONICAL_DATABASES, DatabaseManager
 from skills.hermes_interfaces import HermesSessionContext, HermesToolRegistry, MockHermesRuntime
+from skills.milestone_status import evaluate_milestone_status, runtime_support_artifact_paths
 
 EXPECTED_CORE_TOOLS = (
     "immune_system",
@@ -64,18 +65,17 @@ EXPECTED_SEED_TOOLS = (
     "shell_command",
 )
 LEGACY_SPLIT_DATABASES = ("opportunity.db", "project.db", "treasury.db")
-MANIFEST_HERMES_VERSION_FLOOR = (0, 9, 0)
-CHECKLIST_HERMES_VERSION_FLOOR = (0, 8, 0)
+MANIFEST_HERMES_VERSION_FLOOR = (0, 10, 0)
+CHECKLIST_HERMES_VERSION_FLOOR = (0, 10, 0)
 VERSION_DRIFT_NOTE = (
-    "spec drift: spec/00_manifest.md declares Hermes v0.9.0+ while "
-    "spec/s07_hermes_config.md §7.5c still says v0.8.0+."
+    "spec drift: repo runtime now targets Hermes v0.10.0+ and treats "
+    "config.yaml as the primary upstream surface. Any remaining v0.8/v0.9 "
+    "language should be considered stale."
 )
 PROFILE_DRIFT_NOTE = (
-    "spec/doc drift: spec/s07_hermes_config.md §7.5c D1-2 still names "
-    "~/.hermes/profiles/<profile>/profile.yaml, while current Hermes docs and "
-    "profile commands center config.yaml inside the profile directory. The repo "
-    "now generates a docs-aligned config.yaml plus a spec-compat profile.yaml "
-    "projection so the mismatch stays explicit."
+    "spec/doc drift: upstream Hermes docs center config.yaml inside the profile "
+    "directory. The repo still generates a spec-compat profile.yaml projection, "
+    "but config.yaml is the authoritative runtime surface."
 )
 CONFIG_SURFACE_UNCERTAINTY_NOTE = (
     "upstream uncertainty: current Hermes public docs clearly describe "
@@ -84,6 +84,8 @@ CONFIG_SURFACE_UNCERTAINTY_NOTE = (
     "validates the §7.5c dangerous-command set as a repo-owned contract until "
     "live Hermes proves the exact upstream key shape."
 )
+
+
 @dataclass(frozen=True)
 class RuntimeBootstrapResult:
     """Structured result for a Hermes integration bootstrap attempt."""
@@ -237,6 +239,44 @@ class HermesContractHarnessResult:
     final_runtime_status: dict[str, Any] | None
     trace_id: str | None
     issues: list[str]
+
+
+@dataclass(frozen=True)
+class TaskLoopProofResult:
+    ok: bool
+    config: IntegrationConfig
+    bootstrap: RuntimeBootstrapResult
+    doctor: RuntimeDoctorResult
+    task_id: str | None
+    brief_id: str | None
+    route_summary: dict[str, Any] | None
+    trace_id: str | None
+    issues: list[str]
+
+
+@dataclass(frozen=True)
+class ResearchCronProofResult:
+    ok: bool
+    config: IntegrationConfig
+    bootstrap: RuntimeBootstrapResult
+    doctor: RuntimeDoctorResult
+    standing_brief_id: str | None
+    scheduled_job_id: str | None
+    queued_task_id: str | None
+    trace_id: str | None
+    issues: list[str]
+
+
+@dataclass(frozen=True)
+class BootstrapStackResult:
+    ok: bool
+    install: RuntimeProfileInstallResult
+    doctor: RuntimeDoctorResult
+    operator_workflow: OperatorWorkflowResult
+    contract_harness: HermesContractHarnessResult
+    task_loop_proof: TaskLoopProofResult
+    research_cron_proof: ResearchCronProofResult
+    milestone_status: dict[str, Any]
 
 
 def _utc_now() -> str:
@@ -404,6 +444,63 @@ def _ensure_operator_workflow_chain_definition(config: IntegrationConfig, chain_
         db_manager.close_all()
 
 
+def _ensure_task_loop_chain_definition(config: IntegrationConfig, chain_type: str = "task_loop_proof") -> None:
+    db_manager = DatabaseManager(config.data_dir)
+    try:
+        conn = db_manager.get_connection("telemetry")
+        now = _utc_now()
+        steps = json.dumps(
+            [
+                {"step_type": "create_task", "skill": "research_domain_2"},
+                {"step_type": "start_task", "skill": "research_domain_2"},
+                {"step_type": "write_brief", "skill": "strategic_memory"},
+                {"step_type": "complete_task", "skill": "research_domain_2"},
+                {"step_type": "route_task_output", "skill": "research_domain_2"},
+                {"step_type": "judge", "skill": "immune_system"},
+            ]
+        )
+        conn.execute(
+            """
+            INSERT INTO chain_definitions (chain_type, steps, created_at, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(chain_type) DO UPDATE SET
+                steps=excluded.steps,
+                updated_at=excluded.updated_at
+            """,
+            (chain_type, steps, now, now),
+        )
+        conn.commit()
+    finally:
+        db_manager.close_all()
+
+
+def _ensure_research_cron_chain_definition(config: IntegrationConfig, chain_type: str = "research_cron_proof") -> None:
+    db_manager = DatabaseManager(config.data_dir)
+    try:
+        conn = db_manager.get_connection("telemetry")
+        now = _utc_now()
+        steps = json.dumps(
+            [
+                {"step_type": "create_standing_brief", "skill": "research_domain_2"},
+                {"step_type": "schedule_standing_brief", "skill": "research_domain_2"},
+                {"step_type": "queue_standing_brief_run", "skill": "research_domain_2"},
+            ]
+        )
+        conn.execute(
+            """
+            INSERT INTO chain_definitions (chain_type, steps, created_at, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(chain_type) DO UPDATE SET
+                steps=excluded.steps,
+                updated_at=excluded.updated_at
+            """,
+            (chain_type, steps, now, now),
+        )
+        conn.commit()
+    finally:
+        db_manager.close_all()
+
+
 def _persist_step_outcome(
     config: IntegrationConfig,
     *,
@@ -517,6 +614,11 @@ def _normalize_runtime_layout(config: IntegrationConfig) -> IntegrationConfig:
         max_api_spend_usd=config.max_api_spend_usd,
         construction_phase=config.construction_phase,
         profile_name=config.profile_name,
+        proxy_bind_url=config.proxy_bind_url,
+        outbound_allowlist_domains=tuple(config.outbound_allowlist_domains),
+        outbound_allowlist_ports=tuple(config.outbound_allowlist_ports),
+        hermes_gateway_url=config.hermes_gateway_url,
+        hermes_workspace_url=config.hermes_workspace_url,
     )
 
 
@@ -536,10 +638,18 @@ def _runtime_launcher_paths(config: IntegrationConfig) -> dict[str, Path]:
     bin_dir = _runtime_bundle_dir(config) / "bin"
     return {
         "bootstrap": bin_dir / "bootstrap_runtime.sh",
+        "bootstrap_stack": bin_dir / "bootstrap_stack.sh",
         "doctor": bin_dir / "doctor_runtime.sh",
         "readiness": bin_dir / "readiness_runtime.sh",
         "operator_workflow": bin_dir / "run_operator_workflow.sh",
         "contract_harness": bin_dir / "contract_harness_runtime.sh",
+        "task_loop_proof": bin_dir / "task_loop_proof.sh",
+        "research_cron_proof": bin_dir / "research_cron_proof.sh",
+        "gateway": bin_dir / "start_gateway.sh",
+        "workspace": bin_dir / "start_workspace.sh",
+        "operator_checklist": bin_dir / "operator_validation_checklist.sh",
+        "milestone_status": bin_dir / "milestone_status.sh",
+        "workspace_overview": bin_dir / "workspace_overview.sh",
     }
 
 
@@ -574,6 +684,22 @@ def _runtime_profile_validation_repo_root(config: IntegrationConfig) -> Path:
         if isinstance(repo_root, str) and repo_root.strip():
             return Path(repo_root).expanduser().resolve()
     return _repo_root()
+
+
+def _runtime_operator_validation_checklist_path(config: IntegrationConfig) -> Path:
+    return runtime_support_artifact_paths(config)["operator_validation_checklist"]
+
+
+def _runtime_network_controls_path(config: IntegrationConfig) -> Path:
+    return runtime_support_artifact_paths(config)["network_controls"]
+
+
+def _runtime_gateway_manifest_path(config: IntegrationConfig) -> Path:
+    return runtime_support_artifact_paths(config)["gateway_manifest"]
+
+
+def _runtime_workspace_manifest_path(config: IntegrationConfig) -> Path:
+    return runtime_support_artifact_paths(config)["workspace_manifest"]
 
 
 @contextlib.contextmanager
@@ -831,6 +957,61 @@ def _write_launcher(path: Path, config: IntegrationConfig, repo_root: Path, acti
     path.chmod(0o755)
 
 
+def _write_env_launcher(path: Path, lines: list[str]) -> None:
+    path.write_text("\n".join(["#!/bin/sh", "set -eu", *lines, ""]), encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path) -> None:
+    contract = HermesProfileContract(config=config, repo_root=str(repo_root))
+    artifacts = runtime_support_artifact_paths(config)
+    for path in artifacts.values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+    network_doc = {
+        **contract.network_controls(),
+        "proxy_environment": {
+            "HTTP_PROXY": config.proxy_bind_url,
+            "HTTPS_PROXY": config.proxy_bind_url,
+            "ALL_PROXY": config.proxy_bind_url,
+            "NO_PROXY": ",".join(config.outbound_allowlist_domains),
+        },
+        "gateway_url": config.hermes_gateway_url,
+    }
+    gateway_doc = {
+        **contract.gateway_mapping(),
+        "workspace_url": config.hermes_workspace_url,
+        "network_controls_path": str(_runtime_network_controls_path(config)),
+        "startup_hint": (
+            "Set HERMES_GATEWAY_CMD to your preferred Hermes gateway command to let the "
+            "generated launcher execute it directly."
+        ),
+    }
+    workspace_doc = {
+        **contract.workspace_mapping(),
+        "gateway_url": config.hermes_gateway_url,
+        "workspace_snapshot_command": _command_string(config, "--workspace-overview", repo_root),
+        "milestone_status_command": _command_string(config, "--milestone-status", repo_root),
+    }
+    checklist_lines = [
+        "# Operator Validation Checklist",
+        "",
+        "1. Run the generated bootstrap stack command.",
+        "2. Confirm `doctor` passes and all canonical databases are in WAL mode.",
+        "3. Confirm the repo-local contract harness passes.",
+        "4. Confirm the task-loop and research-cron proofs pass.",
+        "5. If Hermes is installed, run readiness and verify the live profile/config surface.",
+        "6. Open the Hermes Workspace and confirm gates, traces, quarantine review, replay readiness, runtime halt state, and milestone health are visible.",
+    ]
+    _write_json_yaml(_runtime_network_controls_path(config), network_doc)
+    _write_json_yaml(_runtime_gateway_manifest_path(config), gateway_doc)
+    _write_json_yaml(_runtime_workspace_manifest_path(config), workspace_doc)
+    _runtime_operator_validation_checklist_path(config).write_text(
+        "\n".join(checklist_lines) + "\n",
+        encoding="utf-8",
+    )
+
+
 def _symlink_skill_directory(source: Path, dest: Path) -> None:
     if dest.is_symlink():
         if dest.resolve() == source.resolve():
@@ -880,6 +1061,10 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
         "profile_dir": str(_runtime_profile_dir(resolved)),
         "profile_config_path": str(_runtime_profile_config_path(resolved)),
         "spec_profile_path": str(_runtime_spec_profile_path(resolved)),
+        "network_controls_path": str(_runtime_network_controls_path(resolved)),
+        "gateway_manifest_path": str(_runtime_gateway_manifest_path(resolved)),
+        "workspace_manifest_path": str(_runtime_workspace_manifest_path(resolved)),
+        "operator_validation_checklist_path": str(_runtime_operator_validation_checklist_path(resolved)),
         "data_dir": resolved.data_dir,
         "skills_dir": resolved.skills_dir,
         "checkpoints_dir": resolved.checkpoints_dir,
@@ -888,10 +1073,15 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
         "linked_skills": linked_skill_paths,
         "commands": {
             "bootstrap": _command_string(resolved, "--bootstrap-live", root),
+            "bootstrap_stack": _command_string(resolved, "--bootstrap-stack", root),
             "doctor": _command_string(resolved, "--doctor", root),
             "readiness": _command_string(resolved, "--readiness", root),
             "operator_workflow": _command_string(resolved, "--operator-workflow", root),
             "contract_harness": _command_string(resolved, "--contract-harness", root),
+            "task_loop_proof": _command_string(resolved, "--task-loop-proof", root),
+            "research_cron_proof": _command_string(resolved, "--research-cron-proof", root),
+            "milestone_status": _command_string(resolved, "--milestone-status", root),
+            "workspace_overview": _command_string(resolved, "--workspace-overview", root),
         },
     }
     manifest_path = _runtime_profile_manifest_path(resolved)
@@ -904,12 +1094,41 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
     spec_profile_doc = contract.spec_profile_document()
     _write_json_yaml(_runtime_profile_config_path(resolved), config_doc)
     _write_json_yaml(_runtime_spec_profile_path(resolved), spec_profile_doc)
+    _write_runtime_support_artifacts(resolved, root)
 
     _write_launcher(launcher_paths["bootstrap"], resolved, root, "--bootstrap-live")
+    _write_launcher(launcher_paths["bootstrap_stack"], resolved, root, "--bootstrap-stack")
     _write_launcher(launcher_paths["doctor"], resolved, root, "--doctor")
     _write_launcher(launcher_paths["readiness"], resolved, root, "--readiness")
     _write_launcher(launcher_paths["operator_workflow"], resolved, root, "--operator-workflow")
     _write_launcher(launcher_paths["contract_harness"], resolved, root, "--contract-harness")
+    _write_launcher(launcher_paths["task_loop_proof"], resolved, root, "--task-loop-proof")
+    _write_launcher(launcher_paths["research_cron_proof"], resolved, root, "--research-cron-proof")
+    _write_launcher(launcher_paths["milestone_status"], resolved, root, "--milestone-status")
+    _write_launcher(launcher_paths["workspace_overview"], resolved, root, "--workspace-overview")
+    _write_launcher(launcher_paths["operator_checklist"], resolved, root, "--operator-checklist")
+    _write_env_launcher(
+        launcher_paths["gateway"],
+        [
+            f"MANIFEST_PATH={shlex.quote(str(_runtime_gateway_manifest_path(resolved)))}",
+            f"GATEWAY_URL={shlex.quote(resolved.hermes_gateway_url)}",
+            'if [ -n "${HERMES_GATEWAY_CMD:-}" ]; then',
+            '  exec sh -lc "$HERMES_GATEWAY_CMD"',
+            "fi",
+            'printf "gateway_url=%s\\nmanifest=%s\\n" "$GATEWAY_URL" "$MANIFEST_PATH"',
+        ],
+    )
+    _write_env_launcher(
+        launcher_paths["workspace"],
+        [
+            f"MANIFEST_PATH={shlex.quote(str(_runtime_workspace_manifest_path(resolved)))}",
+            f"WORKSPACE_URL={shlex.quote(resolved.hermes_workspace_url)}",
+            'if [ -n "${HERMES_WORKSPACE_CMD:-}" ]; then',
+            '  exec sh -lc "$HERMES_WORKSPACE_CMD"',
+            "fi",
+            'printf "workspace_url=%s\\nmanifest=%s\\n" "$WORKSPACE_URL" "$MANIFEST_PATH"',
+        ],
+    )
 
     return RuntimeProfileInstallResult(
         config=resolved,
@@ -997,11 +1216,23 @@ def doctor_runtime(
         "profile_dir": _runtime_profile_dir(resolved).is_dir(),
         "profile_config": _runtime_profile_config_path(resolved).is_file(),
         "spec_profile": _runtime_spec_profile_path(resolved).is_file(),
+        "network_controls": _runtime_network_controls_path(resolved).is_file(),
+        "gateway_manifest": _runtime_gateway_manifest_path(resolved).is_file(),
+        "workspace_manifest": _runtime_workspace_manifest_path(resolved).is_file(),
+        "operator_validation_checklist": _runtime_operator_validation_checklist_path(resolved).is_file(),
         "bootstrap_launcher": launcher_paths["bootstrap"].is_file(),
+        "bootstrap_stack_launcher": launcher_paths["bootstrap_stack"].is_file(),
         "doctor_launcher": launcher_paths["doctor"].is_file(),
         "readiness_launcher": launcher_paths["readiness"].is_file(),
         "operator_workflow_launcher": launcher_paths["operator_workflow"].is_file(),
         "contract_harness_launcher": launcher_paths["contract_harness"].is_file(),
+        "task_loop_proof_launcher": launcher_paths["task_loop_proof"].is_file(),
+        "research_cron_proof_launcher": launcher_paths["research_cron_proof"].is_file(),
+        "gateway_launcher": launcher_paths["gateway"].is_file(),
+        "workspace_launcher": launcher_paths["workspace"].is_file(),
+        "operator_checklist_launcher": launcher_paths["operator_checklist"].is_file(),
+        "milestone_status_launcher": launcher_paths["milestone_status"].is_file(),
+        "workspace_overview_launcher": launcher_paths["workspace_overview"].is_file(),
     }
     profile_validation = _validate_profile_artifacts(
         resolved,
@@ -1410,6 +1641,370 @@ def exercise_hermes_contract(
         )
 
 
+def run_task_loop_proof(
+    *,
+    config: IntegrationConfig | None = None,
+    repo_root: str | None = None,
+    tool_registry: HermesToolRegistry | None = None,
+) -> TaskLoopProofResult:
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    root = Path(repo_root).expanduser().resolve() if repo_root else _repo_root()
+    registry = tool_registry or MockHermesRuntime(data_dir=resolved.data_dir)
+    install_runtime_profile(resolved, repo_root=str(root))
+    bootstrap = bootstrap_runtime(registry, config=resolved, model_name="task-loop-proof")
+    _ensure_task_loop_chain_definition(resolved)
+    chain_id = f"task-loop-{generate_uuid_v7()}"
+    issues: list[str] = []
+    task_id: str | None = None
+    brief_id: str | None = None
+    route_summary: dict[str, Any] | None = None
+    trace_steps: list[ExecutionTraceStep] = []
+
+    def append_trace_step(step_name: str, skill_name: str, result: Any) -> None:
+        payload = {
+            "success": bool(getattr(result, "success", False)),
+            "error": getattr(result, "error", None),
+            "output": getattr(result, "output", None),
+        }
+        trace_steps.append(
+            ExecutionTraceStep(
+                step_index=len(trace_steps) + 1,
+                tool_call=f"{skill_name}.{step_name}",
+                tool_result=json.dumps(payload, sort_keys=True, default=str)[:4096],
+                tool_result_file=None,
+                tokens_in=0,
+                tokens_out=0,
+                latency_ms=int(getattr(result, "duration_ms", 0) or 0),
+                model_used="task-loop-proof",
+            )
+        )
+
+    create_task = registry.invoke_tool(
+        "research_domain_2",
+        {
+            "action": "create_task",
+            "title": "Task loop proof",
+            "brief": "Validate the deterministic research task loop and downstream routing surfaces.",
+            "priority": "P1_HIGH",
+            "tags": ["runtime", "task-loop", "proof"],
+        },
+    )
+    _record_tool_step(resolved, chain_id=chain_id, step_type="create_task", skill="research_domain_2", result=create_task)
+    append_trace_step("create_task", "research_domain_2", create_task)
+    if not create_task.success:
+        issues.append(create_task.error or "create_task failed")
+    else:
+        task_id = create_task.output
+
+    if task_id is not None:
+        start_task = registry.invoke_tool("research_domain_2", {"action": "start_task", "task_id": task_id})
+        _record_tool_step(resolved, chain_id=chain_id, step_type="start_task", skill="research_domain_2", result=start_task)
+        append_trace_step("start_task", "research_domain_2", start_task)
+        if not start_task.success:
+            issues.append(start_task.error or "start_task failed")
+
+        write_brief = registry.invoke_tool(
+            "strategic_memory",
+            {
+                "action": "write_brief",
+                "task_id": task_id,
+                "title": "Task loop proof brief",
+                "summary": "The deterministic research task loop completed and produced a routable brief.",
+                "confidence": 0.79,
+                "actionability": "ACTION_RECOMMENDED",
+                "action_type": "opportunity_feed",
+                "depth_tier": "FULL",
+                "source_urls": ["https://example.com/task-loop", "https://api.example.com/task-loop"],
+                "source_assessments": [
+                    {"url": "https://example.com/task-loop", "relevance": 0.84, "freshness": "2026-04-22", "source_type": "tier2_web"},
+                    {"url": "https://api.example.com/task-loop", "relevance": 0.9, "freshness": "2026-04-22", "source_type": "tier1_api"},
+                ],
+                "uncertainty_statement": "The proof still runs against mock/runtime-local surfaces rather than a live Hermes install.",
+                "counter_thesis": "The remaining risk is that the real operator environment introduces timing or config drift.",
+                "tags": ["runtime", "task-loop", "proof"],
+            },
+        )
+        _record_tool_step(resolved, chain_id=chain_id, step_type="write_brief", skill="strategic_memory", result=write_brief)
+        append_trace_step("write_brief", "strategic_memory", write_brief)
+        if not write_brief.success:
+            issues.append(write_brief.error or "write_brief failed")
+        else:
+            brief_id = write_brief.output
+
+    if task_id is not None:
+        complete_task = registry.invoke_tool(
+            "research_domain_2",
+            {
+                "action": "complete_task",
+                "task_id": task_id,
+                "output_brief_id": brief_id,
+                "actual_spend_usd": 0.0,
+            },
+        )
+        _record_tool_step(resolved, chain_id=chain_id, step_type="complete_task", skill="research_domain_2", result=complete_task)
+        append_trace_step("complete_task", "research_domain_2", complete_task)
+        if not complete_task.success:
+            issues.append(complete_task.error or "complete_task failed")
+
+    if task_id is not None:
+        route_task_output = registry.invoke_tool(
+            "research_domain_2",
+            {
+                "action": "route_task_output",
+                "task_id": task_id,
+                "target_interface": "Hermes Workspace",
+            },
+        )
+        _record_tool_step(resolved, chain_id=chain_id, step_type="route_task_output", skill="research_domain_2", result=route_task_output)
+        append_trace_step("route_task_output", "research_domain_2", route_task_output)
+        if not route_task_output.success:
+            issues.append(route_task_output.error or "route_task_output failed")
+        else:
+            route_summary = {
+                "action_count": len(route_task_output.output["actions"]),
+                "action_types": [action["type"] for action in route_task_output.output["actions"]],
+            }
+
+    judge = registry.invoke_tool(
+        "immune_system",
+        {
+            "action": "judge",
+            "payload": JudgePayload(
+                session_id=bootstrap.session_context.session_id,
+                skill_name="task_loop_proof",
+                tool_name="research_domain_2",
+                output={"task_id": task_id, "brief_id": brief_id, "route_summary": route_summary},
+                task_type="task_loop_proof",
+            ),
+        },
+    )
+    _record_tool_step(resolved, chain_id=chain_id, step_type="judge", skill="immune_system", result=judge)
+    append_trace_step("judge", "immune_system", judge)
+    if not judge.success:
+        issues.append(judge.error or "judge failed")
+    else:
+        _persist_immune_verdict(resolved, judge.output, judge.duration_ms)
+
+    doctor = doctor_runtime(registry, config=resolved, bootstrap_if_needed=False)
+    trace_id = generate_uuid_v7()
+    _log_execution_trace(
+        resolved,
+        ExecutionTrace(
+            trace_id=trace_id,
+            task_id=task_id or chain_id,
+            role="task_loop_proof",
+            skill_name="runtime",
+            harness_version="task_loop_proof_v1",
+            intent_goal="Validate deterministic task-loop execution and routing.",
+            steps=trace_steps,
+            prompt_template="task loop proof",
+            context_assembled="research task lifecycle + brief completion + downstream routing",
+            retrieval_queries=["runtime", "task-loop", "proof"],
+            judge_verdict="PASS" if not issues and doctor.ok else "FAIL",
+            judge_reasoning="Task loop proof completed." if not issues and doctor.ok else "Task loop proof exposed issues.",
+            outcome_score=1.0 if not issues and doctor.ok else 0.0,
+            cost_usd=0.0,
+            duration_ms=sum(step.latency_ms for step in trace_steps),
+            training_eligible=not issues and doctor.ok,
+            retention_class="STANDARD" if not issues and doctor.ok else "FAILURE_AUDIT",
+            source_chain_id=chain_id,
+            source_session_id=bootstrap.session_context.session_id,
+            source_trace_id=None,
+            created_at=_utc_now(),
+        ),
+    )
+    return TaskLoopProofResult(
+        ok=not issues and doctor.ok,
+        config=resolved,
+        bootstrap=bootstrap,
+        doctor=doctor,
+        task_id=task_id,
+        brief_id=brief_id,
+        route_summary=route_summary,
+        trace_id=trace_id,
+        issues=issues,
+    )
+
+
+def run_research_cron_proof(
+    *,
+    config: IntegrationConfig | None = None,
+    repo_root: str | None = None,
+    tool_registry: HermesToolRegistry | None = None,
+) -> ResearchCronProofResult:
+    from skills.research_domain.skill import ResearchDomainSkill
+
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    root = Path(repo_root).expanduser().resolve() if repo_root else _repo_root()
+    registry = tool_registry or MockHermesRuntime(data_dir=resolved.data_dir)
+    install_runtime_profile(resolved, repo_root=str(root))
+    bootstrap = bootstrap_runtime(registry, config=resolved, model_name="research-cron-proof")
+    _ensure_research_cron_chain_definition(resolved)
+    db = DatabaseManager(resolved.data_dir)
+    research = ResearchDomainSkill(db)
+    chain_id = f"research-cron-{generate_uuid_v7()}"
+    issues: list[str] = []
+    trace_steps: list[ExecutionTraceStep] = []
+
+    def append_step(step_name: str, payload: Any) -> None:
+        trace_steps.append(
+            ExecutionTraceStep(
+                step_index=len(trace_steps) + 1,
+                tool_call=f"research_domain_2.{step_name}",
+                tool_result=json.dumps(payload, sort_keys=True, default=str)[:4096],
+                tool_result_file=None,
+                tokens_in=0,
+                tokens_out=0,
+                latency_ms=0,
+                model_used="research-cron-proof",
+            )
+        )
+
+    standing = research.create_standing_brief(
+        "Standing brief proof",
+        "Scan for meaningful changes and route the resulting brief into the operator surface.",
+        "0 9 * * 1",
+        target_interface="Hermes Workspace",
+        include_council_review=True,
+        tags=["standing_brief", "proof"],
+    )
+    append_step("create_standing_brief", standing)
+    _persist_step_outcome(
+        resolved,
+        chain_id=chain_id,
+        step_type="create_standing_brief",
+        skill="research_domain_2",
+        outcome="PASS",
+        latency_ms=1,
+    )
+    scheduled = research.schedule_standing_brief(
+        standing["standing_brief_id"],
+        registry,
+        model="local-default",
+        reference_time="2026-04-22T09:00:00+00:00",
+    )
+    append_step("schedule_standing_brief", scheduled)
+    _persist_step_outcome(
+        resolved,
+        chain_id=chain_id,
+        step_type="schedule_standing_brief",
+        skill="research_domain_2",
+        outcome="PASS",
+        latency_ms=1,
+    )
+    queued = research.queue_standing_brief_run(
+        standing["standing_brief_id"],
+        reference_time="2026-04-22T09:01:00+00:00",
+    )
+    append_step("queue_standing_brief_run", queued)
+    _persist_step_outcome(
+        resolved,
+        chain_id=chain_id,
+        step_type="queue_standing_brief_run",
+        skill="research_domain_2",
+        outcome="PASS",
+        latency_ms=1,
+    )
+    if scheduled["job_id"] not in getattr(registry, "scheduled_jobs", {}):
+        issues.append("scheduled job was not retained by runtime")
+
+    doctor = doctor_runtime(registry, config=resolved, bootstrap_if_needed=False)
+    trace_id = generate_uuid_v7()
+    _log_execution_trace(
+        resolved,
+        ExecutionTrace(
+            trace_id=trace_id,
+            task_id=queued["task"]["task_id"],
+            role="research_cron_proof",
+            skill_name="runtime",
+            harness_version="research_cron_proof_v1",
+            intent_goal="Validate standing-brief cron scaffolding and queued research runs.",
+            steps=trace_steps,
+            prompt_template="research cron proof",
+            context_assembled="standing brief creation + cron scheduling + queued research task",
+            retrieval_queries=["standing_brief", "cron", "proof"],
+            judge_verdict="PASS" if not issues and doctor.ok else "FAIL",
+            judge_reasoning="Research cron proof completed." if not issues and doctor.ok else "Research cron proof exposed issues.",
+            outcome_score=1.0 if not issues and doctor.ok else 0.0,
+            cost_usd=0.0,
+            duration_ms=0,
+            training_eligible=not issues and doctor.ok,
+            retention_class="STANDARD" if not issues and doctor.ok else "FAILURE_AUDIT",
+            source_chain_id=chain_id,
+            source_session_id=bootstrap.session_context.session_id,
+            source_trace_id=None,
+            created_at=_utc_now(),
+        ),
+    )
+    db.close_all()
+    return ResearchCronProofResult(
+        ok=not issues and doctor.ok,
+        config=resolved,
+        bootstrap=bootstrap,
+        doctor=doctor,
+        standing_brief_id=standing["standing_brief_id"],
+        scheduled_job_id=scheduled["job_id"],
+        queued_task_id=queued["task"]["task_id"],
+        trace_id=trace_id,
+        issues=issues,
+    )
+
+
+def workspace_overview(config: IntegrationConfig | None = None) -> dict[str, Any]:
+    from skills.observability.skill import ObservabilitySkill
+    from skills.operator_interface.skill import OperatorInterfaceSkill
+
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    prepare_runtime_directories(resolved)
+    migrate_runtime_databases(resolved)
+    install_runtime_profile(resolved)
+    db = DatabaseManager(resolved.data_dir)
+    operator = OperatorInterfaceSkill(db)
+    observability = ObservabilitySkill(db, telemetry_buffer=None, immune_buffer=None)
+    health = observability.system_health()
+    overview = {
+        "runtime_status": operator.runtime_status(),
+        "pending_g3_requests": operator.list_g3_approval_requests(limit=5, status="PENDING"),
+        "pending_quarantines": operator.list_quarantined_responses(limit=5, pending_review_only=True),
+        "execution_traces": operator.list_execution_traces(limit=5),
+        "harness_frontier": operator.harness_frontier(limit=5),
+        "replay_readiness": health["harness_variants"]["execution_traces"]["replay_readiness"],
+        "milestone_health": evaluate_milestone_status(resolved, db_manager=db),
+        "workspace_manifest_path": str(_runtime_workspace_manifest_path(resolved)),
+        "gateway_manifest_path": str(_runtime_gateway_manifest_path(resolved)),
+    }
+    db.close_all()
+    return overview
+
+
+def bootstrap_stack(
+    *,
+    config: IntegrationConfig | None = None,
+    repo_root: str | None = None,
+    tool_registry: HermesToolRegistry | None = None,
+) -> BootstrapStackResult:
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    registry = tool_registry or MockHermesRuntime(data_dir=resolved.data_dir)
+    install = install_runtime_profile(resolved, repo_root=repo_root)
+    bootstrap_runtime(registry, config=resolved)
+    doctor = doctor_runtime(registry, config=resolved, bootstrap_if_needed=False)
+    operator_workflow = run_operator_workflow(registry, config=resolved, model_name="bootstrap-stack")
+    contract_harness = exercise_hermes_contract(config=resolved, repo_root=repo_root, tool_registry=registry)
+    task_loop = run_task_loop_proof(config=resolved, repo_root=repo_root, tool_registry=registry)
+    research_cron = run_research_cron_proof(config=resolved, repo_root=repo_root, tool_registry=registry)
+    milestone_status = evaluate_milestone_status(resolved)
+    return BootstrapStackResult(
+        ok=doctor.ok and operator_workflow.ok and contract_harness.ok and task_loop.ok and research_cron.ok,
+        install=install,
+        doctor=doctor,
+        operator_workflow=operator_workflow,
+        contract_harness=contract_harness,
+        task_loop_proof=task_loop,
+        research_cron_proof=research_cron,
+        milestone_status=milestone_status,
+    )
+
+
 def assess_hermes_readiness(
     *,
     config: IntegrationConfig | None = None,
@@ -1521,7 +2116,7 @@ def assess_hermes_readiness(
                     blocking_items.append(
                         f"Hermes {hermes_version} is below the manifest floor "
                         f"{'.'.join(str(part) for part in MANIFEST_HERMES_VERSION_FLOOR)}; "
-                        "§7.5c still references 0.8.0+ and is now stale."
+                        "older v0.8/v0.9 assumptions are now stale."
                     )
                 elif parsed_version < CHECKLIST_HERMES_VERSION_FLOOR:
                     blocking_items.append(
@@ -2310,11 +2905,17 @@ def run_operator_workflow(
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Prepare and smoke-test the Hermes integration bootstrap")
     parser.add_argument("--bootstrap-live", action="store_true", help="Bootstrap the runtime against the selected registry")
+    parser.add_argument("--bootstrap-stack", action="store_true", help="Install the runtime bundle, run proofs, and print milestone status")
     parser.add_argument("--install-profile", action="store_true", help="Install a local Hermes runtime profile bundle")
     parser.add_argument("--doctor", action="store_true", help="Verify runtime layout, databases, and skill registration")
     parser.add_argument("--readiness", action="store_true", help="Run the real-Hermes readiness checklist against the selected runtime paths")
     parser.add_argument("--operator-workflow", action="store_true", help="Run the operator workflow plus council-backed project smoke test")
     parser.add_argument("--contract-harness", action="store_true", help="Run the repo-local Hermes contract harness without requiring live Hermes")
+    parser.add_argument("--task-loop-proof", action="store_true", help="Run the deterministic research task-loop proof")
+    parser.add_argument("--research-cron-proof", action="store_true", help="Run the standing-brief cron proof")
+    parser.add_argument("--milestone-status", action="store_true", help="Print machine-readable milestone build/proof status")
+    parser.add_argument("--workspace-overview", action="store_true", help="Print a Hermes Workspace-oriented operator snapshot")
+    parser.add_argument("--operator-checklist", action="store_true", help="Print the operator validation checklist path")
     parser.add_argument("--data-dir", default="~/.hermes/data/")
     parser.add_argument("--skills-dir", default="~/.hermes/skills/hybrid-autonomous-ai/")
     parser.add_argument("--checkpoints-dir", default="~/.hermes/skills/hybrid-autonomous-ai/checkpoints/")
@@ -2354,6 +2955,11 @@ def main() -> int:
         print(f"spec_profile={result.spec_profile_path}")
         print(f"launchers={','.join(sorted(result.launcher_paths.values()))}")
         print(f"linked_skills={len(result.linked_skill_paths)}")
+        return 0
+
+    if args.operator_checklist:
+        result = install_runtime_profile(config, repo_root=args.repo_root)
+        print(f"operator_validation_checklist={_runtime_operator_validation_checklist_path(result.config)}")
         return 0
 
     if args.doctor:
@@ -2406,6 +3012,33 @@ def main() -> int:
         print(f"issues={'; '.join(result.issues) if result.issues else 'none'}")
         return 0 if result.ok else 1
 
+    if args.task_loop_proof:
+        result = run_task_loop_proof(
+            config=config,
+            repo_root=args.repo_root,
+            tool_registry=runtime,
+        )
+        print("task loop proof ok" if result.ok else "task loop proof failed")
+        print(f"task_id={result.task_id or 'none'}")
+        print(f"brief_id={result.brief_id or 'none'}")
+        print(f"trace_id={result.trace_id or 'none'}")
+        print(f"issues={'; '.join(result.issues) if result.issues else 'none'}")
+        return 0 if result.ok else 1
+
+    if args.research_cron_proof:
+        result = run_research_cron_proof(
+            config=config,
+            repo_root=args.repo_root,
+            tool_registry=runtime,
+        )
+        print("research cron proof ok" if result.ok else "research cron proof failed")
+        print(f"standing_brief_id={result.standing_brief_id or 'none'}")
+        print(f"scheduled_job_id={result.scheduled_job_id or 'none'}")
+        print(f"queued_task_id={result.queued_task_id or 'none'}")
+        print(f"trace_id={result.trace_id or 'none'}")
+        print(f"issues={'; '.join(result.issues) if result.issues else 'none'}")
+        return 0 if result.ok else 1
+
     if args.operator_workflow:
         result = run_operator_workflow(
             runtime,
@@ -2422,6 +3055,27 @@ def main() -> int:
         print(f"alert_id={result.alert_id or 'none'}")
         if result.error:
             print(f"error={result.error}")
+        return 0 if result.ok else 1
+
+    if args.milestone_status:
+        print(json.dumps(evaluate_milestone_status(config), indent=2, sort_keys=True))
+        return 0
+
+    if args.workspace_overview:
+        print(json.dumps(workspace_overview(config), indent=2, sort_keys=True, default=str))
+        return 0
+
+    if args.bootstrap_stack:
+        result = bootstrap_stack(
+            config=config,
+            repo_root=args.repo_root,
+            tool_registry=runtime,
+        )
+        print("bootstrap stack ok" if result.ok else "bootstrap stack failed")
+        print(f"contract_harness={'ok' if result.contract_harness.ok else 'failed'}")
+        print(f"task_loop_proof={'ok' if result.task_loop_proof.ok else 'failed'}")
+        print(f"research_cron_proof={'ok' if result.research_cron_proof.ok else 'failed'}")
+        print(json.dumps(result.milestone_status, indent=2, sort_keys=True))
         return 0 if result.ok else 1
 
     if args.bootstrap_live:
