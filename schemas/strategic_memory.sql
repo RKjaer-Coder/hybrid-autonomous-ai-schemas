@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS council_verdicts (
   da_quality_score REAL CHECK (da_quality_score IS NULL OR (da_quality_score >= 0.0 AND da_quality_score <= 1.0)),
   da_assessment TEXT CHECK (da_assessment IS NULL OR json_valid(da_assessment)),
   tie_break INTEGER DEFAULT 0 CHECK (tie_break IN (0, 1)),
+  degraded INTEGER DEFAULT 0 CHECK (degraded IN (0, 1)),
+  confidence_cap REAL CHECK (confidence_cap IS NULL OR (confidence_cap >= 0.0 AND confidence_cap <= 1.0)),
   created_at TEXT NOT NULL
 ) STRICT;
 

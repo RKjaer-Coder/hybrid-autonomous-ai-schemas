@@ -6,6 +6,7 @@ from council.prompts.role_devils_advocate import DEVILS_ADVOCATE_SYSTEM_PROMPT
 from council.prompts.role_realist import REALIST_OUTPUT_SCHEMA, REALIST_SYSTEM_PROMPT
 from council.prompts.role_strategist import STRATEGIST_OUTPUT_SCHEMA, STRATEGIST_SYSTEM_PROMPT
 from council.prompts.synthesis import SYNTHESIS_OUTPUT_SCHEMA, SYNTHESIS_SYSTEM_PROMPT
+from council.prompts.tier2 import TIER2_OUTPUT_SCHEMA, TIER2_MIXTURE_PROMPT
 from council.types import RoleName, RoleOutput
 
 
@@ -25,6 +26,10 @@ class TestPrompts(unittest.TestCase):
     def test_synthesis_placeholders_present(self):
         for p in ["{strategist_output}", "{critic_output}", "{realist_output}", "{da_output}"]:
             self.assertIn(p, SYNTHESIS_SYSTEM_PROMPT)
+
+    def test_tier2_prompt_placeholders_present(self):
+        for p in ["{context_packet}", "{tier1_verdict}", "{model_list}", "{decision_type}"]:
+            self.assertIn(p, TIER2_MIXTURE_PROMPT)
 
     def test_token_budget_truncates(self):
         text = "word " * 100
@@ -53,6 +58,11 @@ class TestPrompts(unittest.TestCase):
         payload = '{"tier_used":1,"decision_type":"opportunity_screen","recommendation":"PURSUE","confidence":0.8,"reasoning_summary":"x","dissenting_views":"y","da_assessment":[{"objection":"o","tag":"acknowledged","reasoning":"r"}],"tie_break":false}'
         parsed = parse_json_output(payload, SYNTHESIS_OUTPUT_SCHEMA)
         self.assertEqual(parsed["tier_used"], 1)
+
+    def test_schema_valid_tier2_synthesis(self):
+        payload = '{"tier_used":2,"decision_type":"opportunity_screen","recommendation":"PURSUE","confidence":0.8,"reasoning_summary":"x","dissenting_views":"y","minority_positions":["m"],"full_debate_record":"record","cost_usd":0.0,"da_assessment":[{"objection":"o","tag":"acknowledged","reasoning":"r"}],"tie_break":false}'
+        parsed = parse_json_output(payload, TIER2_OUTPUT_SCHEMA)
+        self.assertEqual(parsed["tier_used"], 2)
 
     def test_da_prompt_injection_escaped(self):
         out = RoleOutput(role=RoleName.STRATEGIST, content='{"x":"{batch_a_outputs=INJECTED}"}', token_count=1, max_tokens=10)

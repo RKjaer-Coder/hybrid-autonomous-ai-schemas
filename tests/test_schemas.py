@@ -70,10 +70,21 @@ class SchemaSuiteTests(unittest.TestCase):
             opp_b = uid()
             scout_id = uid()
             assess_id = uid()
-            sm.execute("INSERT INTO council_verdicts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
-                verdict_id, 1, 'go_no_go', 'PURSUE', 0.8, 'reasoning', None, json.dumps([]), None,
-                2.5, None, json.dumps({"outcome": "pending"}), 0.7, json.dumps([]), 0, now,
-            ))
+            sm.execute(
+                """
+                INSERT INTO council_verdicts (
+                    verdict_id, tier_used, decision_type, recommendation, confidence,
+                    reasoning_summary, dissenting_views, minority_positions,
+                    full_debate_record, cost_usd, project_id, outcome_record,
+                    da_quality_score, da_assessment, tie_break, degraded,
+                    confidence_cap, created_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    verdict_id, 1, 'go_no_go', 'PURSUE', 0.8, 'reasoning', None, json.dumps([]), None,
+                    2.5, None, json.dumps({"outcome": "pending"}), 0.7, json.dumps([]), 0, 0, None, now,
+                ),
+            )
             count += 1
             sm.execute("INSERT INTO research_tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
                 task_id, 1, 'autonomous_loop', 'task', 'brief', 'P1_HIGH', 'PENDING', 10.0, 0.0,
@@ -337,10 +348,21 @@ class SchemaSuiteTests(unittest.TestCase):
         now = ts()
         with self.conn("strategic_memory") as sm:
             with self.assertRaises(sqlite3.IntegrityError):
-                sm.execute("INSERT INTO council_verdicts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
-                    uid(), 1, 'go_no_go', 'PURSUE', 1.5, 'bad confidence', None, json.dumps([]), None,
-                    0.0, None, json.dumps({}), None, None, 0, now,
-                ))
+                sm.execute(
+                    """
+                    INSERT INTO council_verdicts (
+                        verdict_id, tier_used, decision_type, recommendation, confidence,
+                        reasoning_summary, dissenting_views, minority_positions,
+                        full_debate_record, cost_usd, project_id, outcome_record,
+                        da_quality_score, da_assessment, tie_break, degraded,
+                        confidence_cap, created_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        uid(), 1, 'go_no_go', 'PURSUE', 1.5, 'bad confidence', None, json.dumps([]), None,
+                        0.0, None, json.dumps({}), None, None, 0, 0, None, now,
+                    ),
+                )
             with self.assertRaises(sqlite3.IntegrityError):
                 sm.execute("INSERT INTO opportunity_records VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
                     uid(), 'invalid_mechanism', 'title', 'thesis', 'operator', None, 0.0, None,

@@ -958,6 +958,10 @@ class OperatorInterfaceSkill:
                 or health["judge_deadlock"]["mode"] in {"FALLBACK", "HALTED"}
                 or health["judge_deadlock"]["review_queue"]["pending"]
                 or health["judge_deadlock"]["review_queue"]["blocked"]
+                or health["council_health"]["tier2_24h"]
+                or health["council_health"]["degraded_24h"]
+                or health["council_health"]["pending_tier2_g3"]
+                or health["council_health"]["backlog_alerts_24h"]
                 or health["harness_variants"]["variants"]["active_count"]
                 or health["harness_variants"]["variants"]["rejected_24h"]
             ) and "SYSTEM HEALTH" not in selected_names:
@@ -1082,6 +1086,16 @@ class OperatorInterfaceSkill:
                 issues.append(f"runtime HALTED source={active_halt['source']}")
         if health["runtime_control"]["blocked_restart_attempts"]:
             issues.append(f"runtime_restart blocked={health['runtime_control']['blocked_restart_attempts']}")
+        if health["council_health"]["tier2_24h"] or health["council_health"]["degraded_24h"]:
+            issues.append(
+                "council="
+                + f"tier2_24h:{health['council_health']['tier2_24h']}"
+                + f"/degraded24h:{health['council_health']['degraded_24h']}"
+            )
+        if health["council_health"]["pending_tier2_g3"]:
+            issues.append(f"council_g3 pending={health['council_health']['pending_tier2_g3']}")
+        if health["council_health"]["backlog_alerts_24h"]:
+            issues.append(f"council_backlog alerts24h={health['council_health']['backlog_alerts_24h']}")
         if health["judge_deadlock"]["review_queue"]["pending"]:
             issues.append(f"judge_review pending={health['judge_deadlock']['review_queue']['pending']}")
         if health["judge_deadlock"]["review_queue"]["blocked"]:
@@ -1222,6 +1236,34 @@ class OperatorInterfaceSkill:
         blocked_restart_attempts = len(
             self._runtime_control.list_restart_history(limit=5, status="BLOCKED")
         )
+        council_since = (
+            datetime.datetime.fromisoformat(now.replace("Z", "+00:00")) - datetime.timedelta(hours=24)
+        ).replace(microsecond=0).isoformat()
+        council_summary = strategic.execute(
+            """
+            SELECT
+                SUM(CASE WHEN tier_used = 2 AND created_at >= ? THEN 1 ELSE 0 END) AS tier2_24h,
+                SUM(CASE WHEN degraded = 1 AND created_at >= ? THEN 1 ELSE 0 END) AS degraded_24h,
+                SUM(CASE WHEN confidence < 0.60 AND created_at >= ? THEN 1 ELSE 0 END) AS low_confidence_24h
+            FROM council_verdicts
+            """,
+            (council_since, council_since, council_since),
+        ).fetchone()
+        pending_tier2_g3 = operator.execute(
+            """
+            SELECT COUNT(*)
+            FROM gate_log
+            WHERE gate_type = 'G3' AND status = 'PENDING' AND trigger_description LIKE 'council_tier2:%'
+            """
+        ).fetchone()[0]
+        council_backlog_alerts = operator.execute(
+            """
+            SELECT COUNT(*)
+            FROM alert_log
+            WHERE alert_type = 'COUNCIL_BACKLOG' AND created_at >= ?
+            """,
+            (council_since,),
+        ).fetchone()[0]
         harness_variant_summary = {
             "execution_traces": self._harness_variants.execution_trace_summary(),
             "variants": self._harness_variants.summary(),
@@ -1268,6 +1310,13 @@ class OperatorInterfaceSkill:
             "runtime_control": {
                 **runtime_status,
                 "blocked_restart_attempts": blocked_restart_attempts,
+            },
+            "council_health": {
+                "tier2_24h": int(council_summary["tier2_24h"] or 0),
+                "degraded_24h": int(council_summary["degraded_24h"] or 0),
+                "low_confidence_24h": int(council_summary["low_confidence_24h"] or 0),
+                "pending_tier2_g3": int(pending_tier2_g3 or 0),
+                "backlog_alerts_24h": int(council_backlog_alerts or 0),
             },
             "harness_variants": harness_variant_summary,
             "unacknowledged_t3_alerts": unacknowledged_t3,

@@ -1,7 +1,7 @@
 import unittest
 
 from council.context_budget import build_context_packet
-from council.orchestrator import MockDispatcher, run_tier1_deliberation
+from council.orchestrator import MockDispatcher, MockMixtureDispatcher, run_tier1_deliberation, run_tier2_deliberation
 from council.types import DecisionType, Recommendation
 
 
@@ -80,3 +80,36 @@ class TestOrchestrator(unittest.TestCase):
         ctx = build_context_packet(DecisionType.OPPORTUNITY_SCREEN, "id", "ctx")
         with self.assertRaises(ValueError):
             run_tier1_deliberation(ctx, dispatcher)
+
+    def test_tier2_pipeline_returns_verdict(self):
+        tier1 = run_tier1_deliberation(
+            build_context_packet(DecisionType.OPPORTUNITY_SCREEN, "id", "ctx"),
+            MockDispatcher(),
+        )
+        mixture = MockMixtureDispatcher()
+        verdict = run_tier2_deliberation(
+            build_context_packet(DecisionType.OPPORTUNITY_SCREEN, "id", "ctx"),
+            mixture,
+            models=["local-a", "free-b", "frontier-c"],
+            estimated_cost_usd=0.0,
+            tier1_verdict=tier1,
+        )
+        self.assertEqual(verdict.tier_used, 2)
+        self.assertTrue(verdict.minority_positions)
+        self.assertIsNotNone(verdict.full_debate_record)
+
+    def test_tier2_requires_distinct_models(self):
+        with self.assertRaises(ValueError):
+            run_tier2_deliberation(
+                build_context_packet(DecisionType.OPPORTUNITY_SCREEN, "id", "ctx"),
+                MockMixtureDispatcher(),
+                models=["same", "same"],
+            )
+
+    def test_tier2_low_confidence_auto_escalates(self):
+        verdict = run_tier2_deliberation(
+            build_context_packet(DecisionType.OPPORTUNITY_SCREEN, "id", "ctx"),
+            MockMixtureDispatcher(low_confidence=True),
+            models=["local-a", "free-b"],
+        )
+        self.assertEqual(verdict.recommendation, Recommendation.ESCALATE)

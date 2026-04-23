@@ -8,20 +8,23 @@ from council.prompts.role_devils_advocate import DA_OUTPUT_SCHEMA
 from council.prompts.role_realist import REALIST_OUTPUT_SCHEMA
 from council.prompts.role_strategist import STRATEGIST_OUTPUT_SCHEMA
 from council.prompts.synthesis import SYNTHESIS_OUTPUT_SCHEMA
+from council.prompts.tier2 import TIER2_OUTPUT_SCHEMA
 from council.types import DecisionType, RoleName
 
 
 def validate_verdict(verdict_data: dict, decision_type: DecisionType) -> List[str]:
     errors: List[str] = []
+    tier_used = verdict_data.get("tier_used")
+    schema = TIER2_OUTPUT_SCHEMA if tier_used == 2 else SYNTHESIS_OUTPUT_SCHEMA
     try:
         if isinstance(verdict_data, dict):
             parsed = verdict_data
         else:
-            parsed = parse_json_output(verdict_data, SYNTHESIS_OUTPUT_SCHEMA)
+            parsed = parse_json_output(verdict_data, schema)
         if not isinstance(parsed, dict):
             errors.append("invalid verdict payload")
     except Exception:
-        for field in SYNTHESIS_OUTPUT_SCHEMA["required"]:
+        for field in schema["required"]:
             if field not in verdict_data:
                 errors.append(f"missing field: {field}")
     conf = verdict_data.get("confidence")
@@ -29,10 +32,14 @@ def validate_verdict(verdict_data: dict, decision_type: DecisionType) -> List[st
         errors.append("confidence out of range")
     if verdict_data.get("decision_type") != decision_type.value:
         errors.append("decision_type mismatch")
-    if verdict_data.get("recommendation") not in SYNTHESIS_OUTPUT_SCHEMA["properties"]["recommendation"]["enum"]:
+    if verdict_data.get("recommendation") not in schema["properties"]["recommendation"]["enum"]:
         errors.append("invalid recommendation")
     if not verdict_data.get("da_assessment"):
         errors.append("da_assessment required")
+    if tier_used == 2 and not verdict_data.get("minority_positions"):
+        errors.append("minority_positions required")
+    if tier_used == 2 and not verdict_data.get("full_debate_record"):
+        errors.append("full_debate_record required")
     if verdict_data.get("degraded") and conf is not None and conf > 0.70:
         errors.append("degraded confidence cap violated")
     if verdict_data.get("tie_break") and isinstance(conf, (int, float)) and conf > 0.65:

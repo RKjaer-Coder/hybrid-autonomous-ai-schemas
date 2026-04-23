@@ -46,6 +46,14 @@ class TestValidators(unittest.TestCase):
         d["da_assessment"] = []
         self.assertIn("da_assessment required", validate_verdict(d, DecisionType.OPPORTUNITY_SCREEN))
 
+    def test_valid_tier2_verdict_passes(self):
+        d = self._valid()
+        d["tier_used"] = 2
+        d["minority_positions"] = ["minority"]
+        d["full_debate_record"] = "round1 -> round2 -> round3"
+        d["cost_usd"] = 0.0
+        self.assertEqual(validate_verdict(d, DecisionType.OPPORTUNITY_SCREEN), [])
+
     def test_tie_break_high_confidence_warning(self):
         d = self._valid()
         d["tie_break"] = True

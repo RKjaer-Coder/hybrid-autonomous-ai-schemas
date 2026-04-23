@@ -1435,3 +1435,83 @@ def test_operator_and_observability_surface_workspace_overview_and_milestone_hea
     assert "milestone_health" in observability_view
     assert "system_health" in observability_view
     assert observability.milestone_health()["milestones"]["M1"]["implemented"] is True
+
+
+def test_council_tier2_health_surfaces_in_observability_and_digest(test_data_dir):
+    db = DatabaseManager(str(test_data_dir))
+    operator = OperatorInterfaceSkill(db)
+    observability = ObservabilitySkill(db, telemetry_buffer=None, immune_buffer=None)
+    strategic = db.get_connection("strategic_memory")
+    operator_db = db.get_connection("operator_digest")
+    now = _now()
+    now_ts = _ts(now)
+
+    strategic.execute(
+        """
+        INSERT INTO council_verdicts (
+            verdict_id, tier_used, decision_type, recommendation, confidence,
+            reasoning_summary, dissenting_views, minority_positions,
+            full_debate_record, cost_usd, project_id, outcome_record,
+            da_quality_score, da_assessment, tie_break, degraded,
+            confidence_cap, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(uuid.uuid4()), 2, "opportunity_screen", "PURSUE", 0.82,
+            "tier2 ok", "risk", json.dumps(["minority"]), "record", 0.0, None, None,
+            0.5, json.dumps([{"objection": "risk", "tag": "acknowledged", "reasoning": "tracked"}]), 0, 0, None, now_ts,
+        ),
+    )
+    strategic.execute(
+        """
+        INSERT INTO council_verdicts (
+            verdict_id, tier_used, decision_type, recommendation, confidence,
+            reasoning_summary, dissenting_views, minority_positions,
+            full_debate_record, cost_usd, project_id, outcome_record,
+            da_quality_score, da_assessment, tie_break, degraded,
+            confidence_cap, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(uuid.uuid4()), 1, "opportunity_screen", "PURSUE", 0.68,
+            "degraded tier1", "risk", None, None, 0.0, None, None,
+            0.5, json.dumps([{"objection": "risk", "tag": "acknowledged", "reasoning": "tracked"}]), 0, 1, 0.70, now_ts,
+        ),
+    )
+    operator_db.execute(
+        """
+        INSERT INTO gate_log (
+            gate_id, gate_type, trigger_description, context_packet, project_id,
+            status, timeout_hours, operator_response, created_at, responded_at, expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(uuid.uuid4()), "G3", "council_tier2:opportunity_screen:subject-1", json.dumps({"x": 1}), None,
+            "PENDING", 6.0, None, now_ts, None, now_ts,
+        ),
+    )
+    operator_db.execute(
+        """
+        INSERT INTO alert_log (
+            alert_id, tier, alert_type, content, channel_delivered,
+            suppressed, acknowledged, acknowledged_at, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(uuid.uuid4()), "T2", "COUNCIL_BACKLOG", "Tier 2 backlog depth reached 4.", "CLI",
+            0, 0, None, now_ts,
+        ),
+    )
+    strategic.commit()
+    operator_db.commit()
+
+    health = observability.system_health()
+    digest = operator.generate_digest(digest_type="critical_only", operator_state="ACTIVE")
+
+    assert health["council_health"]["tier2_24h"] == 1
+    assert health["council_health"]["degraded_24h"] == 1
+    assert health["council_health"]["pending_tier2_g3"] == 1
+    assert health["council_health"]["backlog_alerts_24h"] == 1
+    assert "council=tier2_24h:1/degraded24h:1" in digest["content"]
+    assert "council_g3 pending=1" in digest["content"]
+    assert "council_backlog alerts24h=1" in digest["content"]

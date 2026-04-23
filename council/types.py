@@ -133,6 +133,21 @@ class ContextPacket:
     source_briefs: Optional[List[str]] = None
 
 
+@dataclass(frozen=True)
+class CouncilDeliberationConfig:
+    requested_tier: Optional[CouncilTier] = None
+    operator_requested: bool = False
+    tier2_models: Optional[List[str]] = None
+    tier2_estimated_cost_usd: float = 0.0
+    mechanism: Optional[str] = None
+    validated_mechanism_count: Optional[int] = None
+    cashflow_estimate_high_usd: Optional[float] = None
+    external_user_impact: bool = False
+    security_sensitive: bool = False
+    g3_status: Optional[str] = None
+    queue_timeout_seconds: float = 30.0
+
+
 DEFAULT_ROLE_WEIGHTS: dict = {
     RoleName.STRATEGIST: 0.30,
     RoleName.CRITIC: 0.35,

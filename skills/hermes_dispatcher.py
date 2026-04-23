@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 from typing import List, Tuple
 
-from council.orchestrator import SubagentDispatcher
+from council.orchestrator import MixtureDispatcher, SubagentDispatcher
 from council.types import RoleName, RoleOutput
 
-from skills.hermes_interfaces import HermesDelegateAPI, HermesToolResult
+from skills.hermes_interfaces import HermesDelegateAPI, HermesMixtureAPI, HermesToolResult
 
 
 class HermesSubagentDispatcher(SubagentDispatcher):
@@ -37,4 +38,17 @@ class HermesSubagentDispatcher(SubagentDispatcher):
         result = self._delegate.delegate_sequential("synthesis", system_prompt, user_prompt)
         if not result.success:
             raise RuntimeError(f"Council synthesis failed: {result.error}")
+        return str(result.output)
+
+
+class HermesMixtureDispatcher(MixtureDispatcher):
+    def __init__(self, mixture_api: HermesMixtureAPI):
+        self._mixture = mixture_api
+
+    def dispatch_mixture(self, prompt: str, models: List[str], rounds: int = 3) -> str:
+        result: HermesToolResult = self._mixture.mixture_deliberate(prompt, models, rounds=rounds)
+        if not result.success:
+            raise RuntimeError(f"Council Tier 2 mixture failed: {result.error}")
+        if isinstance(result.output, (dict, list)):
+            return json.dumps(result.output)
         return str(result.output)

@@ -17,6 +17,7 @@ from council.prompts.role_devils_advocate import DEVILS_ADVOCATE_SYSTEM_PROMPT
 from council.prompts.role_realist import REALIST_SYSTEM_PROMPT
 from council.prompts.role_strategist import STRATEGIST_SYSTEM_PROMPT
 from council.prompts.synthesis import SYNTHESIS_OUTPUT_SCHEMA, SYNTHESIS_SYSTEM_PROMPT
+from council.prompts.tier2 import TIER2_MIXTURE_PROMPT, TIER2_OUTPUT_SCHEMA
 from council.types import CouncilVerdict, DEFAULT_ROLE_WEIGHTS, DecisionType, RoleName, RoleOutput, Recommendation, iso_utc_now
 from council.validators import validate_role_output, validate_verdict
 
@@ -32,6 +33,12 @@ class SubagentDispatcher(ABC):
 
     @abstractmethod
     def dispatch_synthesis(self, system_prompt: str, user_prompt: str) -> str:
+        ...
+
+
+class MixtureDispatcher(ABC):
+    @abstractmethod
+    def dispatch_mixture(self, prompt: str, models: List[str], rounds: int = 3) -> str:
         ...
 
 
@@ -100,6 +107,43 @@ class MockDispatcher(SubagentDispatcher):
         )
 
 
+class MockMixtureDispatcher(MixtureDispatcher):
+    def __init__(self, bad_json: bool = False, low_confidence: bool = False) -> None:
+        self.bad_json = bad_json
+        self.low_confidence = low_confidence
+        self.calls: List[dict] = []
+
+    def dispatch_mixture(self, prompt: str, models: List[str], rounds: int = 3) -> str:
+        self.calls.append({"prompt": prompt, "models": list(models), "rounds": rounds})
+        if self.bad_json:
+            return "not json"
+        conf = 0.56 if self.low_confidence else 0.84
+        return json.dumps(
+            {
+                "tier_used": 2,
+                "decision_type": "opportunity_screen",
+                "recommendation": "PURSUE",
+                "confidence": conf,
+                "reasoning_summary": "Two models converged on timing and execution leverage, while one minority position argued the distribution dependency is underpriced.",
+                "dissenting_views": "A dissenting model argues platform dependency could erase the moat before monetization stabilizes.",
+                "minority_positions": [
+                    "Reject until distribution risk is reduced through an owned channel.",
+                ],
+                "full_debate_record": "Round1: two pursue, one reject. Round2: disagreement centered on platform dependency. Round3: synthesis favored pursue with explicit risk watch.",
+                "cost_usd": 0.0,
+                "da_assessment": [
+                    {
+                        "objection": "Platform dependency remains underpriced.",
+                        "tag": "acknowledged",
+                        "reasoning": "Recorded as the main dissent and retained in risk watch, but not recommendation changing.",
+                    }
+                ],
+                "tie_break": False,
+                "risk_watch": ["Platform dependency", "Owned distribution progress"],
+            }
+        )
+
+
 def _uuid7_str() -> str:
     generator = getattr(uuid, "uuid7", None)
     return str(generator() if callable(generator) else uuid.uuid4())
@@ -117,6 +161,40 @@ def _apply_confidence_cap(verdict_data: dict, cap: float = 0.70) -> dict:
     if verdict_data.get("confidence", 0.0) > cap:
         verdict_data["confidence"] = cap
     return verdict_data
+
+
+def _build_verdict(
+    *,
+    verdict_data: dict,
+    context,
+    tier_used: int,
+    cost_usd: float,
+    degraded: bool = False,
+    confidence_cap: float | None = None,
+) -> CouncilVerdict:
+    raw_confidence = float(verdict_data["confidence"])
+    final_confidence = min(raw_confidence, confidence_cap) if confidence_cap is not None else raw_confidence
+    da_assessment = parse_da_assessment(verdict_data.get("da_assessment", []))
+    da_quality_score = score_da_quality(da_assessment)
+    return CouncilVerdict(
+        verdict_id=_uuid7_str(),
+        tier_used=tier_used,
+        decision_type=context.decision_type,
+        recommendation=Recommendation(verdict_data["recommendation"]),
+        confidence=final_confidence,
+        reasoning_summary=verdict_data["reasoning_summary"],
+        dissenting_views=verdict_data["dissenting_views"],
+        minority_positions=verdict_data.get("minority_positions"),
+        full_debate_record=verdict_data.get("full_debate_record"),
+        cost_usd=cost_usd,
+        project_id=context.subject_id,
+        da_assessment=da_assessment,
+        da_quality_score=da_quality_score,
+        tie_break=bool(verdict_data.get("tie_break", False)),
+        degraded=degraded,
+        confidence_cap=confidence_cap,
+        created_at=iso_utc_now(),
+    )
 
 
 def _assert_noncollapse(batch_a_outputs: List[RoleOutput]) -> None:
@@ -151,11 +229,49 @@ def _verify_isolation(batch_a_outputs: List[RoleOutput]) -> None:
 
 def run_tier2_deliberation(
     context,
-    dispatcher: SubagentDispatcher,
+    dispatcher: MixtureDispatcher,
+    models: List[str],
+    estimated_cost_usd: float = 0.0,
     tier1_verdict: CouncilVerdict | None = None,
 ) -> CouncilVerdict:
-    _ = (context, dispatcher, tier1_verdict)
-    raise NotImplementedError("Tier 2 deliberation remains a Stage 5+ mixture_of_agents_tool integration")
+    if context.token_count > context.max_tokens:
+        raise ValueError("Context token budget exceeded")
+    if len(models) < 2:
+        raise ValueError("Tier 2 requires at least two distinct models")
+    if len(set(models)) != len(models):
+        raise ValueError("Tier 2 models must be distinct")
+    tier1_summary = "None"
+    if tier1_verdict is not None:
+        tier1_summary = json.dumps(
+            {
+                "recommendation": tier1_verdict.recommendation.value,
+                "confidence": tier1_verdict.confidence,
+                "reasoning_summary": tier1_verdict.reasoning_summary,
+                "dissenting_views": tier1_verdict.dissenting_views,
+                "tie_break": tier1_verdict.tie_break,
+            },
+            sort_keys=True,
+        )
+    prompt = TIER2_MIXTURE_PROMPT.format(
+        context_packet=format_context_packet(context),
+        tier1_verdict=tier1_summary,
+        model_list=", ".join(models),
+        decision_type=context.decision_type.value,
+    )
+    raw = dispatcher.dispatch_mixture(prompt, models, rounds=3)
+    verdict_data = parse_json_output(raw, TIER2_OUTPUT_SCHEMA)
+    verdict_data = _check_auto_escalation(verdict_data)
+    errors = validate_verdict(verdict_data, context.decision_type)
+    hard_errors = [e for e in errors if not e.startswith("warning")]
+    if hard_errors:
+        raise ValueError("; ".join(hard_errors))
+    reported_cost = float(verdict_data.get("cost_usd", estimated_cost_usd))
+    return _build_verdict(
+        verdict_data=verdict_data,
+        context=context,
+        tier_used=2,
+        cost_usd=max(estimated_cost_usd, reported_cost),
+    )
 
 
 def run_tier1_deliberation(
@@ -206,33 +322,16 @@ def run_tier1_deliberation(
     verdict_data = _check_auto_escalation(verdict_data)
     is_degraded = g3_denied
     confidence_cap = 0.70 if g3_denied else None
-    raw_confidence = float(verdict_data["confidence"])
-    final_confidence = min(raw_confidence, confidence_cap) if confidence_cap is not None else raw_confidence
-
-    da_assessment = parse_da_assessment(verdict_data.get("da_assessment", []))
-    da_quality_score = score_da_quality(da_assessment)
 
     errors = validate_verdict(verdict_data, context.decision_type)
     hard_errors = [e for e in errors if not e.startswith("warning")]
     if hard_errors:
         raise ValueError("; ".join(hard_errors))
-
-    return CouncilVerdict(
-        verdict_id=_uuid7_str(),
+    return _build_verdict(
+        verdict_data=verdict_data,
+        context=context,
         tier_used=1,
-        decision_type=context.decision_type,
-        recommendation=Recommendation(verdict_data["recommendation"]),
-        confidence=final_confidence,
-        reasoning_summary=verdict_data["reasoning_summary"],
-        dissenting_views=verdict_data["dissenting_views"],
-        minority_positions=None,
-        full_debate_record=None,
         cost_usd=0.0,
-        project_id=context.subject_id,
-        da_assessment=da_assessment,
-        da_quality_score=da_quality_score,
-        tie_break=bool(verdict_data.get("tie_break", False)),
         degraded=is_degraded,
         confidence_cap=confidence_cap,
-        created_at=iso_utc_now(),
     )

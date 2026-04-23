@@ -104,7 +104,7 @@ class ObservabilitySkill:
             SELECT
                 verdict_id, tier_used, decision_type, recommendation, confidence,
                 reasoning_summary, dissenting_views, project_id, outcome_record,
-                da_quality_score, tie_break, created_at
+                da_quality_score, tie_break, degraded, confidence_cap, created_at
             FROM council_verdicts
             {where_sql}
             ORDER BY created_at DESC
@@ -419,6 +419,34 @@ class ObservabilitySkill:
         ).fetchone()
         judge_deadlock = self._judge_lifecycle.status()
         runtime_status = self._runtime_control.status()
+        council_since = (
+            datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)
+        ).replace(microsecond=0).isoformat()
+        council_summary = strategic.execute(
+            """
+            SELECT
+                SUM(CASE WHEN tier_used = 2 AND created_at >= ? THEN 1 ELSE 0 END) AS tier2_24h,
+                SUM(CASE WHEN degraded = 1 AND created_at >= ? THEN 1 ELSE 0 END) AS degraded_24h,
+                SUM(CASE WHEN confidence < 0.60 AND created_at >= ? THEN 1 ELSE 0 END) AS low_confidence_24h
+            FROM council_verdicts
+            """,
+            (council_since, council_since, council_since),
+        ).fetchone()
+        council_pending_g3 = operator.execute(
+            """
+            SELECT COUNT(*)
+            FROM gate_log
+            WHERE gate_type = 'G3' AND status = 'PENDING' AND trigger_description LIKE 'council_tier2:%'
+            """
+        ).fetchone()[0]
+        council_backlog_alerts = operator.execute(
+            """
+            SELECT COUNT(*)
+            FROM alert_log
+            WHERE alert_type = 'COUNCIL_BACKLOG' AND created_at >= ?
+            """,
+            (council_since,),
+        ).fetchone()[0]
         blocked_restart_attempts = len(
             self._runtime_control.list_restart_history(limit=5, status="BLOCKED")
         )
@@ -468,6 +496,13 @@ class ObservabilitySkill:
                 "blocked_restart_attempts": blocked_restart_attempts,
                 "recent_halts": self.runtime_halt_events(limit=3),
                 "recent_restarts": self.runtime_restart_history(limit=3),
+            },
+            "council_health": {
+                "tier2_24h": int(council_summary["tier2_24h"] or 0),
+                "degraded_24h": int(council_summary["degraded_24h"] or 0),
+                "low_confidence_24h": int(council_summary["low_confidence_24h"] or 0),
+                "pending_tier2_g3": int(council_pending_g3 or 0),
+                "backlog_alerts_24h": int(council_backlog_alerts or 0),
             },
             "harness_variants": self.harness_variant_summary(),
             "research_health": {

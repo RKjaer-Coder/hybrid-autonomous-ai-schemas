@@ -130,6 +130,20 @@ def _ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, 
 
 
 def _preflight_schema_compat(conn: sqlite3.Connection, schema_name: str) -> None:
+    if schema_name == "strategic_memory.sql":
+        _ensure_column(
+            conn,
+            "council_verdicts",
+            "degraded",
+            "degraded INTEGER NOT NULL DEFAULT 0 CHECK (degraded IN (0, 1))",
+        )
+        _ensure_column(
+            conn,
+            "council_verdicts",
+            "confidence_cap",
+            "confidence_cap REAL CHECK (confidence_cap IS NULL OR (confidence_cap >= 0.0 AND confidence_cap <= 1.0))",
+        )
+        return
     if schema_name == "immune_system.sql":
         tables = {
             row[0]
