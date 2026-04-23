@@ -10,6 +10,24 @@ The launch posture is prebuilt-first: Hermes on the Mac Studio should attach
 to an already-built system, validate it, and operate it rather than build the
 application logic from scratch.
 
+## If You Just Want The Safe Version
+
+- Use branch `main`
+- Ignore old feature branches unless you are doing git history work
+- Read the workspace docs in this order:
+  `../WORKSPACE.md`, `../CURRENT_STATE.md`, then this file
+
+## What To Run Next
+
+If you want the highest-value workflow today:
+
+1. Run `python3 -m pytest -q`
+2. Run `python3 -m skills.runtime --evidence-factory --until-replay-ready --evidence-cycles 5`
+3. Run `python3 -m skills.runtime --replay-readiness-report`
+4. Run `python3 -m skills.runtime --export-replay-corpus`
+5. Run `python3 -m skills.runtime --optimizer-snapshot`
+6. Run `python3 -m skills.runtime --analyze-harness-candidates`
+
 ## Current State
 
 - Five-database SQLite baseline with migration and verification tooling
@@ -29,6 +47,8 @@ application logic from scratch.
   opportunity, and strategic-memory routing/writeback paths
 - Production evidence factory for repeated multi-skill corpus growth plus
   detailed replay-readiness reporting
+- Replay corpus export, optimizer snapshot, and constrained harness-candidate
+  analysis/proposal flow for offline replay optimization
 - Mac Studio day-one handoff bundle that composes bootstrap proofs, evidence
   growth, and cutover commands into one generated package
 - §8.3b harness-variant substrate with replay-readiness guardrails and
@@ -114,6 +134,30 @@ Print the detailed replay-readiness coverage report:
 python3 -m skills.runtime --replay-readiness-report
 ```
 
+Export activation-relevant replay traces for offline harness work:
+
+```bash
+python3 -m skills.runtime --export-replay-corpus
+```
+
+Capture a runtime/bootstrap snapshot plus replay summary:
+
+```bash
+python3 -m skills.runtime --optimizer-snapshot
+```
+
+Rank constrained harness candidates from real replay evidence:
+
+```bash
+python3 -m skills.runtime --analyze-harness-candidates
+```
+
+Create one constrained proposal from the top replay candidate:
+
+```bash
+python3 -m skills.runtime --propose-best-harness-candidate
+```
+
 Run the repo-local Hermes contract harness:
 
 ```bash
@@ -135,6 +179,9 @@ python3 -m eval.runner --milestone M5
 python3 -m skills.runtime --doctor
 python3 -m skills.runtime --proxy-self-test
 python3 -m skills.runtime --evidence-factory --until-replay-ready --evidence-cycles 5
+python3 -m skills.runtime --export-replay-corpus
+python3 -m skills.runtime --optimizer-snapshot
+python3 -m skills.runtime --analyze-harness-candidates
 python3 -m skills.runtime --bootstrap-live
 python3 -m skills.runtime --mac-studio-day-one
 ```
