@@ -13,16 +13,19 @@ from skills.runtime import (
     VERSION_DRIFT_NOTE,
     ExternalCommandResult,
     _symlink_skill_directory,
+    analyze_harness_candidates,
     assess_hermes_readiness,
     build_mac_studio_day_one_handoff,
     bootstrap_stack,
     bootstrap_runtime,
     doctor_runtime,
+    export_replay_corpus,
     exercise_hermes_contract,
     install_runtime_profile,
     make_session_context,
     main as runtime_main,
     migrate_runtime_databases,
+    optimizer_snapshot,
     prepare_runtime_directories,
     replay_readiness_report,
     run_research_cron_proof,
@@ -173,6 +176,9 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
     assert Path(manifest["operator_validation_checklist_path"]).is_file()
     assert Path(manifest["evidence_factory_manifest_path"]).is_file()
     assert Path(manifest["replay_readiness_report_path"]).is_file()
+    assert Path(manifest["replay_corpus_export_path"]).is_file()
+    assert Path(manifest["optimizer_snapshot_path"]).is_file()
+    assert Path(manifest["harness_candidate_report_path"]).is_file()
     assert Path(manifest["mac_studio_day_one_handoff_path"]).is_file()
     assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["profile_name"] == "hybrid-test"
     assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["repo_contract_version"] == 1
@@ -208,6 +214,10 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
     assert "research_cron_proof" in manifest["commands"]
     assert "evidence_factory" in manifest["commands"]
     assert "replay_readiness_report" in manifest["commands"]
+    assert "export_replay_corpus" in manifest["commands"]
+    assert "optimizer_snapshot" in manifest["commands"]
+    assert "analyze_harness_candidates" in manifest["commands"]
+    assert "propose_best_harness_candidate" in manifest["commands"]
     assert "mac_studio_day_one" in manifest["commands"]
     assert "milestone_status" in manifest["commands"]
     assert sorted(Path(path).name for path in result.linked_skill_paths) == ["immune_system", "strategic_memory"]
@@ -350,6 +360,8 @@ def test_assess_hermes_readiness_fails_clearly_without_hermes(tmp_path, monkeypa
     assert Path(result.install.profile_config_path).is_file()
     assert Path(result.install.spec_profile_path).is_file()
     assert any("not found in PATH" in item for item in result.blocking_items)
+    assert result.replay_report["growth_plan"]["next_actions"]
+    assert result.recommended_actions
     assert VERSION_DRIFT_NOTE in result.drift_items
 
 
@@ -415,6 +427,8 @@ def test_assess_hermes_readiness_passes_with_live_hermes_signals(tmp_path, monke
     assert Path(result.checkpoint_backup_path).is_file()
     assert result.doctor.ok is True
     assert result.contract_harness.ok is True
+    assert result.replay_report["growth_plan"]["next_actions"]
+    assert result.recommended_actions
     assert not result.blocking_items
 
 
@@ -723,6 +737,8 @@ def test_replay_readiness_report_writes_runtime_artifact(tmp_path):
     assert report["minimum_eligible_traces"] == 500
     assert report["minimum_known_bad_traces"] == 25
     assert report["minimum_distinct_skills"] == 3
+    assert report["growth_plan"]["commands"]["until_replay_ready"].endswith("--evidence-cycles 5")
+    assert report["growth_plan"]["next_actions"]
 
 
 def test_run_evidence_factory_generates_cross_skill_evidence(tmp_path):
@@ -753,11 +769,18 @@ def test_run_evidence_factory_generates_cross_skill_evidence(tmp_path):
     assert Path(result.report_path).is_file()
     assert any(item.scenario_id == "research_to_opportunity_flow" and item.ok for item in result.scenario_results)
     assert any(item.scenario_id == "invalid_brief_completion" and item.ok for item in result.scenario_results)
+    assert any(item.scenario_id == "missing_brief_route" and item.ok for item in result.scenario_results)
+    assert any(item.scenario_id == "council_invalid_decision_type" and item.ok for item in result.scenario_results)
+    assert any(item.scenario_id == "financial_g3_denial" and item.ok for item in result.scenario_results)
     assert result.before_replay_report["eligible_source_traces"] == 0
     readiness = result.replay_report
     assert readiness["eligible_source_traces"] > 0
     assert readiness["known_bad_source_traces"] > 0
     assert readiness["distinct_skill_count"] >= 3
+    assert {"strategic_memory", "council", "financial_router"} <= {
+        row["skill_name"] for row in readiness["known_bad_by_skill"]
+    }
+    assert readiness["growth_plan"]["recommended_scenarios"]
     projection = result.progress_projection
     assert projection["ready_for_broader_replay"] is False
     assert projection["executed_cycles"] == 1
@@ -802,6 +825,43 @@ def test_run_evidence_factory_until_replay_ready_uses_cycle_cap_when_threshold_n
     assert result.progress_projection["executed_cycles"] == 2
 
 
+def test_optimizer_prep_artifacts_are_generated_from_runtime_surface(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+    runtime = MockHermesRuntime(data_dir=str(tmp_path / "data"))
+
+    evidence = run_evidence_factory(
+        config=cfg,
+        repo_root=str(tmp_path),
+        tool_registry=runtime,
+        cycles=1,
+        report_limit=8,
+    )
+    assert evidence.ok is True
+
+    corpus = export_replay_corpus(cfg, repo_root=str(tmp_path), limit=25)
+    assert corpus["trace_count"] > 0
+    assert corpus["eligible_trace_count"] > 0
+    assert corpus["known_bad_trace_count"] > 0
+    assert Path(corpus["artifact_path"]).is_file()
+
+    snapshot = optimizer_snapshot(cfg, repo_root=str(tmp_path), corpus_limit=25, candidate_limit=5)
+    assert snapshot["snapshot_status"] in {"READY", "DOCTOR_WARNINGS"}
+    assert snapshot["telemetry"]["corpus_export_summary"]["trace_count"] > 0
+    assert Path(snapshot["artifacts"]["optimizer_snapshot_path"]).is_file()
+
+    candidates = analyze_harness_candidates(cfg, repo_root=str(tmp_path), limit=5, propose_best=True)
+    assert candidates["candidate_count"] > 0
+    assert Path(candidates["artifact_path"]).is_file()
+    proposal = candidates["proposal"]
+    assert proposal["proposed_variant"] is not None
+    assert proposal["proposed_variant"]["touches_infrastructure"] is False
+
+
 def test_build_mac_studio_day_one_handoff_writes_handoff_bundle(tmp_path):
     cfg = IntegrationConfig(
         data_dir=str(tmp_path / "data"),
@@ -829,6 +889,12 @@ def test_build_mac_studio_day_one_handoff_writes_handoff_bundle(tmp_path):
     assert "--until-replay-ready" in handoff_text
     assert "--bootstrap-stack" in handoff_text
     assert "--evidence-factory" in handoff_text
+    assert "--export-replay-corpus" in handoff_text
+    assert "--optimizer-snapshot" in handoff_text
+    assert "--analyze-harness-candidates" in handoff_text
+    assert "Growth Focus" in handoff_text
+    assert "Live Hermes Validation" in handoff_text
+    assert "Priority Skills" in handoff_text
 
 
 def test_contract_harness_can_repeat_on_warmed_runtime(tmp_path):

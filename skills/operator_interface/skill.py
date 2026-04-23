@@ -648,6 +648,67 @@ class OperatorInterfaceSkill:
     def harness_frontier(self, *, limit: int = 20, skill_name: str | None = None) -> list[dict[str, Any]]:
         return self._harness_variants.frontier(limit=limit, skill_name=skill_name)
 
+    def export_replay_corpus(
+        self,
+        *,
+        limit: int = 200,
+        skill_name: str | None = None,
+        activation_only: bool = True,
+        reference_time: str | None = None,
+    ) -> dict[str, Any]:
+        now = self._resolve_now(reference_time)
+        result = self._harness_variants.export_replay_corpus(
+            limit=limit,
+            skill_name=skill_name,
+            activation_only=activation_only,
+        )
+        operator = self._db.get_connection("operator_digest")
+        operator.execute(
+            "INSERT INTO operator_heartbeat (entry_id, interaction_type, channel, timestamp) VALUES (?, ?, ?, ?)",
+            (str(uuid.uuid4()), "command", "CLI", now),
+        )
+        operator.commit()
+        return result
+
+    def analyze_harness_candidates(
+        self,
+        *,
+        limit: int = 5,
+        skill_name: str | None = None,
+        reference_time: str | None = None,
+    ) -> dict[str, Any]:
+        now = self._resolve_now(reference_time)
+        result = self._harness_variants.analyze_harness_candidates(
+            limit=limit,
+            skill_name=skill_name,
+        )
+        operator = self._db.get_connection("operator_digest")
+        operator.execute(
+            "INSERT INTO operator_heartbeat (entry_id, interaction_type, channel, timestamp) VALUES (?, ?, ?, ?)",
+            (str(uuid.uuid4()), "command", "CLI", now),
+        )
+        operator.commit()
+        return result
+
+    def propose_best_harness_candidate(
+        self,
+        *,
+        skill_name: str | None = None,
+        reference_time: str | None = None,
+    ) -> dict[str, Any]:
+        now = self._resolve_now(reference_time)
+        result = self._harness_variants.propose_best_variant_from_replay(
+            skill_name=skill_name,
+            reference_time=now,
+        )
+        operator = self._db.get_connection("operator_digest")
+        operator.execute(
+            "INSERT INTO operator_heartbeat (entry_id, interaction_type, channel, timestamp) VALUES (?, ?, ?, ?)",
+            (str(uuid.uuid4()), "command", "CLI", now),
+        )
+        operator.commit()
+        return result
+
     def propose_harness_variant(
         self,
         *,
@@ -1897,6 +1958,24 @@ def operator_interface_entry(action: str, **kwargs):
         return _SKILL.harness_frontier(
             limit=kwargs.get("limit", 20),
             skill_name=kwargs.get("skill_name"),
+        )
+    if action == "export_replay_corpus":
+        return _SKILL.export_replay_corpus(
+            limit=kwargs.get("limit", 200),
+            skill_name=kwargs.get("skill_name"),
+            activation_only=kwargs.get("activation_only", True),
+            reference_time=kwargs.get("reference_time"),
+        )
+    if action == "analyze_harness_candidates":
+        return _SKILL.analyze_harness_candidates(
+            limit=kwargs.get("limit", 5),
+            skill_name=kwargs.get("skill_name"),
+            reference_time=kwargs.get("reference_time"),
+        )
+    if action == "propose_best_harness_candidate":
+        return _SKILL.propose_best_harness_candidate(
+            skill_name=kwargs.get("skill_name"),
+            reference_time=kwargs.get("reference_time"),
         )
     if action == "propose_harness_variant":
         return _SKILL.propose_harness_variant(

@@ -421,3 +421,98 @@ def test_replay_readiness_excludes_control_plane_roles(tmp_path):
     assert report["excluded_role_counts"][0]["role"] == "operator_digest_acknowledgement"
     assert report["coverage_gaps"][0]["metric"] == "eligible_source_traces"
     assert report["skills_without_known_bad"] == ["runtime"]
+
+
+def test_export_replay_corpus_and_candidate_analysis_are_constrained(tmp_path):
+    manager = _telemetry_manager(tmp_path)
+
+    manager.log_execution_trace(
+        ExecutionTrace(
+            trace_id="trace-runtime-pass",
+            task_id="task-runtime-pass",
+            role="runtime_contract",
+            skill_name="runtime",
+            harness_version="runtime-v1",
+            intent_goal="runtime baseline",
+            steps=[
+                ExecutionTraceStep(
+                    step_index=1,
+                    tool_call="runtime.contract",
+                    tool_result='{"ok":true}',
+                    tool_result_file=None,
+                    tokens_in=5,
+                    tokens_out=5,
+                    latency_ms=10,
+                    model_used="baseline",
+                )
+            ],
+            prompt_template="runtime baseline",
+            context_assembled="runtime contract context" * 60,
+            retrieval_queries=["health check"],
+            judge_verdict="PASS",
+            judge_reasoning="ok",
+            outcome_score=0.68,
+            cost_usd=0.0,
+            duration_ms=18,
+            training_eligible=True,
+            retention_class="STANDARD",
+            source_chain_id="chain-runtime-1",
+            source_session_id="session-runtime-1",
+            source_trace_id=None,
+            created_at="2026-04-23T10:00:00+00:00",
+        )
+    )
+    manager.log_execution_trace(
+        ExecutionTrace(
+            trace_id="trace-runtime-fail",
+            task_id="task-runtime-fail",
+            role="runtime_contract",
+            skill_name="runtime",
+            harness_version="runtime-v1",
+            intent_goal="runtime known bad",
+            steps=[],
+            prompt_template="runtime baseline",
+            context_assembled="runtime contract context" * 20,
+            retrieval_queries=[],
+            judge_verdict="FAIL",
+            judge_reasoning="blocked safely",
+            outcome_score=0.1,
+            cost_usd=0.0,
+            duration_ms=9,
+            training_eligible=False,
+            retention_class="FAILURE_AUDIT",
+            source_chain_id="chain-runtime-2",
+            source_session_id="session-runtime-2",
+            source_trace_id=None,
+            created_at="2026-04-23T10:01:00+00:00",
+        )
+    )
+
+    corpus = manager.export_replay_corpus(limit=10)
+
+    assert corpus["available"] is True
+    assert corpus["trace_count"] == 2
+    assert corpus["eligible_trace_count"] == 1
+    assert corpus["known_bad_trace_count"] == 1
+    assert {row["corpus_classification"] for row in corpus["traces"]} == {"eligible", "known_bad"}
+
+    analysis = manager.analyze_harness_candidates(limit=5)
+
+    assert analysis["available"] is True
+    assert analysis["candidate_count"] > 0
+    top = analysis["candidates"][0]
+    assert top["candidate_rank"] == 1
+    assert top["scope_guardrails"] == [
+        "prompt_prelude",
+        "retrieval_strategy_diff",
+        "scoring_formula_diff",
+        "context_assembly_diff",
+    ]
+    assert top["proposed_variant"]["touches_infrastructure"] is False
+
+    proposal = manager.propose_best_variant_from_replay(reference_time="2026-04-23T10:02:00+00:00")
+
+    assert proposal["proposed_variant"] is not None
+    assert proposal["proposed_variant"]["status"] == "PROPOSED"
+    assert proposal["proposed_variant"]["source"] == "proposer"
+    assert proposal["proposed_variant"]["touches_infrastructure"] is False

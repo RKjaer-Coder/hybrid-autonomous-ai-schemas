@@ -1405,6 +1405,92 @@ def test_operator_can_run_replay_eval_from_execution_traces(test_data_dir):
     assert evaluated["operator_alert_id"]
 
 
+def test_operator_can_export_replay_corpus_and_propose_best_candidate(test_data_dir):
+    db = DatabaseManager(str(test_data_dir))
+    operator = OperatorInterfaceSkill(db)
+    manager = HarnessVariantManager(str(test_data_dir / "telemetry.db"))
+    operator_db = db.get_connection("operator_digest")
+
+    manager.log_execution_trace(
+        ExecutionTrace(
+            trace_id="runtime-pass-export",
+            task_id="task-runtime-pass-export",
+            role="runtime_contract",
+            skill_name="runtime",
+            harness_version="runtime-v1",
+            intent_goal="runtime baseline export",
+            steps=[],
+            prompt_template="runtime baseline",
+            context_assembled="runtime export context" * 40,
+            retrieval_queries=["health"],
+            judge_verdict="PASS",
+            judge_reasoning="ok",
+            outcome_score=0.72,
+            cost_usd=0.0,
+            duration_ms=10,
+            training_eligible=True,
+            retention_class="STANDARD",
+            source_chain_id="chain-runtime-export-1",
+            source_session_id="session-runtime-export-1",
+            source_trace_id=None,
+            created_at="2026-04-21T13:20:00+00:00",
+        )
+    )
+    manager.log_execution_trace(
+        ExecutionTrace(
+            trace_id="runtime-fail-export",
+            task_id="task-runtime-fail-export",
+            role="runtime_contract",
+            skill_name="runtime",
+            harness_version="runtime-v1",
+            intent_goal="runtime known bad export",
+            steps=[],
+            prompt_template="runtime baseline",
+            context_assembled="runtime export context" * 10,
+            retrieval_queries=[],
+            judge_verdict="FAIL",
+            judge_reasoning="blocked safely",
+            outcome_score=0.0,
+            cost_usd=0.0,
+            duration_ms=8,
+            training_eligible=False,
+            retention_class="FAILURE_AUDIT",
+            source_chain_id="chain-runtime-export-2",
+            source_session_id="session-runtime-export-2",
+            source_trace_id=None,
+            created_at="2026-04-21T13:21:00+00:00",
+        )
+    )
+
+    corpus = operator.export_replay_corpus(limit=10, reference_time="2026-04-21T13:22:00+00:00")
+    analysis = operator.analyze_harness_candidates(limit=5, reference_time="2026-04-21T13:23:00+00:00")
+    proposal = operator.propose_best_harness_candidate(reference_time="2026-04-21T13:24:00+00:00")
+
+    assert corpus["trace_count"] == 2
+    assert corpus["eligible_trace_count"] == 1
+    assert corpus["known_bad_trace_count"] == 1
+    assert analysis["candidate_count"] > 0
+    assert analysis["candidates"][0]["scope_guardrails"] == [
+        "prompt_prelude",
+        "retrieval_strategy_diff",
+        "scoring_formula_diff",
+        "context_assembly_diff",
+    ]
+    assert proposal["proposed_variant"] is not None
+    assert proposal["proposed_variant"]["status"] == "PROPOSED"
+    assert proposal["proposed_variant"]["source"] == "proposer"
+
+    heartbeat_rows = operator_db.execute(
+        """
+        SELECT interaction_type
+        FROM operator_heartbeat
+        ORDER BY timestamp DESC, entry_id DESC
+        LIMIT 3
+        """
+    ).fetchall()
+    assert [row["interaction_type"] for row in heartbeat_rows] == ["command", "command", "command"]
+
+
 def test_replay_readiness_summary_surfaces_threshold_gap(test_data_dir):
     db = DatabaseManager(str(test_data_dir))
     observability = ObservabilitySkill(db, None, None)

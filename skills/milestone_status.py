@@ -17,6 +17,9 @@ SUPPORT_ARTIFACT_FILENAMES = {
     "operator_validation_checklist": "operator_validation_checklist.md",
     "evidence_factory_manifest": "evidence_factory_manifest.json",
     "replay_readiness_report": "replay_readiness_report.json",
+    "replay_corpus_export": "replay_corpus_export.json",
+    "optimizer_snapshot": "optimizer_snapshot.json",
+    "harness_candidate_report": "harness_candidate_report.json",
     "mac_studio_day_one_handoff": "mac_studio_day_one_handoff.md",
 }
 
@@ -48,6 +51,10 @@ def _runtime_launcher_paths(config: IntegrationConfig) -> dict[str, Path]:
         "research_cron_proof": bin_dir / "research_cron_proof.sh",
         "evidence_factory": bin_dir / "evidence_factory.sh",
         "replay_readiness_report": bin_dir / "replay_readiness_report.sh",
+        "export_replay_corpus": bin_dir / "export_replay_corpus.sh",
+        "optimizer_snapshot": bin_dir / "optimizer_snapshot.sh",
+        "analyze_harness_candidates": bin_dir / "analyze_harness_candidates.sh",
+        "propose_best_harness_candidate": bin_dir / "propose_best_harness_candidate.sh",
         "mac_studio_day_one": bin_dir / "mac_studio_day_one.sh",
         "gateway": bin_dir / "start_gateway.sh",
         "workspace": bin_dir / "start_workspace.sh",

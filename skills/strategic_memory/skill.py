@@ -316,88 +316,125 @@ class StrategicMemorySkill:
         harvest_prompt: str | None = None,
         include_council_review: bool = False,
     ) -> dict[str, Any]:
-        brief = self.read_brief(brief_id)
-        conn = self._db.get_connection("strategic_memory")
-        task = conn.execute(
-            "SELECT task_id, priority, source, title, follow_up_tasks FROM research_tasks WHERE task_id = ?",
-            (brief["task_id"],),
-        ).fetchone()
-        if task is None:
-            raise KeyError(brief["task_id"])
-        actions: list[dict[str, Any]] = []
-        operator_state, last_heartbeat_at = self._operator_state()
-        opportunity_id: str | None = None
-        if brief["actionability"] == "HARVEST_NEEDED":
-            harvest = self._create_harvest_request(
+        brief: dict[str, Any] | None = None
+        try:
+            brief = self.read_brief(brief_id)
+            conn = self._db.get_connection("strategic_memory")
+            task = conn.execute(
+                "SELECT task_id, priority, source, title, follow_up_tasks FROM research_tasks WHERE task_id = ?",
+                (brief["task_id"],),
+            ).fetchone()
+            if task is None:
+                raise KeyError(brief["task_id"])
+            actions: list[dict[str, Any]] = []
+            operator_state, last_heartbeat_at = self._operator_state()
+            opportunity_id: str | None = None
+            if brief["actionability"] == "HARVEST_NEEDED":
+                harvest = self._create_harvest_request(
+                    task_id=brief["task_id"],
+                    title=brief["title"],
+                    summary=brief["summary"],
+                    priority=task["priority"],
+                    target_interface=target_interface,
+                    operator_state=operator_state,
+                    last_heartbeat_at=last_heartbeat_at,
+                    prompt_text=harvest_prompt,
+                )
+                actions.append(harvest)
+            if (
+                brief["action_type"] == "opportunity_feed"
+                and brief["actionability"] == "WATCH"
+                and (brief["source_diversity_hold"] or brief["quality_warning"])
+            ):
+                actions.extend(self._route_to_opportunity_feed(brief, task))
+            if brief["actionability"] in {"ACTION_RECOMMENDED", "ACTION_REQUIRED"}:
+                if brief["actionability"] == "ACTION_REQUIRED":
+                    alert = self._create_brief_alert(brief, operator_state)
+                    if alert is not None:
+                        actions.append(alert)
+                if brief["action_type"] == "opportunity_feed":
+                    opportunity_action = self._route_to_opportunity_feed(brief, task)
+                    actions.extend(opportunity_action)
+                    opportunity_id = next(
+                        (
+                            item["opportunity_id"]
+                            for item in opportunity_action
+                            if item["type"] in {"opportunity_created", "opportunity_existing"}
+                        ),
+                        None,
+                    )
+            if include_council_review:
+                actions.extend(
+                    self._route_to_council(
+                        brief,
+                        task,
+                        opportunity_id=opportunity_id,
+                    )
+                )
+            result = {
+                "brief_id": brief_id,
+                "task_id": brief["task_id"],
+                "actionability": brief["actionability"],
+                "action_type": brief["action_type"],
+                "operator_state": operator_state,
+                "actions": actions,
+            }
+            self._log_trace(
                 task_id=brief["task_id"],
-                title=brief["title"],
-                summary=brief["summary"],
-                priority=task["priority"],
-                target_interface=target_interface,
-                operator_state=operator_state,
-                last_heartbeat_at=last_heartbeat_at,
-                prompt_text=harvest_prompt,
+                role="strategic_memory_routing",
+                action_name="route_brief",
+                intent_goal=f"Route intelligence brief {brief_id} into downstream governance and execution surfaces.",
+                payload=result,
+                context_assembled=(
+                    f"actionability={brief['actionability']}; action_type={brief['action_type']}; "
+                    f"operator_state={operator_state}; include_council_review={include_council_review}"
+                ),
+                retrieval_queries=list(
+                    dict.fromkeys(
+                        [
+                            *brief["source_urls"],
+                            *brief["provenance_links"],
+                            *brief["related_brief_ids"],
+                        ]
+                    )
+                ),
             )
-            actions.append(harvest)
-        if (
-            brief["action_type"] == "opportunity_feed"
-            and brief["actionability"] == "WATCH"
-            and (brief["source_diversity_hold"] or brief["quality_warning"])
-        ):
-            actions.extend(self._route_to_opportunity_feed(brief, task))
-        if brief["actionability"] in {"ACTION_RECOMMENDED", "ACTION_REQUIRED"}:
-            if brief["actionability"] == "ACTION_REQUIRED":
-                alert = self._create_brief_alert(brief, operator_state)
-                if alert is not None:
-                    actions.append(alert)
-            if brief["action_type"] == "opportunity_feed":
-                opportunity_action = self._route_to_opportunity_feed(brief, task)
-                actions.extend(opportunity_action)
-                opportunity_id = next(
-                    (
-                        item["opportunity_id"]
-                        for item in opportunity_action
-                        if item["type"] in {"opportunity_created", "opportunity_existing"}
-                    ),
-                    None,
+            return result
+        except Exception as exc:
+            task_id = brief["task_id"] if brief is not None else brief_id
+            retrieval_queries = (
+                list(
+                    dict.fromkeys(
+                        [
+                            *brief["source_urls"],
+                            *brief["provenance_links"],
+                            *brief["related_brief_ids"],
+                        ]
+                    )
                 )
-        if include_council_review:
-            actions.extend(
-                self._route_to_council(
-                    brief,
-                    task,
-                    opportunity_id=opportunity_id,
+                if brief is not None
+                else [brief_id]
+            )
+            context = (
+                f"brief_id={brief_id}; include_council_review={include_council_review}"
+                if brief is None
+                else (
+                    f"actionability={brief['actionability']}; action_type={brief['action_type']}; "
+                    f"include_council_review={include_council_review}"
                 )
             )
-        result = {
-            "brief_id": brief_id,
-            "task_id": brief["task_id"],
-            "actionability": brief["actionability"],
-            "action_type": brief["action_type"],
-            "operator_state": operator_state,
-            "actions": actions,
-        }
-        self._log_trace(
-            task_id=brief["task_id"],
-            role="strategic_memory_routing",
-            action_name="route_brief",
-            intent_goal=f"Route intelligence brief {brief_id} into downstream governance and execution surfaces.",
-            payload=result,
-            context_assembled=(
-                f"actionability={brief['actionability']}; action_type={brief['action_type']}; "
-                f"operator_state={operator_state}; include_council_review={include_council_review}"
-            ),
-            retrieval_queries=list(
-                dict.fromkeys(
-                    [
-                        *brief["source_urls"],
-                        *brief["provenance_links"],
-                        *brief["related_brief_ids"],
-                    ]
-                )
-            ),
-        )
-        return result
+            self._log_trace(
+                task_id=task_id,
+                role="strategic_memory_routing",
+                action_name="route_brief",
+                intent_goal=f"Route intelligence brief {brief_id} into downstream governance and execution surfaces.",
+                payload={"brief_id": brief_id, "error": str(exc)},
+                context_assembled=context,
+                retrieval_queries=retrieval_queries,
+                judge_verdict="FAIL",
+                judge_reasoning=f"Strategic memory routing failed: {exc}",
+            )
+            raise
 
     def _record_quality_signal(
         self,

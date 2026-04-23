@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from harness_variants import HarnessVariantManager
 from skills.db_manager import DatabaseManager
 from skills.strategic_memory.skill import StrategicMemorySkill
@@ -103,3 +105,18 @@ def test_strategic_memory_emits_execution_traces_for_write_and_quality_signal(te
         "strategic_memory_brief_write",
         "brief_quality_signal",
     }
+
+
+def test_route_brief_missing_brief_emits_failure_trace(test_data_dir):
+    db = DatabaseManager(str(test_data_dir))
+    skill = StrategicMemorySkill(db)
+    traces = HarnessVariantManager(str(test_data_dir / "telemetry.db"))
+
+    with pytest.raises(KeyError):
+        skill.route_brief("missing-brief")
+
+    strategic_traces = traces.list_execution_traces(limit=5, skill_name="strategic_memory")
+
+    assert strategic_traces[0]["role"] == "strategic_memory_routing"
+    assert strategic_traces[0]["judge_verdict"] == "FAIL"
+    assert strategic_traces[0]["retention_class"] == "FAILURE_AUDIT"

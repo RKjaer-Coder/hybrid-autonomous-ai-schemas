@@ -658,6 +658,277 @@ class HarnessVariantManager:
             "skills_without_known_bad": skills_without_known_bad[:limit],
         }
 
+    def export_replay_corpus(
+        self,
+        *,
+        limit: int = 200,
+        skill_name: str | None = None,
+        activation_only: bool = True,
+    ) -> dict[str, Any]:
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        if not self._available:
+            return {
+                "available": False,
+                "generated_at": self._now(None),
+                "skill_name": skill_name,
+                "activation_only": activation_only,
+                "trace_count": 0,
+                "distinct_skill_count": 0,
+                "eligible_trace_count": 0,
+                "known_bad_trace_count": 0,
+                "replay_readiness": self.replay_readiness_summary(),
+                "skill_summary": [],
+                "traces": [],
+            }
+
+        traces = self._source_trace_rows(skill_name=skill_name, activation_only=activation_only, limit=limit)
+        skill_summary_map: dict[str, dict[str, Any]] = {}
+        exported: list[dict[str, Any]] = []
+        for row in traces:
+            classification = "eligible" if self._is_trace_eligible(row) else "known_bad"
+            skill_bucket = skill_summary_map.setdefault(
+                row["skill_name"],
+                {
+                    "skill_name": row["skill_name"],
+                    "trace_count": 0,
+                    "eligible_trace_count": 0,
+                    "known_bad_trace_count": 0,
+                    "sample_trace_ids": [],
+                },
+            )
+            skill_bucket["trace_count"] += 1
+            if classification == "eligible":
+                skill_bucket["eligible_trace_count"] += 1
+            else:
+                skill_bucket["known_bad_trace_count"] += 1
+            if len(skill_bucket["sample_trace_ids"]) < 3:
+                skill_bucket["sample_trace_ids"].append(row["trace_id"])
+            exported.append(
+                {
+                    "trace_id": row["trace_id"],
+                    "task_id": row["task_id"],
+                    "skill_name": row["skill_name"],
+                    "role": row["role"],
+                    "harness_version": row["harness_version"],
+                    "intent_goal": row["intent_goal"],
+                    "corpus_classification": classification,
+                    "judge_verdict": row["judge_verdict"],
+                    "judge_reasoning": row["judge_reasoning"],
+                    "outcome_score": row["outcome_score"],
+                    "training_eligible": row["training_eligible"],
+                    "retention_class": row["retention_class"],
+                    "prompt_template": row["prompt_template"],
+                    "context_assembled": row["context_assembled"],
+                    "context_chars": len(row["context_assembled"]),
+                    "retrieval_queries": row["retrieval_queries"],
+                    "step_count": len(row["steps"]),
+                    "steps": row["steps"],
+                    "source_chain_id": row["source_chain_id"],
+                    "source_session_id": row["source_session_id"],
+                    "created_at": row["created_at"],
+                }
+            )
+
+        eligible_count = sum(1 for row in exported if row["corpus_classification"] == "eligible")
+        known_bad_count = len(exported) - eligible_count
+        return {
+            "available": True,
+            "generated_at": self._now(None),
+            "skill_name": skill_name,
+            "activation_only": activation_only,
+            "trace_count": len(exported),
+            "distinct_skill_count": len(skill_summary_map),
+            "eligible_trace_count": eligible_count,
+            "known_bad_trace_count": known_bad_count,
+            "replay_readiness": self.replay_readiness_summary(),
+            "skill_summary": sorted(
+                skill_summary_map.values(),
+                key=lambda item: (-item["trace_count"], -item["known_bad_trace_count"], item["skill_name"]),
+            ),
+            "traces": exported,
+        }
+
+    def analyze_harness_candidates(
+        self,
+        *,
+        skill_name: str | None = None,
+        limit: int = 5,
+    ) -> dict[str, Any]:
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        summary = self.replay_readiness_summary()
+        if not self._available:
+            return {
+                "available": False,
+                "generated_at": self._now(None),
+                "skill_name": skill_name,
+                "scope_guardrails": self._candidate_scope_guardrails(),
+                "replay_readiness": summary,
+                "candidate_count": 0,
+                "candidates": [],
+            }
+
+        skill_rows = self._source_trace_rows(skill_name=skill_name, activation_only=True)
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for row in skill_rows:
+            grouped.setdefault(str(row["skill_name"]), []).append(row)
+
+        candidates: list[dict[str, Any]] = []
+        for current_skill, rows in grouped.items():
+            stats = self._skill_trace_stats(rows)
+            parent_version = rows[0]["harness_version"] if rows else f"{current_skill}_baseline"
+            sample_ids = [row["trace_id"] for row in rows[:3]]
+            low_queries = stats["avg_retrieval_queries"] < 1.5
+            wide_context = stats["avg_context_chars"] > 900
+            unstable = stats["eligible_score_std"] > 0.08
+            has_known_bad = stats["known_bad_trace_count"] > 0
+            middling_quality = stats["eligible_mean_score"] < 0.86
+
+            if low_queries or (middling_quality and stats["eligible_trace_count"] > 0):
+                score = 0.5
+                score += max(0.0, 1.5 - stats["avg_retrieval_queries"]) * 0.12
+                score += max(0.0, 0.85 - stats["eligible_mean_score"]) * 0.35
+                candidates.append(
+                    self._candidate_record(
+                        skill_name=current_skill,
+                        candidate_type="retrieval_grounding",
+                        opportunity_score=score,
+                        rationale=(
+                            "Replay traces show thin retrieval depth relative to the current quality level; "
+                            "a grounded retrieval/rerank pass should raise answer quality without touching infrastructure."
+                        ),
+                        parent_version=parent_version,
+                        source_summary=stats,
+                        sample_trace_ids=sample_ids,
+                        prompt_prelude="Ground every high-impact claim in the strongest retrieved evidence before acting.",
+                        retrieval_strategy_diff="Expand to multi-query retrieval, dedupe overlap, and rerank the strongest evidence first.",
+                        scoring_formula_diff="Reward cited evidence and penalize unsupported jumps or thin sourcing.",
+                        context_assembly_diff="Promote the top-ranked snippets and trim low-signal retrieval spillover.",
+                    )
+                )
+            if wide_context or unstable:
+                score = 0.48
+                score += min(stats["avg_context_chars"] / 2400.0, 0.22)
+                score += min(stats["eligible_score_std"] * 1.8, 0.18)
+                candidates.append(
+                    self._candidate_record(
+                        skill_name=current_skill,
+                        candidate_type="context_compaction",
+                        opportunity_score=score,
+                        rationale=(
+                            "Replay traces suggest context is getting bulky or unstable; trimming and ordering context "
+                            "should improve consistency and reduce distractor spillover."
+                        ),
+                        parent_version=parent_version,
+                        source_summary=stats,
+                        sample_trace_ids=sample_ids,
+                        prompt_prelude="Prefer concise, high-signal context over exhaustive recall when making decisions.",
+                        retrieval_strategy_diff="Keep retrieval breadth, but pass fewer low-signal documents into the final context window.",
+                        scoring_formula_diff="Favor compact, directly supported answers over verbose but weakly grounded responses.",
+                        context_assembly_diff="Compress duplicate context, surface the most recent high-signal evidence first, and cap low-value tail context.",
+                    )
+                )
+            if has_known_bad:
+                score = 0.54
+                score += min(stats["known_bad_trace_count"] / 8.0, 0.2)
+                score += max(0.0, 0.75 - stats["known_bad_mean_score"]) * 0.18
+                candidates.append(
+                    self._candidate_record(
+                        skill_name=current_skill,
+                        candidate_type="known_bad_hardening",
+                        opportunity_score=score,
+                        rationale=(
+                            "Known-bad evidence exists for this skill, so we can harden failure handling and scoring "
+                            "against invalid inputs using real replay pressure."
+                        ),
+                        parent_version=parent_version,
+                        source_summary=stats,
+                        sample_trace_ids=sample_ids,
+                        prompt_prelude="Fail closed on invalid or ambiguous inputs and explain the block reason explicitly.",
+                        retrieval_strategy_diff="Surface policy or validation context before optional supporting evidence whenever the input looks unsafe.",
+                        scoring_formula_diff="Increase penalties for unsafe or invalid actions and require high-confidence evidence before success.",
+                        context_assembly_diff="Reserve context budget for validation and guardrail cues before broader supporting context.",
+                    )
+                )
+            if unstable or (middling_quality and stats["eligible_trace_count"] >= 3):
+                score = 0.46
+                score += min(stats["eligible_score_std"] * 2.0, 0.22)
+                score += max(0.0, 0.82 - stats["eligible_mean_score"]) * 0.25
+                candidates.append(
+                    self._candidate_record(
+                        skill_name=current_skill,
+                        candidate_type="rubric_calibration",
+                        opportunity_score=score,
+                        rationale=(
+                            "Replay quality looks inconsistent enough that a tighter scoring rubric could improve "
+                            "promotion confidence before broader replay activation."
+                        ),
+                        parent_version=parent_version,
+                        source_summary=stats,
+                        sample_trace_ids=sample_ids,
+                        prompt_prelude="Use a stricter internal rubric for confidence, evidence sufficiency, and fail-closed behavior.",
+                        retrieval_strategy_diff="No retrieval expansion by default; prefer better ranking of already-retrieved evidence.",
+                        scoring_formula_diff="Calibrate thresholds and confidence penalties so marginal outputs fail earlier and strong outputs promote more consistently.",
+                        context_assembly_diff="Highlight the rubric-relevant evidence first so scoring decisions see the strongest signal earlier.",
+                    )
+                )
+
+        ranked = sorted(
+            candidates,
+            key=lambda item: (
+                -float(item["opportunity_score"]),
+                -int(item["source_summary"]["known_bad_trace_count"]),
+                item["skill_name"],
+                item["candidate_type"],
+            ),
+        )[:limit]
+        for index, item in enumerate(ranked, start=1):
+            item["candidate_rank"] = index
+        return {
+            "available": True,
+            "generated_at": self._now(None),
+            "skill_name": skill_name,
+            "scope_guardrails": self._candidate_scope_guardrails(),
+            "replay_readiness": summary,
+            "candidate_count": len(ranked),
+            "candidates": ranked,
+        }
+
+    def propose_best_variant_from_replay(
+        self,
+        *,
+        skill_name: str | None = None,
+        source: str = "proposer",
+        reference_time: str | None = None,
+    ) -> dict[str, Any]:
+        analysis = self.analyze_harness_candidates(skill_name=skill_name, limit=1)
+        best = next(iter(analysis.get("candidates") or []), None)
+        if best is None:
+            return {
+                "available": self._available,
+                "analysis": analysis,
+                "proposed_variant": None,
+            }
+        proposed = self.propose_variant(
+            skill_name=best["skill_name"],
+            parent_version=best["proposed_variant"]["parent_version"],
+            diff=best["proposed_variant"]["diff"],
+            source=source,
+            prompt_prelude=best["proposed_variant"]["prompt_prelude"],
+            retrieval_strategy_diff=best["proposed_variant"]["retrieval_strategy_diff"],
+            scoring_formula_diff=best["proposed_variant"]["scoring_formula_diff"],
+            context_assembly_diff=best["proposed_variant"]["context_assembly_diff"],
+            touches_infrastructure=False,
+            reference_time=reference_time,
+        )
+        return {
+            "available": True,
+            "analysis": analysis,
+            "selected_candidate": best,
+            "proposed_variant": proposed,
+        }
+
     def propose_variant(
         self,
         *,
@@ -1062,6 +1333,37 @@ class HarnessVariantManager:
             ).fetchone()
         return row is not None
 
+    def _source_trace_rows(
+        self,
+        *,
+        skill_name: str | None = None,
+        activation_only: bool = False,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        where = ["source_trace_id IS NULL"]
+        params: list[object] = []
+        if activation_only:
+            where.append(_activation_role_sql())
+        if skill_name is not None:
+            where.append("skill_name = ?")
+            params.append(skill_name)
+        limit_sql = ""
+        if limit is not None:
+            limit_sql = "LIMIT ?"
+            params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT *
+                FROM execution_traces
+                WHERE {' AND '.join(where)}
+                ORDER BY created_at DESC, trace_id DESC
+                {limit_sql}
+                """,
+                tuple(params),
+            ).fetchall()
+        return [self._trace_row_to_dict(row) for row in rows]
+
     def _select_replay_traces(
         self,
         *,
@@ -1209,6 +1511,83 @@ class HarnessVariantManager:
             created_at=reference_time,
         )
         self.log_execution_trace(replay_trace)
+
+    @staticmethod
+    def _is_trace_eligible(trace: dict[str, Any]) -> bool:
+        return bool(trace["training_eligible"]) and trace["judge_verdict"] == "PASS"
+
+    def _skill_trace_stats(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        eligible_rows = [row for row in rows if self._is_trace_eligible(row)]
+        known_bad_rows = [row for row in rows if not self._is_trace_eligible(row)]
+        return {
+            "trace_count": len(rows),
+            "eligible_trace_count": len(eligible_rows),
+            "known_bad_trace_count": len(known_bad_rows),
+            "eligible_mean_score": round(_mean([float(row["outcome_score"]) for row in eligible_rows]), 4),
+            "known_bad_mean_score": round(_mean([float(row["outcome_score"]) for row in known_bad_rows]), 4),
+            "eligible_score_std": round(
+                _population_std([float(row["outcome_score"]) for row in eligible_rows]),
+                4,
+            ),
+            "avg_retrieval_queries": round(_mean([float(len(row["retrieval_queries"])) for row in rows]), 4),
+            "avg_context_chars": round(_mean([float(len(row["context_assembled"])) for row in rows]), 2),
+            "avg_step_count": round(_mean([float(len(row["steps"])) for row in rows]), 4),
+        }
+
+    @staticmethod
+    def _candidate_scope_guardrails() -> list[str]:
+        return [
+            "prompt_prelude",
+            "retrieval_strategy_diff",
+            "scoring_formula_diff",
+            "context_assembly_diff",
+        ]
+
+    def _candidate_record(
+        self,
+        *,
+        skill_name: str,
+        candidate_type: str,
+        opportunity_score: float,
+        rationale: str,
+        parent_version: str,
+        source_summary: dict[str, Any],
+        sample_trace_ids: list[str],
+        prompt_prelude: str,
+        retrieval_strategy_diff: str,
+        scoring_formula_diff: str,
+        context_assembly_diff: str,
+    ) -> dict[str, Any]:
+        summary_suffix = (
+            f"eligible={source_summary['eligible_trace_count']} known_bad={source_summary['known_bad_trace_count']} "
+            f"avg_score={source_summary['eligible_mean_score']}"
+        )
+        label = candidate_type.replace("_", " ")
+        return {
+            "candidate_rank": 0,
+            "candidate_id": f"{skill_name}:{candidate_type}",
+            "skill_name": skill_name,
+            "candidate_type": candidate_type,
+            "opportunity_score": round(opportunity_score, 4),
+            "rationale": rationale,
+            "source_summary": source_summary,
+            "sample_trace_ids": sample_trace_ids,
+            "scope_guardrails": self._candidate_scope_guardrails(),
+            "proposed_variant": {
+                "skill_name": skill_name,
+                "parent_version": parent_version,
+                "diff": (
+                    "@@ -1 +1 @@\n"
+                    f"-baseline harness for {skill_name}\n"
+                    f"+{label} adjustment derived from replay evidence ({summary_suffix})\n"
+                ),
+                "prompt_prelude": prompt_prelude,
+                "retrieval_strategy_diff": retrieval_strategy_diff,
+                "scoring_formula_diff": scoring_formula_diff,
+                "context_assembly_diff": context_assembly_diff,
+                "touches_infrastructure": False,
+            },
+        }
 
     @staticmethod
     def _cue_weight(text: str, cues: dict[str, float]) -> float:

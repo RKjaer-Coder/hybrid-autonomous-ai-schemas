@@ -6,6 +6,7 @@ import datetime
 import json
 import math
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -187,6 +188,8 @@ class HermesReadinessResult:
     install: RuntimeProfileInstallResult
     doctor: RuntimeDoctorResult
     contract_harness: HermesContractHarnessResult
+    replay_report: dict[str, Any]
+    recommended_actions: list[str]
 
 
 @dataclass(frozen=True)
@@ -716,6 +719,10 @@ def _runtime_launcher_paths(config: IntegrationConfig) -> dict[str, Path]:
         "research_cron_proof": bin_dir / "research_cron_proof.sh",
         "evidence_factory": bin_dir / "evidence_factory.sh",
         "replay_readiness_report": bin_dir / "replay_readiness_report.sh",
+        "export_replay_corpus": bin_dir / "export_replay_corpus.sh",
+        "optimizer_snapshot": bin_dir / "optimizer_snapshot.sh",
+        "analyze_harness_candidates": bin_dir / "analyze_harness_candidates.sh",
+        "propose_best_harness_candidate": bin_dir / "propose_best_harness_candidate.sh",
         "mac_studio_day_one": bin_dir / "mac_studio_day_one.sh",
         "gateway": bin_dir / "start_gateway.sh",
         "workspace": bin_dir / "start_workspace.sh",
@@ -786,6 +793,18 @@ def _runtime_replay_readiness_report_path(config: IntegrationConfig) -> Path:
     return runtime_support_artifact_paths(config)["replay_readiness_report"]
 
 
+def _runtime_replay_corpus_export_path(config: IntegrationConfig) -> Path:
+    return runtime_support_artifact_paths(config)["replay_corpus_export"]
+
+
+def _runtime_optimizer_snapshot_path(config: IntegrationConfig) -> Path:
+    return runtime_support_artifact_paths(config)["optimizer_snapshot"]
+
+
+def _runtime_harness_candidate_report_path(config: IntegrationConfig) -> Path:
+    return runtime_support_artifact_paths(config)["harness_candidate_report"]
+
+
 def _runtime_mac_studio_day_one_handoff_path(config: IntegrationConfig) -> Path:
     return runtime_support_artifact_paths(config)["mac_studio_day_one_handoff"]
 
@@ -821,49 +840,234 @@ def _proxy_config_payload(
     }
 
 
-def _evidence_factory_scenario_catalog() -> list[dict[str, str]]:
+def _evidence_factory_scenario_catalog() -> list[dict[str, Any]]:
     return [
         {
             "scenario_id": "operator_workflow",
             "classification": "activation_positive",
             "description": "Runs the council-backed operator workflow smoke test.",
+            "produced_skill_families": [
+                "runtime",
+                "financial_router",
+                "immune_system",
+                "strategic_memory",
+                "council",
+                "operator_interface",
+            ],
         },
         {
             "scenario_id": "task_loop_proof",
             "classification": "activation_positive",
             "description": "Exercises deterministic research task creation, brief writeback, routing, and judge review.",
+            "produced_skill_families": ["runtime", "research_domain", "strategic_memory", "immune_system"],
         },
         {
             "scenario_id": "research_cron_proof",
             "classification": "activation_positive",
             "description": "Creates, schedules, and queues a standing brief run.",
+            "produced_skill_families": ["runtime", "research_domain"],
         },
         {
             "scenario_id": "research_to_opportunity_flow",
             "classification": "activation_positive",
             "description": "Routes a high-quality brief through opportunity creation and council review.",
+            "produced_skill_families": ["research_domain", "strategic_memory", "council"],
         },
         {
             "scenario_id": "opportunity_project_flow",
             "classification": "activation_positive",
             "description": "Walks an opportunity through qualification, project handoff, and learning backpropagation.",
+            "produced_skill_families": ["opportunity_pipeline"],
+        },
+        {
+            "scenario_id": "missing_brief_route",
+            "classification": "known_bad",
+            "description": "Confirms strategic memory emits an audit-grade failure trace when brief routing is requested for a missing brief.",
+            "produced_skill_families": ["strategic_memory"],
         },
         {
             "scenario_id": "invalid_brief_completion",
             "classification": "known_bad",
             "description": "Confirms a task cannot complete with a brief belonging to another task.",
+            "produced_skill_families": ["research_domain", "strategic_memory"],
         },
         {
             "scenario_id": "archived_standing_brief_queue",
             "classification": "known_bad",
             "description": "Confirms archived standing briefs cannot queue fresh runs.",
+            "produced_skill_families": ["research_domain"],
         },
         {
             "scenario_id": "invalid_opportunity_transition",
             "classification": "known_bad",
             "description": "Confirms the opportunity state machine rejects invalid jumps.",
+            "produced_skill_families": ["opportunity_pipeline"],
+        },
+        {
+            "scenario_id": "council_invalid_decision_type",
+            "classification": "known_bad",
+            "description": "Confirms council deliberation fail-closes and logs failure evidence for an invalid decision type.",
+            "produced_skill_families": ["council"],
+        },
+        {
+            "scenario_id": "financial_g3_denial",
+            "classification": "known_bad",
+            "description": "Confirms paid routing denial is durably logged as known-bad financial evidence.",
+            "produced_skill_families": ["financial_router"],
         },
     ]
+
+
+def _scenario_results_summary(results: Sequence[EvidenceScenarioResult]) -> dict[str, Any]:
+    classification_counts: dict[str, int] = {}
+    skill_family_counts: dict[str, int] = {}
+    aggregated: dict[str, dict[str, Any]] = {}
+    for item in results:
+        classification_counts[item.classification] = classification_counts.get(item.classification, 0) + 1
+        for skill_name in item.produced_skill_families:
+            skill_family_counts[skill_name] = skill_family_counts.get(skill_name, 0) + 1
+        bucket = aggregated.setdefault(
+            item.scenario_id,
+            {
+                "scenario_id": item.scenario_id,
+                "classification": item.classification,
+                "cycles_seen": 0,
+                "pass_count": 0,
+                "fail_count": 0,
+                "produced_skill_families": list(item.produced_skill_families),
+                "issues": [],
+                "trace_ids": [],
+            },
+        )
+        bucket["cycles_seen"] += 1
+        if item.ok:
+            bucket["pass_count"] += 1
+        else:
+            bucket["fail_count"] += 1
+        if item.trace_id is not None:
+            bucket["trace_ids"].append(item.trace_id)
+        for issue in item.issues:
+            if issue not in bucket["issues"]:
+                bucket["issues"].append(issue)
+    return {
+        "classification_counts": classification_counts,
+        "skill_family_counts": [
+            {"skill_name": name, "scenario_count": count}
+            for name, count in sorted(skill_family_counts.items(), key=lambda item: (-item[1], item[0]))
+        ],
+        "scenario_status": sorted(aggregated.values(), key=lambda item: item["scenario_id"]),
+        "failed_scenarios": sorted(
+            [scenario_id for scenario_id, payload in aggregated.items() if payload["fail_count"] > 0]
+        ),
+    }
+
+
+def _replay_growth_plan(
+    report: dict[str, Any],
+    *,
+    config: IntegrationConfig,
+    repo_root: Path,
+) -> dict[str, Any]:
+    scenario_catalog = _evidence_factory_scenario_catalog()
+    evidence_command = _command_string(config, "--evidence-factory", repo_root)
+    report_command = _command_string(config, "--replay-readiness-report", repo_root)
+    bounded_command = (
+        evidence_command
+        + " --until-replay-ready"
+        + f" --evidence-cycles {DEFAULT_EVIDENCE_CYCLES}"
+    )
+    coverage_gaps = list(report.get("coverage_gaps") or [])
+    primary_gap = max(
+        coverage_gaps,
+        key=lambda item: (
+            int(item.get("remaining", 0) or 0),
+            -float(item.get("percent_complete", 0.0) or 0.0),
+            str(item.get("metric", "")),
+        ),
+        default=None,
+    )
+    skills_without_known_bad = {
+        str(skill_name)
+        for skill_name in (report.get("skills_without_known_bad") or [])
+    }
+    skill_rows = list(report.get("skill_coverage") or [])
+    prioritized_skills: list[dict[str, Any]] = []
+    recommended_scenarios: list[dict[str, Any]] = []
+    seen_scenarios: set[str] = set()
+    for row in sorted(
+        skill_rows,
+        key=lambda item: (
+            0 if str(item.get("skill_name")) in skills_without_known_bad else 1,
+            int(item.get("known_bad_source_traces", 0) or 0),
+            int(item.get("eligible_source_traces", 0) or 0),
+            str(item.get("skill_name", "")),
+        ),
+    ):
+        skill_name = str(row.get("skill_name", ""))
+        if not skill_name:
+            continue
+        preferred_classification = "known_bad" if skill_name in skills_without_known_bad else "activation_positive"
+        skill_scenarios = [
+            {
+                "scenario_id": str(entry["scenario_id"]),
+                "classification": str(entry["classification"]),
+                "description": str(entry["description"]),
+            }
+            for entry in scenario_catalog
+            if skill_name in entry.get("produced_skill_families", [])
+            and str(entry["classification"]) == preferred_classification
+        ]
+        if not skill_scenarios and preferred_classification != "activation_positive":
+            skill_scenarios = [
+                {
+                    "scenario_id": str(entry["scenario_id"]),
+                    "classification": str(entry["classification"]),
+                    "description": str(entry["description"]),
+                }
+                for entry in scenario_catalog
+                if skill_name in entry.get("produced_skill_families", [])
+            ]
+        prioritized_skills.append(
+            {
+                "skill_name": skill_name,
+                "eligible_source_traces": int(row.get("eligible_source_traces", 0) or 0),
+                "known_bad_source_traces": int(row.get("known_bad_source_traces", 0) or 0),
+                "needs_known_bad_coverage": skill_name in skills_without_known_bad,
+                "recommended_scenarios": skill_scenarios[:3],
+            }
+        )
+        for scenario in skill_scenarios:
+            if scenario["scenario_id"] in seen_scenarios:
+                continue
+            recommended_scenarios.append({**scenario, "skill_name": skill_name})
+            seen_scenarios.add(scenario["scenario_id"])
+    next_actions = [
+        f"Run a bounded evidence-growth pass: `{bounded_command}`",
+        f"Inspect the updated replay coverage report: `{report_command}`",
+    ]
+    if skills_without_known_bad:
+        missing = ", ".join(sorted(skills_without_known_bad))
+        next_actions.append(
+            "Prioritize known-bad coverage for "
+            f"{missing} using {', '.join(item['scenario_id'] for item in recommended_scenarios[:3]) or 'targeted evidence scenarios'}."
+        )
+    if primary_gap is not None and int(primary_gap.get("remaining", 0) or 0) > 0:
+        next_actions.append(
+            "Keep closing the largest replay gap "
+            f"({primary_gap.get('metric')} remaining={primary_gap.get('remaining')})."
+        )
+    return {
+        "primary_gap": primary_gap,
+        "skills_without_known_bad": sorted(skills_without_known_bad),
+        "prioritized_skills": prioritized_skills[:5],
+        "recommended_scenarios": recommended_scenarios[:5],
+        "commands": {
+            "evidence_factory": evidence_command,
+            "until_replay_ready": bounded_command,
+            "replay_readiness_report": report_command,
+        },
+        "next_actions": next_actions,
+    }
 
 
 @contextlib.contextmanager
@@ -1088,15 +1292,17 @@ def _command_args(config: IntegrationConfig) -> list[str]:
 
 
 def _command_string(config: IntegrationConfig, action_flag: str, repo_root: Path) -> str:
+    repo_root_value = str(repo_root).replace("\\", "\\\\").replace('"', '\\"')
+    pythonpath_assignment = f'PYTHONPATH="{repo_root_value}${{PYTHONPATH:+:${{PYTHONPATH}}}}"'
     parts = [
-        f"PYTHONPATH={shlex.quote(str(repo_root))}${{PYTHONPATH:+:${{PYTHONPATH}}}}",
+        pythonpath_assignment,
         "python3",
         "-m",
         "skills.runtime",
         action_flag,
         *_command_args(config),
     ]
-    return " ".join(shlex.quote(part) for part in parts)
+    return " ".join([parts[0], *(shlex.quote(part) for part in parts[1:])])
 
 
 def _write_launcher(path: Path, config: IntegrationConfig, repo_root: Path, action_flag: str) -> None:
@@ -1133,6 +1339,27 @@ def _write_replay_readiness_report_artifact(config: IntegrationConfig, payload: 
     _write_json_yaml(_runtime_replay_readiness_report_path(config), artifact)
 
 
+def _write_replay_corpus_export_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
+    artifact = dict(payload)
+    artifact.setdefault("generated_at", _utc_now())
+    artifact.setdefault("artifact_path", str(_runtime_replay_corpus_export_path(config)))
+    _write_json_yaml(_runtime_replay_corpus_export_path(config), artifact)
+
+
+def _write_optimizer_snapshot_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
+    artifact = dict(payload)
+    artifact.setdefault("generated_at", _utc_now())
+    artifact.setdefault("artifact_path", str(_runtime_optimizer_snapshot_path(config)))
+    _write_json_yaml(_runtime_optimizer_snapshot_path(config), artifact)
+
+
+def _write_harness_candidate_report_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
+    artifact = dict(payload)
+    artifact.setdefault("generated_at", _utc_now())
+    artifact.setdefault("artifact_path", str(_runtime_harness_candidate_report_path(config)))
+    _write_json_yaml(_runtime_harness_candidate_report_path(config), artifact)
+
+
 def _write_mac_studio_day_one_handoff(
     config: IntegrationConfig,
     repo_root: Path,
@@ -1144,6 +1371,12 @@ def _write_mac_studio_day_one_handoff(
 ) -> None:
     manifest = _read_json_yaml(_runtime_profile_manifest_path(config)) or {}
     commands = manifest.get("commands", {})
+    replay_growth_plan = replay_report.get("growth_plan", {}) if replay_report is not None else {}
+    evidence_summary = (
+        _scenario_results_summary(evidence_batch.scenario_results)
+        if evidence_batch is not None
+        else None
+    )
     lines = [
         "# Mac Studio Day-One Handoff",
         "",
@@ -1152,6 +1385,7 @@ def _write_mac_studio_day_one_handoff(
         "## Goal",
         "",
         "Use this package to rehearse the repo-local substrate now and to cut over quickly once Hermes is available on the Mac Studio.",
+        "The current priority is launch validation and honest replay growth, not adding new subsystem surface area.",
         "",
         "## Day-One Sequence",
         "",
@@ -1160,8 +1394,10 @@ def _write_mac_studio_day_one_handoff(
         f"3. Grow replay corpus: `{commands.get('evidence_factory', _command_string(config, '--evidence-factory', repo_root))}`",
         f"   If you want one bounded run toward readiness, use: `{commands.get('evidence_factory', _command_string(config, '--evidence-factory', repo_root))} --until-replay-ready --evidence-cycles {DEFAULT_EVIDENCE_CYCLES}`",
         f"4. Inspect replay coverage: `{commands.get('replay_readiness_report', _command_string(config, '--replay-readiness-report', repo_root))}`",
-        f"5. When Hermes is installed, run live readiness: `{commands.get('readiness', _command_string(config, '--readiness', repo_root))}`",
-        f"6. Open the workspace/operator view: `{commands.get('workspace_overview', _command_string(config, '--workspace-overview', repo_root))}`",
+        f"5. Export the replay corpus for offline harness search: `{commands.get('export_replay_corpus', _command_string(config, '--export-replay-corpus', repo_root))}`",
+        f"6. Capture the optimizer snapshot and ranked candidates: `{commands.get('optimizer_snapshot', _command_string(config, '--optimizer-snapshot', repo_root))}` then `{commands.get('analyze_harness_candidates', _command_string(config, '--analyze-harness-candidates', repo_root))}`",
+        f"7. When Hermes is installed, run live readiness: `{commands.get('readiness', _command_string(config, '--readiness', repo_root))}`",
+        f"8. Open the workspace/operator view: `{commands.get('workspace_overview', _command_string(config, '--workspace-overview', repo_root))}`",
         "",
         "## Runtime Artifacts",
         "",
@@ -1171,6 +1407,9 @@ def _write_mac_studio_day_one_handoff(
         f"- Proxy audit log: `{_runtime_proxy_audit_log_path(config)}`",
         f"- Evidence manifest: `{_runtime_evidence_factory_manifest_path(config)}`",
         f"- Replay readiness report: `{_runtime_replay_readiness_report_path(config)}`",
+        f"- Replay corpus export: `{_runtime_replay_corpus_export_path(config)}`",
+        f"- Optimizer snapshot: `{_runtime_optimizer_snapshot_path(config)}`",
+        f"- Harness candidate report: `{_runtime_harness_candidate_report_path(config)}`",
         "",
     ]
     if install is not None:
@@ -1212,6 +1451,16 @@ def _write_mac_studio_day_one_handoff(
                 "",
             ]
         )
+        if evidence_summary is not None:
+            lines.extend(
+                [
+                    "### Scenario Coverage",
+                    "",
+                    f"- Scenario families: `{len(evidence_summary['scenario_status'])}`",
+                    f"- Failed scenarios: `{', '.join(evidence_summary['failed_scenarios']) if evidence_summary['failed_scenarios'] else 'none'}`",
+                    "",
+                ]
+            )
     if replay_report is not None:
         lines.extend(
             [
@@ -1224,6 +1473,74 @@ def _write_mac_studio_day_one_handoff(
                 "",
             ]
         )
+        blockers = replay_report.get("blockers") or []
+        if blockers:
+            lines.extend(
+                [
+                    "### Current Replay Blockers",
+                    "",
+                    *(f"- `{item}`" for item in blockers),
+                    "",
+                ]
+            )
+        if replay_growth_plan:
+            primary_gap = replay_growth_plan.get("primary_gap") or {}
+            prioritized_skills = replay_growth_plan.get("prioritized_skills") or []
+            recommended_scenarios = replay_growth_plan.get("recommended_scenarios") or []
+            lines.extend(
+                [
+                    "### Growth Focus",
+                    "",
+                    f"- Primary gap: `{primary_gap.get('metric', 'unknown')}` remaining `{primary_gap.get('remaining', 0)}`",
+                    f"- Skills still missing known-bad coverage: `{', '.join(replay_growth_plan.get('skills_without_known_bad') or ['none'])}`",
+                    f"- Recommended bounded growth command: `{replay_growth_plan.get('commands', {}).get('until_replay_ready', 'not-generated')}`",
+                    "",
+                ]
+            )
+            if prioritized_skills:
+                lines.extend(
+                    [
+                        "### Priority Skills",
+                        "",
+                        *(
+                            f"- `{item['skill_name']}` eligible=`{item['eligible_source_traces']}` known_bad=`{item['known_bad_source_traces']}` scenarios=`{', '.join(s['scenario_id'] for s in item.get('recommended_scenarios', [])) or 'none'}`"
+                            for item in prioritized_skills
+                        ),
+                        "",
+                    ]
+                )
+            if recommended_scenarios:
+                lines.extend(
+                    [
+                        "### Targeted Scenarios",
+                        "",
+                        *(
+                            f"- `{item['scenario_id']}` for `{item['skill_name']}`: {item['description']}"
+                            for item in recommended_scenarios
+                        ),
+                        "",
+                    ]
+                )
+            next_actions = replay_growth_plan.get("next_actions") or []
+            if next_actions:
+                lines.extend(
+                    [
+                        "### Immediate Next Actions",
+                        "",
+                        *(f"- {action}" for action in next_actions),
+                        "",
+                    ]
+                )
+    lines.extend(
+        [
+            "## Live Hermes Validation",
+            "",
+            f"- M0 bootstrap/readiness: `{commands.get('readiness', _command_string(config, '--readiness', repo_root))}`",
+            f"- M2 proxy and memory rehearsal: `{commands.get('bootstrap_stack', _command_string(config, '--bootstrap-stack', repo_root))}`",
+            f"- Workspace/operator snapshot: `{commands.get('workspace_overview', _command_string(config, '--workspace-overview', repo_root))}`",
+            "",
+        ]
+    )
     _runtime_mac_studio_day_one_handoff_path(config).write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -1260,6 +1577,8 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
         "gateway_url": config.hermes_gateway_url,
         "workspace_snapshot_command": _command_string(config, "--workspace-overview", repo_root),
         "milestone_status_command": _command_string(config, "--milestone-status", repo_root),
+        "optimizer_snapshot_command": _command_string(config, "--optimizer-snapshot", repo_root),
+        "harness_candidate_command": _command_string(config, "--analyze-harness-candidates", repo_root),
     }
     evidence_doc = {
         "generated_at": _utc_now(),
@@ -1271,6 +1590,9 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
         ),
         "recommended_cycles": DEFAULT_EVIDENCE_CYCLES,
         "report_command": _command_string(config, "--replay-readiness-report", repo_root),
+        "replay_corpus_export_command": _command_string(config, "--export-replay-corpus", repo_root),
+        "optimizer_snapshot_command": _command_string(config, "--optimizer-snapshot", repo_root),
+        "harness_candidate_command": _command_string(config, "--analyze-harness-candidates", repo_root),
         "scenarios": _evidence_factory_scenario_catalog(),
     }
     checklist_lines = [
@@ -1303,6 +1625,52 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "known_bad_source_traces": 0,
             "distinct_skill_count": 0,
             "blockers": ["telemetry_unavailable"],
+        },
+    )
+    _write_replay_corpus_export_artifact(
+        config,
+        {
+            "available": False,
+            "skill_name": None,
+            "activation_only": True,
+            "trace_count": 0,
+            "distinct_skill_count": 0,
+            "eligible_trace_count": 0,
+            "known_bad_trace_count": 0,
+            "replay_readiness": {
+                "status": "UNAVAILABLE",
+                "blockers": ["telemetry_unavailable"],
+            },
+            "skill_summary": [],
+            "traces": [],
+        },
+    )
+    _write_optimizer_snapshot_artifact(
+        config,
+        {
+            "available": True,
+            "snapshot_status": "PLACEHOLDER",
+            "environment": {},
+            "artifacts": {},
+            "commands": {
+                "export_replay_corpus": _command_string(config, "--export-replay-corpus", repo_root),
+                "optimizer_snapshot": _command_string(config, "--optimizer-snapshot", repo_root),
+                "analyze_harness_candidates": _command_string(config, "--analyze-harness-candidates", repo_root),
+            },
+        },
+    )
+    _write_harness_candidate_report_artifact(
+        config,
+        {
+            "available": False,
+            "candidate_count": 0,
+            "scope_guardrails": [
+                "prompt_prelude",
+                "retrieval_strategy_diff",
+                "scoring_formula_diff",
+                "context_assembly_diff",
+            ],
+            "candidates": [],
         },
     )
     _runtime_operator_validation_checklist_path(config).write_text(
@@ -1399,6 +1767,9 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
         "operator_validation_checklist_path": str(_runtime_operator_validation_checklist_path(resolved)),
         "evidence_factory_manifest_path": str(_runtime_evidence_factory_manifest_path(resolved)),
         "replay_readiness_report_path": str(_runtime_replay_readiness_report_path(resolved)),
+        "replay_corpus_export_path": str(_runtime_replay_corpus_export_path(resolved)),
+        "optimizer_snapshot_path": str(_runtime_optimizer_snapshot_path(resolved)),
+        "harness_candidate_report_path": str(_runtime_harness_candidate_report_path(resolved)),
         "mac_studio_day_one_handoff_path": str(_runtime_mac_studio_day_one_handoff_path(resolved)),
         "data_dir": resolved.data_dir,
         "skills_dir": resolved.skills_dir,
@@ -1419,6 +1790,10 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
             "research_cron_proof": _command_string(resolved, "--research-cron-proof", root),
             "evidence_factory": _command_string(resolved, "--evidence-factory", root),
             "replay_readiness_report": _command_string(resolved, "--replay-readiness-report", root),
+            "export_replay_corpus": _command_string(resolved, "--export-replay-corpus", root),
+            "optimizer_snapshot": _command_string(resolved, "--optimizer-snapshot", root),
+            "analyze_harness_candidates": _command_string(resolved, "--analyze-harness-candidates", root),
+            "propose_best_harness_candidate": _command_string(resolved, "--propose-best-harness-candidate", root),
             "mac_studio_day_one": _command_string(resolved, "--mac-studio-day-one", root),
             "milestone_status": _command_string(resolved, "--milestone-status", root),
             "workspace_overview": _command_string(resolved, "--workspace-overview", root),
@@ -1447,6 +1822,15 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
     _write_launcher(launcher_paths["research_cron_proof"], resolved, root, "--research-cron-proof")
     _write_launcher(launcher_paths["evidence_factory"], resolved, root, "--evidence-factory")
     _write_launcher(launcher_paths["replay_readiness_report"], resolved, root, "--replay-readiness-report")
+    _write_launcher(launcher_paths["export_replay_corpus"], resolved, root, "--export-replay-corpus")
+    _write_launcher(launcher_paths["optimizer_snapshot"], resolved, root, "--optimizer-snapshot")
+    _write_launcher(launcher_paths["analyze_harness_candidates"], resolved, root, "--analyze-harness-candidates")
+    _write_launcher(
+        launcher_paths["propose_best_harness_candidate"],
+        resolved,
+        root,
+        "--propose-best-harness-candidate",
+    )
     _write_launcher(launcher_paths["mac_studio_day_one"], resolved, root, "--mac-studio-day-one")
     _write_launcher(launcher_paths["milestone_status"], resolved, root, "--milestone-status")
     _write_launcher(launcher_paths["workspace_overview"], resolved, root, "--workspace-overview")
@@ -2499,6 +2883,9 @@ def workspace_overview(config: IntegrationConfig | None = None) -> dict[str, Any
         "harness_frontier": operator.harness_frontier(limit=5),
         "replay_readiness": health["harness_variants"]["execution_traces"]["replay_readiness"],
         "replay_readiness_report_path": str(_runtime_replay_readiness_report_path(resolved)),
+        "replay_corpus_export_path": str(_runtime_replay_corpus_export_path(resolved)),
+        "optimizer_snapshot_path": str(_runtime_optimizer_snapshot_path(resolved)),
+        "harness_candidate_report_path": str(_runtime_harness_candidate_report_path(resolved)),
         "proxy_allowlist_path": str(_runtime_proxy_allowlist_path(resolved)),
         "proxy_audit_log_path": str(_runtime_proxy_audit_log_path(resolved)),
         "milestone_health": evaluate_milestone_status(resolved, db_manager=db),
@@ -3001,6 +3388,222 @@ def _run_evidence_invalid_opportunity_transition(
         db.close_all()
 
 
+def _run_evidence_missing_brief_route(
+    config: IntegrationConfig,
+    *,
+    cycle_index: int,
+) -> EvidenceScenarioResult:
+    from skills.db_manager import DatabaseManager
+    from skills.strategic_memory.skill import StrategicMemorySkill
+
+    db = DatabaseManager(config.data_dir)
+    steps: list[ExecutionTraceStep] = []
+    issues: list[str] = []
+    blocked = False
+    error_message = ""
+    missing_brief_id = f"missing-brief-{cycle_index}"
+    try:
+        memory = StrategicMemorySkill(db)
+        try:
+            memory.route_brief(missing_brief_id)
+            issues.append("missing brief route unexpectedly succeeded")
+        except KeyError as exc:
+            blocked = True
+            error_message = str(exc)
+            steps.append(_scenario_step(1, "strategic_memory.route_brief", {"blocked": True, "error": error_message}))
+        details = {
+            "brief_id": missing_brief_id,
+            "blocked": blocked,
+            "error": error_message,
+        }
+        scenario_ok = blocked and not issues
+        trace_id = _log_evidence_scenario_trace(
+            config,
+            scenario_id="missing_brief_route",
+            cycle_index=cycle_index,
+            classification="known_bad",
+            scenario_ok=scenario_ok,
+            steps=steps,
+            details=details,
+            issues=issues,
+        )
+        return EvidenceScenarioResult(
+            scenario_id="missing_brief_route",
+            cycle_index=cycle_index,
+            classification="known_bad",
+            ok=scenario_ok,
+            trace_id=trace_id,
+            produced_skill_families=["strategic_memory"],
+            issues=issues,
+            details=details,
+        )
+    finally:
+        db.close_all()
+
+
+def _run_evidence_council_invalid_decision_type(
+    config: IntegrationConfig,
+    runtime: HermesToolRegistry,
+    *,
+    cycle_index: int,
+) -> EvidenceScenarioResult:
+    from skills.council.skill import CouncilSkill
+    from skills.db_manager import DatabaseManager
+
+    db = DatabaseManager(config.data_dir)
+    steps: list[ExecutionTraceStep] = []
+    issues: list[str] = []
+    blocked = False
+    error_message = ""
+    try:
+        council = CouncilSkill(runtime, db)
+        try:
+            council.deliberate(
+                "not_a_real_decision_type",
+                f"evidence-council-invalid-{cycle_index}",
+                "Known-bad evidence for invalid council decision type.",
+            )
+            issues.append("invalid council decision type unexpectedly succeeded")
+        except ValueError as exc:
+            blocked = True
+            error_message = str(exc)
+            steps.append(_scenario_step(1, "council.deliberate", {"blocked": True, "error": error_message}))
+        details = {
+            "decision_type": "not_a_real_decision_type",
+            "blocked": blocked,
+            "error": error_message,
+        }
+        scenario_ok = blocked and not issues
+        trace_id = _log_evidence_scenario_trace(
+            config,
+            scenario_id="council_invalid_decision_type",
+            cycle_index=cycle_index,
+            classification="known_bad",
+            scenario_ok=scenario_ok,
+            steps=steps,
+            details=details,
+            issues=issues,
+        )
+        return EvidenceScenarioResult(
+            scenario_id="council_invalid_decision_type",
+            cycle_index=cycle_index,
+            classification="known_bad",
+            ok=scenario_ok,
+            trace_id=trace_id,
+            produced_skill_families=["council"],
+            issues=issues,
+            details=details,
+        )
+    finally:
+        db.close_all()
+
+
+def _run_evidence_financial_g3_denial(
+    config: IntegrationConfig,
+    *,
+    cycle_index: int,
+) -> EvidenceScenarioResult:
+    from skills.db_manager import DatabaseManager
+    from skills.financial_router.skill import FinancialRouterSkill
+
+    db = DatabaseManager(config.data_dir)
+    steps: list[ExecutionTraceStep] = []
+    issues: list[str] = []
+    denied = False
+    try:
+        router = FinancialRouterSkill(db)
+        decision = router.route(
+            TaskMetadata(
+                task_id=f"evidence-g3-deny-{cycle_index}",
+                task_type="analysis",
+                required_capability="reasoning",
+                quality_threshold=0.92,
+                estimated_task_value_usd=120.0,
+                project_id=f"project-g3-deny-{cycle_index}",
+                idempotency_key=f"corr-g3-deny-{cycle_index}",
+                is_operating_phase=True,
+            ),
+            [ModelInfo("paid-frontier", "paid", True, 0.97, 0.005)],
+            BudgetState(
+                system_phase=SystemPhase.OPERATING,
+                project_cloud_spend_cap_usd=None,
+                project_cashflow_target_usd=5000.0,
+            ),
+            JWTClaims(session_id=f"session-g3-deny-{cycle_index}", max_api_spend_usd=10.0),
+        )
+        steps.append(
+            _scenario_step(
+                1,
+                "financial_router.route",
+                {
+                    "tier": decision.tier.value,
+                    "requires_operator_approval": decision.requires_operator_approval,
+                    "estimated_cost_usd": decision.estimated_cost_usd,
+                },
+            )
+        )
+        requests = router.list_g3_approval_requests(limit=5, status="PENDING")
+        matching = next(
+            (
+                item
+                for item in requests
+                if item["correlation_id"] == f"corr-g3-deny-{cycle_index}"
+            ),
+            None,
+        )
+        if matching is None:
+            issues.append("missing pending G3 request for denial scenario")
+            details = {
+                "correlation_id": f"corr-g3-deny-{cycle_index}",
+                "denied": False,
+            }
+        else:
+            reviewed = router.review_g3_approval_request(
+                matching["request_id"],
+                "DENY",
+                operator_notes="Evidence factory known-bad denial path.",
+            )
+            denied = reviewed["status"] == "DENIED"
+            steps.append(
+                _scenario_step(
+                    2,
+                    "financial_router.review_g3_approval_request",
+                    {"request_id": matching["request_id"], "status": reviewed["status"]},
+                )
+            )
+            if not denied:
+                issues.append("G3 denial did not persist DENIED status")
+            details = {
+                "correlation_id": matching["correlation_id"],
+                "request_id": matching["request_id"],
+                "status": reviewed["status"],
+                "denied": denied,
+            }
+        scenario_ok = denied and not issues
+        trace_id = _log_evidence_scenario_trace(
+            config,
+            scenario_id="financial_g3_denial",
+            cycle_index=cycle_index,
+            classification="known_bad",
+            scenario_ok=scenario_ok,
+            steps=steps,
+            details=details,
+            issues=issues,
+        )
+        return EvidenceScenarioResult(
+            scenario_id="financial_g3_denial",
+            cycle_index=cycle_index,
+            classification="known_bad",
+            ok=scenario_ok,
+            trace_id=trace_id,
+            produced_skill_families=["financial_router"],
+            issues=issues,
+            details=details,
+        )
+    finally:
+        db.close_all()
+
+
 def replay_readiness_report(
     config: IntegrationConfig | None = None,
     *,
@@ -3021,7 +3624,145 @@ def replay_readiness_report(
         "workspace_manifest_path": str(_runtime_workspace_manifest_path(resolved)),
         "evidence_factory_manifest_path": str(_runtime_evidence_factory_manifest_path(resolved)),
     }
+    payload["growth_plan"] = _replay_growth_plan(payload, config=resolved, repo_root=root)
     _write_replay_readiness_report_artifact(resolved, payload)
+    return payload
+
+
+def export_replay_corpus(
+    config: IntegrationConfig | None = None,
+    *,
+    repo_root: str | None = None,
+    limit: int = 200,
+    skill_name: str | None = None,
+) -> dict[str, Any]:
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    root = Path(repo_root).expanduser().resolve() if repo_root else _repo_root()
+    prepare_runtime_directories(resolved)
+    migrate_runtime_databases(resolved)
+    install_runtime_profile(resolved, repo_root=str(root))
+    manager = HarnessVariantManager(str(Path(resolved.data_dir) / "telemetry.db"))
+    export = manager.export_replay_corpus(limit=limit, skill_name=skill_name, activation_only=True)
+    payload = {
+        **export,
+        "artifact_path": str(_runtime_replay_corpus_export_path(resolved)),
+        "profile_manifest_path": str(_runtime_profile_manifest_path(resolved)),
+        "replay_readiness_report_path": str(_runtime_replay_readiness_report_path(resolved)),
+    }
+    _write_replay_corpus_export_artifact(resolved, payload)
+    return payload
+
+
+def optimizer_snapshot(
+    config: IntegrationConfig | None = None,
+    *,
+    repo_root: str | None = None,
+    corpus_limit: int = 100,
+    candidate_limit: int = 5,
+) -> dict[str, Any]:
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    root = Path(repo_root).expanduser().resolve() if repo_root else _repo_root()
+    prepare_runtime_directories(resolved)
+    migrate_runtime_databases(resolved)
+    install = install_runtime_profile(resolved, repo_root=str(root))
+    runtime = MockHermesRuntime(data_dir=resolved.data_dir)
+    doctor = doctor_runtime(runtime, config=resolved, bootstrap_if_needed=False)
+    manager = HarnessVariantManager(str(Path(resolved.data_dir) / "telemetry.db"))
+    replay_report = replay_readiness_report(config=resolved, repo_root=str(root))
+    corpus_export = manager.export_replay_corpus(limit=corpus_limit, activation_only=True)
+    candidate_report = manager.analyze_harness_candidates(limit=candidate_limit)
+    manifest = _read_json_yaml(_runtime_profile_manifest_path(resolved)) or {}
+    payload = {
+        "available": True,
+        "generated_at": _utc_now(),
+        "snapshot_status": "READY" if doctor.ok else "DOCTOR_WARNINGS",
+        "repo_root": str(root),
+        "profile_name": resolved.profile_name,
+        "environment": {
+            "platform": platform.platform(),
+            "python_version": platform.python_version(),
+            "python_executable": sys.executable,
+            "cwd": str(Path.cwd()),
+        },
+        "runtime_layout": {
+            "data_dir": resolved.data_dir,
+            "skills_dir": resolved.skills_dir,
+            "checkpoints_dir": resolved.checkpoints_dir,
+            "alerts_dir": resolved.alerts_dir,
+            "profile_dir": install.profile_dir,
+            "logs_dir": str(_runtime_logs_dir(resolved)),
+        },
+        "doctor": {
+            "ok": doctor.ok,
+            "missing_items": doctor.missing_items,
+            "registered_tools": doctor.registered_tools,
+            "database_status": doctor.database_status,
+            "path_status": doctor.path_status,
+            "profile_validation": {
+                "ok": doctor.profile_validation.ok,
+                "issues": doctor.profile_validation.issues,
+            },
+        },
+        "telemetry": {
+            "replay_readiness": replay_report,
+            "corpus_export_summary": {
+                "trace_count": corpus_export["trace_count"],
+                "eligible_trace_count": corpus_export["eligible_trace_count"],
+                "known_bad_trace_count": corpus_export["known_bad_trace_count"],
+                "distinct_skill_count": corpus_export["distinct_skill_count"],
+            },
+            "candidate_count": candidate_report["candidate_count"],
+        },
+        "artifacts": {
+            "profile_manifest_path": str(_runtime_profile_manifest_path(resolved)),
+            "workspace_manifest_path": str(_runtime_workspace_manifest_path(resolved)),
+            "gateway_manifest_path": str(_runtime_gateway_manifest_path(resolved)),
+            "replay_readiness_report_path": str(_runtime_replay_readiness_report_path(resolved)),
+            "replay_corpus_export_path": str(_runtime_replay_corpus_export_path(resolved)),
+            "optimizer_snapshot_path": str(_runtime_optimizer_snapshot_path(resolved)),
+            "harness_candidate_report_path": str(_runtime_harness_candidate_report_path(resolved)),
+        },
+        "commands": manifest.get("commands", {}),
+        "candidate_headlines": [
+            {
+                "candidate_rank": item["candidate_rank"],
+                "skill_name": item["skill_name"],
+                "candidate_type": item["candidate_type"],
+                "opportunity_score": item["opportunity_score"],
+            }
+            for item in candidate_report.get("candidates", [])
+        ],
+    }
+    _write_optimizer_snapshot_artifact(resolved, payload)
+    return payload
+
+
+def analyze_harness_candidates(
+    config: IntegrationConfig | None = None,
+    *,
+    repo_root: str | None = None,
+    skill_name: str | None = None,
+    limit: int = 5,
+    propose_best: bool = False,
+) -> dict[str, Any]:
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    root = Path(repo_root).expanduser().resolve() if repo_root else _repo_root()
+    prepare_runtime_directories(resolved)
+    migrate_runtime_databases(resolved)
+    install_runtime_profile(resolved, repo_root=str(root))
+    manager = HarnessVariantManager(str(Path(resolved.data_dir) / "telemetry.db"))
+    analysis = manager.analyze_harness_candidates(skill_name=skill_name, limit=limit)
+    payload = {
+        **analysis,
+        "artifact_path": str(_runtime_harness_candidate_report_path(resolved)),
+        "profile_manifest_path": str(_runtime_profile_manifest_path(resolved)),
+        "replay_corpus_export_path": str(_runtime_replay_corpus_export_path(resolved)),
+        "optimizer_snapshot_path": str(_runtime_optimizer_snapshot_path(resolved)),
+    }
+    if propose_best:
+        proposal = manager.propose_best_variant_from_replay(skill_name=skill_name)
+        payload["proposal"] = proposal
+    _write_harness_candidate_report_artifact(resolved, payload)
     return payload
 
 
@@ -3075,6 +3816,43 @@ def _evidence_progress_projection(
         "blocked_metrics_without_growth": blocked_metrics,
         "metrics": projections,
     }
+
+
+def _readiness_actions(
+    *,
+    config: IntegrationConfig,
+    repo_root: Path,
+    hermes_installed: bool,
+    profile_listed: bool,
+    missing_seed_tools: Sequence[str],
+    failed_config_checks: Sequence[str],
+    doctor_ok: bool,
+    contract_ok: bool,
+    cli_smoke_attempted: bool,
+    cli_smoke_ok: bool,
+    replay_report: dict[str, Any],
+) -> list[str]:
+    actions: list[str] = []
+    readiness_command = _command_string(config, "--readiness", repo_root)
+    bootstrap_command = _command_string(config, "--bootstrap-stack", repo_root)
+    bounded_evidence_command = (
+        _command_string(config, "--evidence-factory", repo_root)
+        + " --until-replay-ready"
+        + f" --evidence-cycles {DEFAULT_EVIDENCE_CYCLES}"
+    )
+    if not doctor_ok or not contract_ok:
+        actions.append(f"Rehearse the repo-local launch stack and fix doctor/contract drift: `{bootstrap_command}`")
+    if replay_report.get("status") != "READY_FOR_BROADER_REPLAY":
+        actions.append(f"Grow the replay corpus before live promotion: `{bounded_evidence_command}`")
+    if not hermes_installed:
+        actions.append(f"Install Hermes Agent v0.10.0+ and rerun live readiness: `{readiness_command}`")
+    elif not profile_listed or missing_seed_tools or failed_config_checks:
+        actions.append("Repair the Hermes profile/tool/config surface, then rerun the readiness check.")
+    if cli_smoke_attempted and not cli_smoke_ok:
+        actions.append("Restore CLI smoke evidence so both STEP_OUTCOME rows and runtime log traces appear.")
+    if not actions:
+        actions.append("Proceed to Mac Studio Day 1: run live readiness, then execute milestone validation M1 through M5.")
+    return actions
 
 
 def run_evidence_factory(
@@ -3172,9 +3950,12 @@ def run_evidence_factory(
 
         scenario_results.append(_run_evidence_research_to_opportunity_flow(resolved, registry, cycle_index=cycle_index))
         scenario_results.append(_run_evidence_opportunity_project_flow(resolved, cycle_index=cycle_index))
+        scenario_results.append(_run_evidence_missing_brief_route(resolved, cycle_index=cycle_index))
         scenario_results.append(_run_evidence_invalid_brief_completion(resolved, cycle_index=cycle_index))
         scenario_results.append(_run_evidence_archived_standing_brief_queue(resolved, registry, cycle_index=cycle_index))
         scenario_results.append(_run_evidence_invalid_opportunity_transition(resolved, cycle_index=cycle_index))
+        scenario_results.append(_run_evidence_council_invalid_decision_type(resolved, registry, cycle_index=cycle_index))
+        scenario_results.append(_run_evidence_financial_g3_denial(resolved, cycle_index=cycle_index))
         if until_replay_ready:
             current_report = manager.replay_readiness_report(limit=report_limit)
             if current_report.get("status") == "READY_FOR_BROADER_REPLAY":
@@ -3224,6 +4005,8 @@ def run_evidence_factory(
         "generated_activation_trace_count": generated_activation_trace_count,
         "generated_known_bad_trace_count": generated_known_bad_trace_count,
         "progress_projection": progress_projection,
+        "scenario_summary": _scenario_results_summary(scenario_results),
+        "growth_plan": after_report.get("growth_plan"),
         "report_path": result.report_path,
     }
     _write_json_yaml(_runtime_evidence_factory_manifest_path(resolved), evidence_manifest)
@@ -3304,6 +4087,7 @@ def assess_hermes_readiness(
     doctor = doctor_runtime(registry, config=resolved, bootstrap_if_needed=False)
     checkpoint_backup_path = _snapshot_runtime_data(resolved)
     profile_validation = _validate_profile_artifacts(resolved, repo_root_path)
+    replay_report = replay_readiness_report(config=resolved, repo_root=str(repo_root_path))
 
     profile_dir = _runtime_profile_dir(resolved)
     profile_config = _runtime_profile_config_path(resolved)
@@ -3450,48 +4234,62 @@ def assess_hermes_readiness(
                     parsed_config = None
             if parsed_config is not None:
                 config_status = contract.live_config_checks(parsed_config)
-        failed_config_checks = [name for name, ok in config_status.items() if not ok]
-        if failed_config_checks:
-            blocking_items.append(
-                "profile/config contract assertions failed: "
-                f"{', '.join(failed_config_checks)}"
-            )
+    failed_config_checks = [name for name, ok in config_status.items() if not ok]
+    if failed_config_checks:
+        blocking_items.append(
+            "profile/config contract assertions failed: "
+            f"{', '.join(failed_config_checks)}"
+        )
 
-        if run_cli_smoke:
-            cli_smoke_attempted = True
-            cli_smoke_marker = f"hermes-readiness-{generate_uuid_v7()}"
-            query = smoke_query or _default_cli_smoke_query(cli_smoke_marker)
-            step_count_before = _step_outcome_count(resolved)
-            log_state_before = _capture_log_state(logs_dir)
-            smoke_result = _run_command_candidates(
-                runner,
-                [
-                    (hermes_binary, "--profile", resolved.profile_name, "chat", "-q", query),
-                    (hermes_binary, "-p", resolved.profile_name, "chat", "-q", query),
-                    (hermes_binary, "chat", "-q", query),
-                ],
+    if run_cli_smoke and hermes_installed:
+        cli_smoke_attempted = True
+        cli_smoke_marker = f"hermes-readiness-{generate_uuid_v7()}"
+        query = smoke_query or _default_cli_smoke_query(cli_smoke_marker)
+        step_count_before = _step_outcome_count(resolved)
+        log_state_before = _capture_log_state(logs_dir)
+        smoke_result = _run_command_candidates(
+            runner,
+            [
+                (hermes_binary, "--profile", resolved.profile_name, "chat", "-q", query),
+                (hermes_binary, "-p", resolved.profile_name, "chat", "-q", query),
+                (hermes_binary, "chat", "-q", query),
+            ],
+        )
+        cli_smoke_output = smoke_result.stdout or smoke_result.stderr or smoke_result.error
+        if not smoke_result.ok:
+            blocking_items.append(
+                f"CLI smoke command failed: {_format_probe_failure(smoke_result)}"
             )
-            cli_smoke_output = smoke_result.stdout or smoke_result.stderr or smoke_result.error
-            if not smoke_result.ok:
+        else:
+            time.sleep(0.05)
+            step_count_after = _step_outcome_count(resolved)
+            cli_smoke_step_outcomes_delta = max(0, step_count_after - step_count_before)
+            cli_smoke_log_trace = _log_trace_present(logs_dir, log_state_before, cli_smoke_marker)
+            missing_cli_evidence: list[str] = []
+            if cli_smoke_step_outcomes_delta < 1:
+                missing_cli_evidence.append("STEP_OUTCOME evidence")
+            if not cli_smoke_log_trace:
+                missing_cli_evidence.append("log trace evidence")
+            cli_smoke_ok = not missing_cli_evidence
+            if missing_cli_evidence:
                 blocking_items.append(
-                    f"CLI smoke command failed: {_format_probe_failure(smoke_result)}"
+                    "CLI smoke did not produce "
+                    f"{' and '.join(missing_cli_evidence)}."
                 )
-            else:
-                time.sleep(0.05)
-                step_count_after = _step_outcome_count(resolved)
-                cli_smoke_step_outcomes_delta = max(0, step_count_after - step_count_before)
-                cli_smoke_log_trace = _log_trace_present(logs_dir, log_state_before, cli_smoke_marker)
-                missing_cli_evidence: list[str] = []
-                if cli_smoke_step_outcomes_delta < 1:
-                    missing_cli_evidence.append("STEP_OUTCOME evidence")
-                if not cli_smoke_log_trace:
-                    missing_cli_evidence.append("log trace evidence")
-                cli_smoke_ok = not missing_cli_evidence
-                if missing_cli_evidence:
-                    blocking_items.append(
-                        "CLI smoke did not produce "
-                        f"{' and '.join(missing_cli_evidence)}."
-                    )
+
+    recommended_actions = _readiness_actions(
+        config=resolved,
+        repo_root=repo_root_path,
+        hermes_installed=hermes_installed,
+        profile_listed=profile_listed,
+        missing_seed_tools=[name for name, ok in seed_tool_status.items() if not ok],
+        failed_config_checks=failed_config_checks,
+        doctor_ok=doctor.ok,
+        contract_ok=contract_harness.ok,
+        cli_smoke_attempted=cli_smoke_attempted,
+        cli_smoke_ok=cli_smoke_ok,
+        replay_report=replay_report,
+    )
 
     return HermesReadinessResult(
         ok=not blocking_items,
@@ -3519,6 +4317,8 @@ def assess_hermes_readiness(
         install=install,
         doctor=doctor,
         contract_harness=contract_harness,
+        replay_report=replay_report,
+        recommended_actions=recommended_actions,
     )
 
 
@@ -4190,6 +4990,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--research-cron-proof", action="store_true", help="Run the standing-brief cron proof")
     parser.add_argument("--evidence-factory", action="store_true", help="Run the production evidence batch across positive and known-bad scenarios")
     parser.add_argument("--replay-readiness-report", action="store_true", help="Print the detailed replay-readiness coverage report")
+    parser.add_argument("--export-replay-corpus", action="store_true", help="Export activation-relevant source traces for offline harness search")
+    parser.add_argument("--optimizer-snapshot", action="store_true", help="Capture a runtime/bootstrap snapshot for offline harness analysis")
+    parser.add_argument("--analyze-harness-candidates", action="store_true", help="Rank constrained harness candidates from replay evidence")
+    parser.add_argument("--propose-best-harness-candidate", action="store_true", help="Create one constrained harness proposal from the top replay candidate")
     parser.add_argument("--mac-studio-day-one", action="store_true", help="Generate the one-command Mac Studio rehearsal and handoff package")
     parser.add_argument("--milestone-status", action="store_true", help="Print machine-readable milestone build/proof status")
     parser.add_argument("--workspace-overview", action="store_true", help="Print a Hermes Workspace-oriented operator snapshot")
@@ -4204,8 +5008,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--smoke-query", default=None, help="Override the readiness chat prompt used by --readiness")
     parser.add_argument("--model-name", default="local-default")
     parser.add_argument("--repo-root", default=None, help="Override the repository root used for profile installation")
+    parser.add_argument("--skill-name", default=None, help="Optional skill filter for corpus export and harness candidate analysis")
     parser.add_argument("--task-id", default="stage0-operator-workflow")
     parser.add_argument("--title", default="Operator workflow smoke test")
+    parser.add_argument("--corpus-limit", type=int, default=200, help="How many source traces to export into the replay corpus artifact")
     parser.add_argument("--evidence-cycles", type=int, default=DEFAULT_EVIDENCE_CYCLES, help="How many times to run the evidence scenario suite")
     parser.add_argument("--until-replay-ready", action="store_true", help="For --evidence-factory, stop early if broader replay readiness is reached")
     parser.add_argument("--report-limit", type=int, default=DEFAULT_REPLAY_REPORT_LIMIT, help="How many coverage rows to include in replay-readiness reports")
@@ -4289,6 +5095,16 @@ def _main_impl(
         print(f"doctor_missing={','.join(result.doctor.missing_items) if result.doctor.missing_items else 'none'}")
         print(f"contract_harness={'ok' if result.contract_harness.ok else 'failed'}")
         print(f"contract_trace_id={result.contract_harness.trace_id or 'none'}")
+        print(
+            "replay="
+            f"{result.replay_report['eligible_source_traces']}/"
+            f"{result.replay_report['minimum_eligible_traces']} eligible,"
+            f"{result.replay_report['known_bad_source_traces']}/"
+            f"{result.replay_report['minimum_known_bad_traces']} known_bad,"
+            f"{result.replay_report['distinct_skill_count']}/"
+            f"{result.replay_report['minimum_distinct_skills']} skills"
+        )
+        print(f"next_actions={' | '.join(result.recommended_actions) if result.recommended_actions else 'none'}")
         print(f"blocking={'; '.join(result.blocking_items) if result.blocking_items else 'none'}")
         print(f"drift={'; '.join(result.drift_items) if result.drift_items else 'none'}")
         print(f"tools={','.join(result.live_tools) if result.live_tools else 'none'}")
@@ -4382,11 +5198,45 @@ def _main_impl(
                 else "unknown"
             )
         )
+        growth_plan = result.replay_report.get("growth_plan", {})
+        next_focus = ", ".join(item["scenario_id"] for item in growth_plan.get("recommended_scenarios", []))
+        print(f"next_focus={next_focus or 'none'}")
         print(f"report_path={result.report_path}")
         return 0 if result.ok else 1
 
     if args.replay_readiness_report:
         print(json.dumps(replay_readiness_report(config, repo_root=args.repo_root, limit=args.report_limit), indent=2, sort_keys=True))
+        return 0
+
+    if args.export_replay_corpus:
+        payload = export_replay_corpus(
+            config,
+            repo_root=args.repo_root,
+            limit=args.corpus_limit,
+            skill_name=args.skill_name,
+        )
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    if args.optimizer_snapshot:
+        payload = optimizer_snapshot(
+            config,
+            repo_root=args.repo_root,
+            corpus_limit=args.corpus_limit,
+            candidate_limit=args.report_limit,
+        )
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    if args.analyze_harness_candidates or args.propose_best_harness_candidate:
+        payload = analyze_harness_candidates(
+            config,
+            repo_root=args.repo_root,
+            skill_name=args.skill_name,
+            limit=args.report_limit,
+            propose_best=args.propose_best_harness_candidate,
+        )
+        print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
 
     if args.mac_studio_day_one:
