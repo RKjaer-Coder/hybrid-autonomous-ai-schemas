@@ -120,11 +120,31 @@ def generate_m2_test_set(seed: int = 42) -> dict:
         "memory_roundtrips": generate_memory_roundtrips(50, seed),
         "relevance_queries": generate_relevance_queries(10, seed),
         "wal_recovery_nodes": generate_wal_recovery_test(10, seed),
+        "proxy_requests": {
+            "allowed": [
+                {
+                    "request_id": f"allow-{index + 1}",
+                    "url": f"http://localhost:8080/healthz?probe={index + 1}",
+                    "expected_status": 200,
+                }
+                for index in range(5)
+            ],
+            "blocked": [
+                {
+                    "request_id": f"deny-{index + 1}",
+                    "url": f"http://blocked.example:{9000 + index}/collect?probe={index + 1}",
+                    "expected_status": 403,
+                }
+                for index in range(5)
+            ],
+        },
         "eval_criteria": {
             "max_provenance_deviations": 0,
             "max_wal_corruption_count": 0,
             "max_relevance_false_positive_rate": 0.10,
             "max_relevance_false_negative_rate": 0.10,
             "latency_p95_ms": 500,
+            "required_allowed_proxy_requests": 5,
+            "required_blocked_proxy_requests": 5,
         },
     }

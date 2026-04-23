@@ -11,6 +11,7 @@ from skills.db_manager import CANONICAL_DATABASES, DatabaseManager
 
 SUPPORT_ARTIFACT_FILENAMES = {
     "network_controls": "network_controls.json",
+    "proxy_allowlist": "proxy_allowlist.json",
     "gateway_manifest": "gateway_manifest.json",
     "workspace_manifest": "workspace_manifest.json",
     "operator_validation_checklist": "operator_validation_checklist.md",
@@ -39,6 +40,8 @@ def _runtime_launcher_paths(config: IntegrationConfig) -> dict[str, Path]:
         "bootstrap_stack": bin_dir / "bootstrap_stack.sh",
         "doctor": bin_dir / "doctor_runtime.sh",
         "readiness": bin_dir / "readiness_runtime.sh",
+        "start_proxy": bin_dir / "start_local_forward_proxy.sh",
+        "proxy_self_test": bin_dir / "proxy_self_test.sh",
         "operator_workflow": bin_dir / "run_operator_workflow.sh",
         "contract_harness": bin_dir / "contract_harness_runtime.sh",
         "task_loop_proof": bin_dir / "task_loop_proof.sh",
@@ -179,18 +182,23 @@ def evaluate_milestone_status(
     )
 
     m2_blockers = [name for name, ok in common_paths.items() if not ok]
-    for name in ("network_controls", "gateway_manifest"):
+    for name in ("network_controls", "proxy_allowlist", "gateway_manifest"):
         if not artifacts[name].is_file():
             m2_blockers.append(name)
+    if not launchers["start_proxy"].is_file():
+        m2_blockers.append("start_proxy_launcher")
+    if not launchers["proxy_self_test"].is_file():
+        m2_blockers.append("proxy_self_test_launcher")
     m2 = _milestone_record(
         "M2",
         implemented=not m2_blockers,
-        proof_status="PASS" if artifacts["network_controls"].is_file() else "NOT_RUN",
+        proof_status="PASS" if trace_roles.get("proxy_self_test", 0) > 0 else "NOT_RUN",
         blockers=m2_blockers,
         evidence={
             "proxy_bind_url": resolved.proxy_bind_url,
             "allowlist_domains": list(resolved.outbound_allowlist_domains),
             "allowlist_ports": list(resolved.outbound_allowlist_ports),
+            "proxy_self_test_traces": trace_roles.get("proxy_self_test", 0),
             "artifact_paths": {name: str(path) for name, path in artifacts.items()},
         },
     )

@@ -27,6 +27,7 @@ from skills.runtime import (
     replay_readiness_report,
     run_research_cron_proof,
     run_evidence_factory,
+    run_proxy_self_test,
     run_task_loop_proof,
     run_operator_workflow,
 )
@@ -166,6 +167,7 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
     assert manifest["profile_config_path"] == str(profile_config_path)
     assert manifest["spec_profile_path"] == str(spec_profile_path)
     assert Path(manifest["network_controls_path"]).is_file()
+    assert Path(manifest["proxy_allowlist_path"]).is_file()
     assert Path(manifest["gateway_manifest_path"]).is_file()
     assert Path(manifest["workspace_manifest_path"]).is_file()
     assert Path(manifest["operator_validation_checklist_path"]).is_file()
@@ -175,7 +177,7 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
     assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["profile_name"] == "hybrid-test"
     assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["repo_contract_version"] == 1
     assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["routing"]["max_api_spend_usd"] == 0.0
-    assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["network_controls"]["proxy_bind_url"] == "http://127.0.0.1:8877"
+    assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["network_controls"]["proxy_bind_url"] == "http://127.0.0.1:18080"
     assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["workspace"]["enabled"] is True
     assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["gateway"]["expected_tools"] == [
         "web_search",
@@ -195,8 +197,11 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
     assert profile_config["approvals"]["mode"] == "manual"
     assert spec_profile["profile"] == "hybrid-test"
     assert spec_profile["limits"]["max_api_spend_usd"] == 0.0
-    assert spec_profile["network_controls"]["proxy_bind_url"] == "http://127.0.0.1:8877"
+    assert spec_profile["network_controls"]["proxy_bind_url"] == "http://127.0.0.1:18080"
     assert "readiness" in manifest["commands"]
+    assert manifest["commands"]["start_proxy"] == result.launcher_paths["start_proxy"]
+    assert "start_proxy" in manifest["commands"]
+    assert "proxy_self_test" in manifest["commands"]
     assert "contract_harness" in manifest["commands"]
     assert "bootstrap_stack" in manifest["commands"]
     assert "task_loop_proof" in manifest["commands"]
@@ -231,10 +236,37 @@ def test_doctor_runtime_reports_ready_runtime(tmp_path):
     assert all(result.database_status.values())
     assert result.profile_validation.ok is True
     assert result.path_status["readiness_launcher"] is True
+    assert result.path_status["start_proxy_launcher"] is True
+    assert result.path_status["proxy_self_test_launcher"] is True
     assert result.path_status["contract_harness_launcher"] is True
     assert result.path_status["evidence_factory_launcher"] is True
     assert result.path_status["replay_readiness_report_launcher"] is True
     assert result.path_status["mac_studio_day_one_launcher"] is True
+
+
+def test_run_proxy_self_test_exercises_real_allow_and_deny_paths(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+
+    result = run_proxy_self_test(cfg)
+
+    assert result.ok is True
+    assert result.proxy_url is not None
+    assert result.allowed_request_count == 5
+    assert result.blocked_request_count == 5
+    assert Path(result.audit_log_path).is_file()
+    assert result.trace_id is not None
+
+    with sqlite3.connect(tmp_path / "data" / "telemetry.db") as conn:
+        trace_row = conn.execute(
+            "SELECT role, judge_verdict FROM execution_traces WHERE trace_id = ?",
+            (result.trace_id,),
+        ).fetchone()
+    assert trace_row == ("proxy_self_test", "PASS")
 
 
 def test_exercise_hermes_contract_runs_full_lifecycle_and_logs_trace(tmp_path):
@@ -599,7 +631,9 @@ def test_bootstrap_stack_returns_machine_readable_milestone_status(tmp_path):
     result = bootstrap_stack(config=cfg, repo_root=str(tmp_path), tool_registry=rt)
 
     assert result.ok is True
+    assert result.proxy_self_test.ok is True
     assert result.milestone_status["milestones"]["M2"]["implemented"] is True
+    assert result.milestone_status["milestones"]["M2"]["proof_status"] == "PASS"
     assert result.milestone_status["milestones"]["M3"]["proof_status"] == "PASS"
     assert result.milestone_status["milestones"]["M5"]["proof_status"] == "PASS"
 
@@ -709,16 +743,25 @@ def test_run_evidence_factory_generates_cross_skill_evidence(tmp_path):
     )
 
     assert result.ok is True
+    assert result.requested_cycles == 1
+    assert result.cycles == 1
+    assert result.until_replay_ready is False
+    assert result.stopped_reason == "completed_requested_cycles"
     assert result.generated_trace_count > 0
     assert result.generated_activation_trace_count > 0
     assert result.generated_known_bad_trace_count > 0
     assert Path(result.report_path).is_file()
     assert any(item.scenario_id == "research_to_opportunity_flow" and item.ok for item in result.scenario_results)
     assert any(item.scenario_id == "invalid_brief_completion" and item.ok for item in result.scenario_results)
+    assert result.before_replay_report["eligible_source_traces"] == 0
     readiness = result.replay_report
     assert readiness["eligible_source_traces"] > 0
     assert readiness["known_bad_source_traces"] > 0
     assert readiness["distinct_skill_count"] >= 3
+    projection = result.progress_projection
+    assert projection["ready_for_broader_replay"] is False
+    assert projection["executed_cycles"] == 1
+    assert len(projection["metrics"]) == 3
 
     with sqlite3.connect(tmp_path / "data" / "telemetry.db") as conn:
         role_rows = conn.execute(
@@ -731,6 +774,32 @@ def test_run_evidence_factory_generates_cross_skill_evidence(tmp_path):
         ).fetchall()
     assert ("evidence_research_to_opportunity_flow", "PASS") in role_rows
     assert ("evidence_invalid_brief_completion", "FAIL") in role_rows
+
+
+def test_run_evidence_factory_until_replay_ready_uses_cycle_cap_when_threshold_not_met(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+    runtime = MockHermesRuntime(data_dir=str(tmp_path / "data"))
+
+    result = run_evidence_factory(
+        config=cfg,
+        repo_root=str(tmp_path),
+        tool_registry=runtime,
+        cycles=2,
+        report_limit=8,
+        until_replay_ready=True,
+    )
+
+    assert result.ok is True
+    assert result.requested_cycles == 2
+    assert result.cycles == 2
+    assert result.until_replay_ready is True
+    assert result.stopped_reason == "max_cycles_reached"
+    assert result.progress_projection["executed_cycles"] == 2
 
 
 def test_build_mac_studio_day_one_handoff_writes_handoff_bundle(tmp_path):
@@ -756,6 +825,8 @@ def test_build_mac_studio_day_one_handoff_writes_handoff_bundle(tmp_path):
     assert Path(result.handoff_path).is_file()
     handoff_text = Path(result.handoff_path).read_text(encoding="utf-8")
     assert "Mac Studio Day-One Handoff" in handoff_text
+    assert "start_local_forward_proxy.sh" in handoff_text
+    assert "--until-replay-ready" in handoff_text
     assert "--bootstrap-stack" in handoff_text
     assert "--evidence-factory" in handoff_text
 

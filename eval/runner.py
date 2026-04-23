@@ -65,6 +65,8 @@ class EvalBackend(ABC):
     @abstractmethod
     def memory_reopen(self) -> None: ...
     @abstractmethod
+    def proxy_request(self, request: dict) -> dict: ...
+    @abstractmethod
     def execute_task(self, scenario: dict) -> dict: ...
     @abstractmethod
     def inject_failure(self, scenario: dict) -> None: ...
@@ -219,6 +221,10 @@ class MockBackend(EvalBackend):
 
     def memory_reopen(self) -> None:
         return None
+
+    def proxy_request(self, request: dict) -> dict:
+        expected_status = int(request.get("expected_status", 200))
+        return {"status_code": expected_status, "latency_ms": 75}
 
     def execute_task(self, scenario: dict) -> dict:
         chain_id = scenario["scenario_id"]

@@ -6,6 +6,9 @@ system built on Hermes Agent.
 The repo is pre-live: the codebase is real, tested, and already carries the
 core runtime, governance, routing, council, research, operator, and replay
 substrates, but live Hermes attachment on the target machine is still pending.
+The launch posture is prebuilt-first: Hermes on the Mac Studio should attach
+to an already-built system, validate it, and operate it rather than build the
+application logic from scratch.
 
 ## Current State
 
@@ -20,6 +23,8 @@ substrates, but live Hermes attachment on the target machine is still pending.
 - Research, strategic-memory, opportunity, operator, and observability skills
 - Repo-local Hermes contract harness, deterministic operator workflow proof,
   and readiness/doctor flows
+- Standalone local forward proxy with generated allowlist artifact, audit log,
+  launcher, and repo-local `5 allow / 5 deny` self-test
 - Replayable `execution_traces` across runtime, council, research,
   opportunity, and strategic-memory routing/writeback paths
 - Production evidence factory for repeated multi-skill corpus growth plus
@@ -84,10 +89,23 @@ Run the deterministic runtime proof:
 python3 -m skills.runtime --operator-workflow
 ```
 
+Run the standalone proxy validation:
+
+```bash
+python3 -m skills.runtime --proxy-self-test
+```
+
 Grow the replay corpus with production scenarios:
 
 ```bash
 python3 -m skills.runtime --evidence-factory
+```
+
+Run a bounded replay-growth pass that stops early if the activation threshold
+is reached:
+
+```bash
+python3 -m skills.runtime --evidence-factory --until-replay-ready --evidence-cycles 5
 ```
 
 Print the detailed replay-readiness coverage report:
@@ -115,6 +133,8 @@ python3 -m eval.runner --milestone M1
 python3 -m eval.runner --milestone M4
 python3 -m eval.runner --milestone M5
 python3 -m skills.runtime --doctor
+python3 -m skills.runtime --proxy-self-test
+python3 -m skills.runtime --evidence-factory --until-replay-ready --evidence-cycles 5
 python3 -m skills.runtime --bootstrap-live
 python3 -m skills.runtime --mac-studio-day-one
 ```

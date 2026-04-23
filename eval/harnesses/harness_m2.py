@@ -12,6 +12,7 @@ class M2Harness:
         rt = self.evaluate_roundtrips(backend, data["memory_roundtrips"])
         rel = self.evaluate_relevance(backend, data["relevance_queries"])
         wal = self.evaluate_wal_recovery(backend, data["wal_recovery_nodes"])
+        proxy = self.evaluate_proxy_validation(backend, data["proxy_requests"])
         latency = self.evaluate_latency(backend, rt["latencies"] + rel["latencies"])
         c = data["eval_criteria"]
         status = (
@@ -20,6 +21,8 @@ class M2Harness:
             and rel["fp_rate"] <= c["max_relevance_false_positive_rate"]
             and rel["fn_rate"] <= c["max_relevance_false_negative_rate"]
             and latency["p95"] <= c["latency_p95_ms"]
+            and proxy["allowed_success_count"] >= c["required_allowed_proxy_requests"]
+            and proxy["blocked_reject_count"] >= c["required_blocked_proxy_requests"]
         )
         return {
             "status": "PASS" if status else "FAIL",
@@ -27,6 +30,8 @@ class M2Harness:
             "wal_recovery_success": wal["wal_recovery_success"],
             "relevance_fp_rate": rel["fp_rate"],
             "relevance_fn_rate": rel["fn_rate"],
+            "proxy_allowed_success_count": proxy["allowed_success_count"],
+            "proxy_blocked_reject_count": proxy["blocked_reject_count"],
             "latency_p50_ms": latency["p50"],
             "latency_p95_ms": latency["p95"],
             "latency_p99_ms": latency["p99"],
@@ -86,6 +91,22 @@ class M2Harness:
         backend.memory_reopen()
         ok = all(backend.memory_read({"query": n["node_id"]})["results"] for n in wal_nodes)
         return {"wal_recovery_success": ok}
+
+    def evaluate_proxy_validation(self, backend, proxy_requests) -> dict:
+        allowed_success = 0
+        blocked_reject = 0
+        for request in proxy_requests["allowed"]:
+            response = backend.proxy_request(request)
+            if response["status_code"] == request["expected_status"]:
+                allowed_success += 1
+        for request in proxy_requests["blocked"]:
+            response = backend.proxy_request(request)
+            if response["status_code"] == request["expected_status"]:
+                blocked_reject += 1
+        return {
+            "allowed_success_count": allowed_success,
+            "blocked_reject_count": blocked_reject,
+        }
 
     def evaluate_latency(self, backend, all_operations) -> dict:
         _ = backend

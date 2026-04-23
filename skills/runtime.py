@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import datetime
 import json
+import math
 import os
 import re
 import shlex
@@ -13,11 +14,16 @@ import subprocess
 import sys
 import tarfile
 import time
+import threading
 import types
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib import error as urllib_error
+from urllib import request as urllib_request
+from urllib.parse import urlsplit
 
 from financial_router.types import BudgetState, JWTClaims, ModelInfo, SystemPhase, TaskMetadata
 from harness_variants import ExecutionTrace, ExecutionTraceStep, HarnessVariantManager
@@ -45,6 +51,7 @@ from skills.bootstrap import BootstrapOrchestrator
 from skills.config import IntegrationConfig
 from skills.db_manager import CANONICAL_DATABASES, DatabaseManager
 from skills.hermes_interfaces import HermesSessionContext, HermesToolRegistry, MockHermesRuntime
+from skills.local_forward_proxy import ProxyServerConfig, start_proxy_server
 from skills.milestone_status import evaluate_milestone_status, runtime_support_artifact_paths
 
 EXPECTED_CORE_TOOLS = (
@@ -270,6 +277,18 @@ class ResearchCronProofResult:
 
 
 @dataclass(frozen=True)
+class ProxySelfTestResult:
+    ok: bool
+    config: IntegrationConfig
+    proxy_url: str | None
+    allowed_request_count: int
+    blocked_request_count: int
+    audit_log_path: str
+    trace_id: str | None
+    issues: list[str]
+
+
+@dataclass(frozen=True)
 class BootstrapStackResult:
     ok: bool
     install: RuntimeProfileInstallResult
@@ -278,6 +297,7 @@ class BootstrapStackResult:
     contract_harness: HermesContractHarnessResult
     task_loop_proof: TaskLoopProofResult
     research_cron_proof: ResearchCronProofResult
+    proxy_self_test: ProxySelfTestResult
     milestone_status: dict[str, Any]
 
 
@@ -299,13 +319,18 @@ class EvidenceBatchResult:
     config: IntegrationConfig
     bootstrap: RuntimeBootstrapResult
     doctor: RuntimeDoctorResult
+    requested_cycles: int
     cycles: int
+    until_replay_ready: bool
+    stopped_reason: str
     scenario_results: list[EvidenceScenarioResult]
     generated_trace_count: int
     generated_source_trace_count: int
     generated_activation_trace_count: int
     generated_known_bad_trace_count: int
+    before_replay_report: dict[str, Any]
     replay_report: dict[str, Any]
+    progress_projection: dict[str, Any]
     report_path: str
 
 
@@ -683,6 +708,8 @@ def _runtime_launcher_paths(config: IntegrationConfig) -> dict[str, Path]:
         "bootstrap_stack": bin_dir / "bootstrap_stack.sh",
         "doctor": bin_dir / "doctor_runtime.sh",
         "readiness": bin_dir / "readiness_runtime.sh",
+        "start_proxy": bin_dir / "start_local_forward_proxy.sh",
+        "proxy_self_test": bin_dir / "proxy_self_test.sh",
         "operator_workflow": bin_dir / "run_operator_workflow.sh",
         "contract_harness": bin_dir / "contract_harness_runtime.sh",
         "task_loop_proof": bin_dir / "task_loop_proof.sh",
@@ -739,6 +766,10 @@ def _runtime_network_controls_path(config: IntegrationConfig) -> Path:
     return runtime_support_artifact_paths(config)["network_controls"]
 
 
+def _runtime_proxy_allowlist_path(config: IntegrationConfig) -> Path:
+    return runtime_support_artifact_paths(config)["proxy_allowlist"]
+
+
 def _runtime_gateway_manifest_path(config: IntegrationConfig) -> Path:
     return runtime_support_artifact_paths(config)["gateway_manifest"]
 
@@ -757,6 +788,37 @@ def _runtime_replay_readiness_report_path(config: IntegrationConfig) -> Path:
 
 def _runtime_mac_studio_day_one_handoff_path(config: IntegrationConfig) -> Path:
     return runtime_support_artifact_paths(config)["mac_studio_day_one_handoff"]
+
+
+def _runtime_proxy_audit_log_path(config: IntegrationConfig) -> Path:
+    return _runtime_logs_dir(config) / "local_forward_proxy_audit.jsonl"
+
+
+def _proxy_bind_host_port(config: IntegrationConfig) -> tuple[str, int]:
+    split = urlsplit(config.proxy_bind_url)
+    return split.hostname or "127.0.0.1", split.port or 18080
+
+
+def _proxy_config_payload(
+    config: IntegrationConfig,
+    *,
+    bind_host: str | None = None,
+    bind_port: int | None = None,
+    audit_log_path: str | None = None,
+    allowed_domains: Sequence[str] | None = None,
+    allowed_ports: Sequence[int] | None = None,
+) -> dict[str, Any]:
+    default_host, default_port = _proxy_bind_host_port(config)
+    return {
+        "bind_host": bind_host or default_host,
+        "bind_port": bind_port if bind_port is not None else default_port,
+        "audit_log_path": audit_log_path or str(_runtime_proxy_audit_log_path(config)),
+        "outbound_allowlist": {
+            "domains": list(allowed_domains or config.outbound_allowlist_domains),
+            "ports": [int(port) for port in (allowed_ports or config.outbound_allowlist_ports)],
+            "schemes": ["http", "https"],
+        },
+    }
 
 
 def _evidence_factory_scenario_catalog() -> list[dict[str, str]]:
@@ -1093,16 +1155,20 @@ def _write_mac_studio_day_one_handoff(
         "",
         "## Day-One Sequence",
         "",
-        f"1. Install/runtime bundle: `{commands.get('bootstrap_stack', _command_string(config, '--bootstrap-stack', repo_root))}`",
-        f"2. Grow replay corpus: `{commands.get('evidence_factory', _command_string(config, '--evidence-factory', repo_root))}`",
-        f"3. Inspect replay coverage: `{commands.get('replay_readiness_report', _command_string(config, '--replay-readiness-report', repo_root))}`",
-        f"4. When Hermes is installed, run live readiness: `{commands.get('readiness', _command_string(config, '--readiness', repo_root))}`",
-        f"5. Open the workspace/operator view: `{commands.get('workspace_overview', _command_string(config, '--workspace-overview', repo_root))}`",
+        f"1. Start the local forward proxy: `{commands.get('start_proxy', 'not-generated')}`",
+        f"2. Rehearse the repo-local launch bundle: `{commands.get('bootstrap_stack', _command_string(config, '--bootstrap-stack', repo_root))}`",
+        f"3. Grow replay corpus: `{commands.get('evidence_factory', _command_string(config, '--evidence-factory', repo_root))}`",
+        f"   If you want one bounded run toward readiness, use: `{commands.get('evidence_factory', _command_string(config, '--evidence-factory', repo_root))} --until-replay-ready --evidence-cycles {DEFAULT_EVIDENCE_CYCLES}`",
+        f"4. Inspect replay coverage: `{commands.get('replay_readiness_report', _command_string(config, '--replay-readiness-report', repo_root))}`",
+        f"5. When Hermes is installed, run live readiness: `{commands.get('readiness', _command_string(config, '--readiness', repo_root))}`",
+        f"6. Open the workspace/operator view: `{commands.get('workspace_overview', _command_string(config, '--workspace-overview', repo_root))}`",
         "",
         "## Runtime Artifacts",
         "",
         f"- Profile manifest: `{_runtime_profile_manifest_path(config)}`",
         f"- Operator checklist: `{_runtime_operator_validation_checklist_path(config)}`",
+        f"- Proxy allowlist: `{_runtime_proxy_allowlist_path(config)}`",
+        f"- Proxy audit log: `{_runtime_proxy_audit_log_path(config)}`",
         f"- Evidence manifest: `{_runtime_evidence_factory_manifest_path(config)}`",
         f"- Replay readiness report: `{_runtime_replay_readiness_report_path(config)}`",
         "",
@@ -1124,6 +1190,7 @@ def _write_mac_studio_day_one_handoff(
                 "## Rehearsal Status",
                 "",
                 f"- Bootstrap stack: `{'PASS' if bootstrap_stack_result.ok else 'FAIL'}`",
+                f"- Proxy self-test: `{'PASS' if bootstrap_stack_result.proxy_self_test.ok else 'FAIL'}`",
                 f"- Operator workflow: `{'PASS' if bootstrap_stack_result.operator_workflow.ok else 'FAIL'}`",
                 f"- Contract harness: `{'PASS' if bootstrap_stack_result.contract_harness.ok else 'FAIL'}`",
                 f"- Task loop proof: `{'PASS' if bootstrap_stack_result.task_loop_proof.ok else 'FAIL'}`",
@@ -1137,6 +1204,7 @@ def _write_mac_studio_day_one_handoff(
                 "## Evidence Batch",
                 "",
                 f"- Cycles: `{evidence_batch.cycles}`",
+                f"- Stop reason: `{evidence_batch.stopped_reason}`",
                 f"- Scenarios passed: `{sum(1 for item in evidence_batch.scenario_results if item.ok)}/{len(evidence_batch.scenario_results)}`",
                 f"- Generated traces: `{evidence_batch.generated_trace_count}`",
                 f"- Generated activation traces: `{evidence_batch.generated_activation_trace_count}`",
@@ -1167,6 +1235,8 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
 
     network_doc = {
         **contract.network_controls(),
+        "proxy_allowlist_path": str(_runtime_proxy_allowlist_path(config)),
+        "proxy_audit_log_path": str(_runtime_proxy_audit_log_path(config)),
         "proxy_environment": {
             "HTTP_PROXY": config.proxy_bind_url,
             "HTTPS_PROXY": config.proxy_bind_url,
@@ -1175,6 +1245,7 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
         },
         "gateway_url": config.hermes_gateway_url,
     }
+    proxy_doc = _proxy_config_payload(config)
     gateway_doc = {
         **contract.gateway_mapping(),
         "workspace_url": config.hermes_workspace_url,
@@ -1193,6 +1264,11 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
     evidence_doc = {
         "generated_at": _utc_now(),
         "command": _command_string(config, "--evidence-factory", repo_root),
+        "until_replay_ready_command": (
+            _command_string(config, "--evidence-factory", repo_root)
+            + " --until-replay-ready"
+            + f" --evidence-cycles {DEFAULT_EVIDENCE_CYCLES}"
+        ),
         "recommended_cycles": DEFAULT_EVIDENCE_CYCLES,
         "report_command": _command_string(config, "--replay-readiness-report", repo_root),
         "scenarios": _evidence_factory_scenario_catalog(),
@@ -1200,15 +1276,17 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
     checklist_lines = [
         "# Operator Validation Checklist",
         "",
-        "1. Run the generated bootstrap stack command.",
-        "2. Confirm `doctor` passes and all canonical databases are in WAL mode.",
-        "3. Confirm the repo-local contract harness passes.",
-        "4. Run the evidence factory and inspect the replay readiness report.",
-        "5. Confirm the task-loop and research-cron proofs pass.",
-        "6. If Hermes is installed, run readiness and verify the live profile/config surface.",
-        "7. Open the Hermes Workspace and confirm gates, traces, quarantine review, replay readiness, runtime halt state, and milestone health are visible.",
+        "1. Start the generated local forward proxy launcher and confirm it binds cleanly.",
+        "2. Run the generated bootstrap stack command.",
+        "3. Confirm `doctor` passes and all canonical databases are in WAL mode.",
+        "4. Confirm the repo-local contract harness and proxy self-test pass.",
+        "5. Run the evidence factory and inspect the replay readiness report.",
+        "6. Confirm the task-loop and research-cron proofs pass.",
+        "7. If Hermes is installed, run readiness and verify the live profile/config surface.",
+        "8. Open the Hermes Workspace and confirm gates, traces, quarantine review, replay readiness, runtime halt state, and milestone health are visible.",
     ]
     _write_json_yaml(_runtime_network_controls_path(config), network_doc)
+    _write_json_yaml(_runtime_proxy_allowlist_path(config), proxy_doc)
     _write_json_yaml(_runtime_gateway_manifest_path(config), gateway_doc)
     _write_json_yaml(_runtime_workspace_manifest_path(config), workspace_doc)
     _write_json_yaml(_runtime_evidence_factory_manifest_path(config), evidence_doc)
@@ -1314,6 +1392,8 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
         "profile_config_path": str(_runtime_profile_config_path(resolved)),
         "spec_profile_path": str(_runtime_spec_profile_path(resolved)),
         "network_controls_path": str(_runtime_network_controls_path(resolved)),
+        "proxy_allowlist_path": str(_runtime_proxy_allowlist_path(resolved)),
+        "proxy_audit_log_path": str(_runtime_proxy_audit_log_path(resolved)),
         "gateway_manifest_path": str(_runtime_gateway_manifest_path(resolved)),
         "workspace_manifest_path": str(_runtime_workspace_manifest_path(resolved)),
         "operator_validation_checklist_path": str(_runtime_operator_validation_checklist_path(resolved)),
@@ -1331,6 +1411,8 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
             "bootstrap_stack": _command_string(resolved, "--bootstrap-stack", root),
             "doctor": _command_string(resolved, "--doctor", root),
             "readiness": _command_string(resolved, "--readiness", root),
+            "start_proxy": str(launcher_paths["start_proxy"]),
+            "proxy_self_test": _command_string(resolved, "--proxy-self-test", root),
             "operator_workflow": _command_string(resolved, "--operator-workflow", root),
             "contract_harness": _command_string(resolved, "--contract-harness", root),
             "task_loop_proof": _command_string(resolved, "--task-loop-proof", root),
@@ -1358,6 +1440,7 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
     _write_launcher(launcher_paths["bootstrap_stack"], resolved, root, "--bootstrap-stack")
     _write_launcher(launcher_paths["doctor"], resolved, root, "--doctor")
     _write_launcher(launcher_paths["readiness"], resolved, root, "--readiness")
+    _write_launcher(launcher_paths["proxy_self_test"], resolved, root, "--proxy-self-test")
     _write_launcher(launcher_paths["operator_workflow"], resolved, root, "--operator-workflow")
     _write_launcher(launcher_paths["contract_harness"], resolved, root, "--contract-harness")
     _write_launcher(launcher_paths["task_loop_proof"], resolved, root, "--task-loop-proof")
@@ -1368,6 +1451,13 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
     _write_launcher(launcher_paths["milestone_status"], resolved, root, "--milestone-status")
     _write_launcher(launcher_paths["workspace_overview"], resolved, root, "--workspace-overview")
     _write_launcher(launcher_paths["operator_checklist"], resolved, root, "--operator-checklist")
+    _write_env_launcher(
+        launcher_paths["start_proxy"],
+        [
+            f"CONFIG_PATH={shlex.quote(str(_runtime_proxy_allowlist_path(resolved)))}",
+            'exec python3 -m skills.local_forward_proxy --config "$CONFIG_PATH" "$@"',
+        ],
+    )
     _write_env_launcher(
         launcher_paths["gateway"],
         [
@@ -1478,6 +1568,7 @@ def doctor_runtime(
         "profile_config": _runtime_profile_config_path(resolved).is_file(),
         "spec_profile": _runtime_spec_profile_path(resolved).is_file(),
         "network_controls": _runtime_network_controls_path(resolved).is_file(),
+        "proxy_allowlist": _runtime_proxy_allowlist_path(resolved).is_file(),
         "gateway_manifest": _runtime_gateway_manifest_path(resolved).is_file(),
         "workspace_manifest": _runtime_workspace_manifest_path(resolved).is_file(),
         "operator_validation_checklist": _runtime_operator_validation_checklist_path(resolved).is_file(),
@@ -1488,6 +1579,8 @@ def doctor_runtime(
         "bootstrap_stack_launcher": launcher_paths["bootstrap_stack"].is_file(),
         "doctor_launcher": launcher_paths["doctor"].is_file(),
         "readiness_launcher": launcher_paths["readiness"].is_file(),
+        "start_proxy_launcher": launcher_paths["start_proxy"].is_file(),
+        "proxy_self_test_launcher": launcher_paths["proxy_self_test"].is_file(),
         "operator_workflow_launcher": launcher_paths["operator_workflow"].is_file(),
         "contract_harness_launcher": launcher_paths["contract_harness"].is_file(),
         "task_loop_proof_launcher": launcher_paths["task_loop_proof"].is_file(),
@@ -2220,6 +2313,172 @@ def run_research_cron_proof(
     )
 
 
+class _ProxyProbeServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+class _ProxyProbeHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        payload = json.dumps({"ok": True, "path": self.path}).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, format: str, *args: Any) -> None:
+        _ = (format, args)
+        return None
+
+
+@contextlib.contextmanager
+def _serve_proxy_probe_server() -> Any:
+    server = _ProxyProbeServer(("127.0.0.1", 0), _ProxyProbeHandler)
+    thread = threading.Thread(target=server.serve_forever, name="proxy-probe-upstream", daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def run_proxy_self_test(config: IntegrationConfig | None = None) -> ProxySelfTestResult:
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    install_runtime_profile(resolved)
+    prepare_runtime_directories(resolved)
+    migrate_runtime_databases(resolved)
+    audit_log_path = _runtime_proxy_audit_log_path(resolved)
+    if audit_log_path.exists():
+        audit_log_path.unlink()
+
+    issues: list[str] = []
+    allowed_success = 0
+    blocked_reject = 0
+    proxy_url: str | None = None
+    start_time = time.time()
+
+    with _serve_proxy_probe_server() as allowed_server:
+        allowed_port = int(allowed_server.server_address[1])
+        blocked_port = allowed_port + 1
+        proxy_config = ProxyServerConfig.from_payload(
+            _proxy_config_payload(
+                resolved,
+                bind_port=0,
+                audit_log_path=str(audit_log_path),
+                allowed_domains=("localhost", "127.0.0.1"),
+                allowed_ports=(allowed_port,),
+            )
+        )
+        with start_proxy_server(proxy_config) as running_proxy:
+            proxy_url = running_proxy.proxy_url
+            opener = urllib_request.build_opener(
+                urllib_request.ProxyHandler(
+                    {
+                        "http": proxy_url,
+                    }
+                )
+            )
+            for index in range(5):
+                request = urllib_request.Request(f"http://127.0.0.1:{allowed_port}/allowed?probe={index + 1}")
+                with opener.open(request, timeout=5) as response:
+                    if response.status == 200:
+                        allowed_success += 1
+                    else:
+                        issues.append(f"allowed request {index + 1} returned {response.status}")
+            for index in range(5):
+                request = urllib_request.Request(f"http://127.0.0.1:{blocked_port}/blocked?probe={index + 1}")
+                try:
+                    opener.open(request, timeout=5)
+                    issues.append(f"blocked request {index + 1} unexpectedly succeeded")
+                except urllib_error.HTTPError as exc:
+                    if exc.code == 403:
+                        blocked_reject += 1
+                    else:
+                        issues.append(f"blocked request {index + 1} returned {exc.code}")
+
+    audit_entries: list[dict[str, Any]] = []
+    if audit_log_path.is_file():
+        for line in audit_log_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                audit_entries.append(json.loads(line))
+    else:
+        issues.append("proxy audit log was not created")
+
+    allow_events = sum(1 for item in audit_entries if item.get("decision") == "ALLOW")
+    deny_events = sum(1 for item in audit_entries if item.get("decision") == "DENY")
+    if allow_events != allowed_success:
+        issues.append(f"expected {allowed_success} allow audit events, found {allow_events}")
+    if deny_events != blocked_reject:
+        issues.append(f"expected {blocked_reject} deny audit events, found {deny_events}")
+
+    ok = allowed_success == 5 and blocked_reject == 5 and not issues
+    trace_id = generate_uuid_v7()
+    _log_execution_trace(
+        resolved,
+        ExecutionTrace(
+            trace_id=trace_id,
+            task_id="proxy-self-test",
+            role="proxy_self_test",
+            skill_name="runtime",
+            harness_version="proxy_self_test_v1",
+            intent_goal="Validate local forward proxy allow/deny enforcement before live Hermes launch.",
+            steps=[
+                _scenario_step(
+                    1,
+                    "start_proxy_server",
+                    {"proxy_url": proxy_url, "audit_log_path": str(audit_log_path)},
+                ),
+                _scenario_step(
+                    2,
+                    "proxy_http_validation",
+                    {
+                        "allowed_success": allowed_success,
+                        "blocked_reject": blocked_reject,
+                        "audit_entries": len(audit_entries),
+                    },
+                ),
+            ],
+            prompt_template="proxy self test",
+            context_assembled=json.dumps(
+                {
+                    "proxy_url": proxy_url,
+                    "audit_log_path": str(audit_log_path),
+                },
+                sort_keys=True,
+            )[:2000],
+            retrieval_queries=["local_forward_proxy", "audit_log", "m2_proxy_validation"],
+            judge_verdict="PASS" if ok else "FAIL",
+            judge_reasoning=(
+                "Proxy self-test completed cleanly."
+                if ok
+                else "Proxy self-test exposed allow/deny or audit drift."
+            ),
+            outcome_score=1.0 if ok else 0.0,
+            cost_usd=0.0,
+            duration_ms=int((time.time() - start_time) * 1000),
+            training_eligible=False,
+            retention_class="STANDARD" if ok else "FAILURE_AUDIT",
+            source_chain_id=None,
+            source_session_id=None,
+            source_trace_id=None,
+            created_at=_utc_now(),
+        ),
+    )
+    return ProxySelfTestResult(
+        ok=ok,
+        config=resolved,
+        proxy_url=proxy_url,
+        allowed_request_count=allowed_success,
+        blocked_request_count=blocked_reject,
+        audit_log_path=str(audit_log_path),
+        trace_id=trace_id,
+        issues=issues,
+    )
+
+
 def workspace_overview(config: IntegrationConfig | None = None) -> dict[str, Any]:
     from skills.observability.skill import ObservabilitySkill
     from skills.operator_interface.skill import OperatorInterfaceSkill
@@ -2240,6 +2499,8 @@ def workspace_overview(config: IntegrationConfig | None = None) -> dict[str, Any
         "harness_frontier": operator.harness_frontier(limit=5),
         "replay_readiness": health["harness_variants"]["execution_traces"]["replay_readiness"],
         "replay_readiness_report_path": str(_runtime_replay_readiness_report_path(resolved)),
+        "proxy_allowlist_path": str(_runtime_proxy_allowlist_path(resolved)),
+        "proxy_audit_log_path": str(_runtime_proxy_audit_log_path(resolved)),
         "milestone_health": evaluate_milestone_status(resolved, db_manager=db),
         "workspace_manifest_path": str(_runtime_workspace_manifest_path(resolved)),
         "gateway_manifest_path": str(_runtime_gateway_manifest_path(resolved)),
@@ -2263,15 +2524,17 @@ def bootstrap_stack(
     contract_harness = exercise_hermes_contract(config=resolved, repo_root=repo_root, tool_registry=registry)
     task_loop = run_task_loop_proof(config=resolved, repo_root=repo_root, tool_registry=registry)
     research_cron = run_research_cron_proof(config=resolved, repo_root=repo_root, tool_registry=registry)
+    proxy_self_test = run_proxy_self_test(config=resolved)
     milestone_status = evaluate_milestone_status(resolved)
     return BootstrapStackResult(
-        ok=doctor.ok and operator_workflow.ok and contract_harness.ok and task_loop.ok and research_cron.ok,
+        ok=doctor.ok and operator_workflow.ok and contract_harness.ok and task_loop.ok and research_cron.ok and proxy_self_test.ok,
         install=install,
         doctor=doctor,
         operator_workflow=operator_workflow,
         contract_harness=contract_harness,
         task_loop_proof=task_loop,
         research_cron_proof=research_cron,
+        proxy_self_test=proxy_self_test,
         milestone_status=milestone_status,
     )
 
@@ -2762,6 +3025,58 @@ def replay_readiness_report(
     return payload
 
 
+def _evidence_progress_projection(
+    before_report: dict[str, Any],
+    after_report: dict[str, Any],
+    *,
+    executed_cycles: int,
+) -> dict[str, Any]:
+    metrics = (
+        ("eligible_source_traces", "minimum_eligible_traces"),
+        ("known_bad_source_traces", "minimum_known_bad_traces"),
+        ("distinct_skill_count", "minimum_distinct_skills"),
+    )
+    projections: list[dict[str, Any]] = []
+    estimate_candidates: list[int] = []
+    blocked_metrics: list[str] = []
+    safe_cycles = max(executed_cycles, 1)
+    for current_key, minimum_key in metrics:
+        before_value = int(before_report.get(current_key, 0) or 0)
+        after_value = int(after_report.get(current_key, 0) or 0)
+        minimum = int(after_report.get(minimum_key, 0) or 0)
+        delta = after_value - before_value
+        remaining = max(0, minimum - after_value)
+        per_cycle_growth = delta / safe_cycles
+        if remaining == 0:
+            estimate = 0
+        elif delta <= 0:
+            estimate = None
+            blocked_metrics.append(current_key)
+        else:
+            estimate = int(math.ceil(remaining / per_cycle_growth))
+            estimate_candidates.append(estimate)
+        projections.append(
+            {
+                "metric": current_key,
+                "before": before_value,
+                "after": after_value,
+                "minimum": minimum,
+                "delta": delta,
+                "per_cycle_growth": round(per_cycle_growth, 4),
+                "remaining": remaining,
+                "estimated_cycles_remaining": estimate,
+            }
+        )
+    ready = after_report.get("status") == "READY_FOR_BROADER_REPLAY"
+    return {
+        "ready_for_broader_replay": ready,
+        "executed_cycles": executed_cycles,
+        "estimated_cycles_to_threshold": 0 if ready else (max(estimate_candidates) if not blocked_metrics and projections else None),
+        "blocked_metrics_without_growth": blocked_metrics,
+        "metrics": projections,
+    }
+
+
 def run_evidence_factory(
     *,
     config: IntegrationConfig | None = None,
@@ -2769,6 +3084,7 @@ def run_evidence_factory(
     tool_registry: HermesToolRegistry | None = None,
     cycles: int = DEFAULT_EVIDENCE_CYCLES,
     report_limit: int = DEFAULT_REPLAY_REPORT_LIMIT,
+    until_replay_ready: bool = False,
 ) -> EvidenceBatchResult:
     if cycles <= 0:
         raise ValueError("cycles must be positive")
@@ -2785,7 +3101,15 @@ def run_evidence_factory(
     before_report = manager.replay_readiness_report(limit=report_limit)
 
     scenario_results: list[EvidenceScenarioResult] = []
+    executed_cycles = 0
+    stopped_reason = "completed_requested_cycles"
+    if until_replay_ready and before_report.get("status") == "READY_FOR_BROADER_REPLAY":
+        stopped_reason = "already_ready"
+
     for cycle_index in range(1, cycles + 1):
+        if until_replay_ready and before_report.get("status") == "READY_FOR_BROADER_REPLAY":
+            break
+        executed_cycles += 1
         operator = run_operator_workflow(
             registry,
             config=resolved,
@@ -2851,9 +3175,18 @@ def run_evidence_factory(
         scenario_results.append(_run_evidence_invalid_brief_completion(resolved, cycle_index=cycle_index))
         scenario_results.append(_run_evidence_archived_standing_brief_queue(resolved, registry, cycle_index=cycle_index))
         scenario_results.append(_run_evidence_invalid_opportunity_transition(resolved, cycle_index=cycle_index))
+        if until_replay_ready:
+            current_report = manager.replay_readiness_report(limit=report_limit)
+            if current_report.get("status") == "READY_FOR_BROADER_REPLAY":
+                stopped_reason = "replay_ready_reached"
+                break
+
+    if until_replay_ready and stopped_reason not in {"already_ready", "replay_ready_reached"}:
+        stopped_reason = "max_cycles_reached"
 
     after_summary = manager.execution_trace_summary()
     after_report = replay_readiness_report(config=resolved, repo_root=str(root), limit=report_limit)
+    progress_projection = _evidence_progress_projection(before_report, after_report, executed_cycles=executed_cycles)
     generated_trace_count = int(after_summary["total_count"]) - int(before_summary["total_count"])
     generated_source_trace_count = int(after_summary["source_trace_count"]) - int(before_summary["source_trace_count"])
     generated_activation_trace_count = int(after_report["activation_source_trace_count"]) - int(before_report["activation_source_trace_count"])
@@ -2863,25 +3196,34 @@ def run_evidence_factory(
         config=resolved,
         bootstrap=bootstrap,
         doctor=doctor,
-        cycles=cycles,
+        requested_cycles=cycles,
+        cycles=executed_cycles,
+        until_replay_ready=until_replay_ready,
+        stopped_reason=stopped_reason,
         scenario_results=scenario_results,
         generated_trace_count=generated_trace_count,
         generated_source_trace_count=generated_source_trace_count,
         generated_activation_trace_count=generated_activation_trace_count,
         generated_known_bad_trace_count=generated_known_bad_trace_count,
+        before_replay_report=before_report,
         replay_report=after_report,
+        progress_projection=progress_projection,
         report_path=str(_runtime_replay_readiness_report_path(resolved)),
     )
 
     evidence_manifest = _read_json_yaml(_runtime_evidence_factory_manifest_path(resolved)) or {}
     evidence_manifest["last_run"] = {
         "generated_at": _utc_now(),
-        "cycles": cycles,
+        "requested_cycles": cycles,
+        "executed_cycles": executed_cycles,
+        "until_replay_ready": until_replay_ready,
+        "stopped_reason": stopped_reason,
         "scenario_count": len(scenario_results),
         "scenario_passed": sum(1 for item in scenario_results if item.ok),
         "generated_trace_count": generated_trace_count,
         "generated_activation_trace_count": generated_activation_trace_count,
         "generated_known_bad_trace_count": generated_known_bad_trace_count,
+        "progress_projection": progress_projection,
         "report_path": result.report_path,
     }
     _write_json_yaml(_runtime_evidence_factory_manifest_path(resolved), evidence_manifest)
@@ -3841,6 +4183,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--install-profile", action="store_true", help="Install a local Hermes runtime profile bundle")
     parser.add_argument("--doctor", action="store_true", help="Verify runtime layout, databases, and skill registration")
     parser.add_argument("--readiness", action="store_true", help="Run the real-Hermes readiness checklist against the selected runtime paths")
+    parser.add_argument("--proxy-self-test", action="store_true", help="Run the standalone local forward proxy allow/deny self-test")
     parser.add_argument("--operator-workflow", action="store_true", help="Run the operator workflow plus council-backed project smoke test")
     parser.add_argument("--contract-harness", action="store_true", help="Run the repo-local Hermes contract harness without requiring live Hermes")
     parser.add_argument("--task-loop-proof", action="store_true", help="Run the deterministic research task-loop proof")
@@ -3864,6 +4207,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--task-id", default="stage0-operator-workflow")
     parser.add_argument("--title", default="Operator workflow smoke test")
     parser.add_argument("--evidence-cycles", type=int, default=DEFAULT_EVIDENCE_CYCLES, help="How many times to run the evidence scenario suite")
+    parser.add_argument("--until-replay-ready", action="store_true", help="For --evidence-factory, stop early if broader replay readiness is reached")
     parser.add_argument("--report-limit", type=int, default=DEFAULT_REPLAY_REPORT_LIMIT, help="How many coverage rows to include in replay-readiness reports")
     parser.add_argument(
         "--summary",
@@ -3950,6 +4294,17 @@ def _main_impl(
         print(f"tools={','.join(result.live_tools) if result.live_tools else 'none'}")
         return 0 if result.ok else 1
 
+    if args.proxy_self_test:
+        result = run_proxy_self_test(config=config)
+        print("proxy self-test ok" if result.ok else "proxy self-test failed")
+        print(f"proxy_url={result.proxy_url or 'none'}")
+        print(f"allowed={result.allowed_request_count}")
+        print(f"blocked={result.blocked_request_count}")
+        print(f"audit_log={result.audit_log_path}")
+        print(f"trace_id={result.trace_id or 'none'}")
+        print(f"issues={'; '.join(result.issues) if result.issues else 'none'}")
+        return 0 if result.ok else 1
+
     if args.contract_harness:
         result = exercise_hermes_contract(
             config=config,
@@ -3996,10 +4351,14 @@ def _main_impl(
             tool_registry=runtime,
             cycles=args.evidence_cycles,
             report_limit=args.report_limit,
+            until_replay_ready=args.until_replay_ready,
         )
         passed = sum(1 for item in result.scenario_results if item.ok)
         print("evidence factory ok" if result.ok else "evidence factory failed")
-        print(f"cycles={result.cycles}")
+        print(f"requested_cycles={result.requested_cycles}")
+        print(f"executed_cycles={result.cycles}")
+        print(f"until_replay_ready={'yes' if result.until_replay_ready else 'no'}")
+        print(f"stop_reason={result.stopped_reason}")
         print(f"scenarios={passed}/{len(result.scenario_results)}")
         print(f"generated_traces={result.generated_trace_count}")
         print(f"generated_source_traces={result.generated_source_trace_count}")
@@ -4013,6 +4372,15 @@ def _main_impl(
             f"{result.replay_report['minimum_known_bad_traces']} known_bad,"
             f"{result.replay_report['distinct_skill_count']}/"
             f"{result.replay_report['minimum_distinct_skills']} skills"
+        )
+        projection = result.progress_projection
+        print(
+            "estimated_cycles_to_threshold="
+            + (
+                str(projection["estimated_cycles_to_threshold"])
+                if projection["estimated_cycles_to_threshold"] is not None
+                else "unknown"
+            )
         )
         print(f"report_path={result.report_path}")
         return 0 if result.ok else 1
@@ -4079,6 +4447,7 @@ def _main_impl(
             tool_registry=runtime,
         )
         print("bootstrap stack ok" if result.ok else "bootstrap stack failed")
+        print(f"proxy_self_test={'ok' if result.proxy_self_test.ok else 'failed'}")
         print(f"contract_harness={'ok' if result.contract_harness.ok else 'failed'}")
         print(f"task_loop_proof={'ok' if result.task_loop_proof.ok else 'failed'}")
         print(f"research_cron_proof={'ok' if result.research_cron_proof.ok else 'failed'}")

@@ -13,7 +13,7 @@ class IntegrationConfig:
     max_api_spend_usd: float = 0.00
     construction_phase: bool = True
     profile_name: str = "hybrid-autonomous-ai"
-    proxy_bind_url: str = "http://127.0.0.1:8877"
+    proxy_bind_url: str = "http://127.0.0.1:18080"
     outbound_allowlist_domains: tuple[str, ...] = ("localhost", "127.0.0.1", "::1")
     outbound_allowlist_ports: tuple[int, ...] = (11434, 8080, 8443)
     hermes_gateway_url: str = "http://127.0.0.1:8080"

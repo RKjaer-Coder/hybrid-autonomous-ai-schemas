@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from immune.patterns.policy_signatures import CONSTRUCTION_ALLOWLIST, NETWORK_TOOLS
 from skills.config import IntegrationConfig
@@ -69,8 +70,11 @@ class HermesProfileContract:
         }
 
     def network_controls(self) -> dict[str, Any]:
+        split = urlsplit(self.config.proxy_bind_url)
         return {
             "proxy_bind_url": self.config.proxy_bind_url,
+            "proxy_bind_host": split.hostname or "127.0.0.1",
+            "proxy_bind_port": split.port or 18080,
             "outbound_allowlist": {
                 "domains": list(self.config.outbound_allowlist_domains),
                 "ports": list(self.config.outbound_allowlist_ports),
