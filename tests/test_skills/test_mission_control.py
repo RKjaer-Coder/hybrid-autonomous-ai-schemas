@@ -195,6 +195,7 @@ def test_hermes_dashboard_plugin_artifacts_are_tiny_and_harness_backed():
     assert "/api/plugins/hybrid-mission-control" in index_js
     assert "Final plugin shape" in index_js
     assert "No bundled React, no Node bridge, no live stream server" in index_js
+    assert "Below Threshold" in index_js
     assert "setInterval(refresh, 15000)" in index_js
     assert "\"council\", \"Council\"" in index_js
     assert "\"finance\", \"Finance\"" in index_js

@@ -41,6 +41,15 @@
     return Math.round(Number(value) * 100) + "%";
   }
 
+  function statusLabel(value) {
+    if (value === null || value === undefined || value === "") return "UNKNOWN";
+    var raw = typeof value === "object" ? value.status || value.overall || value.lifecycle_state || "AVAILABLE" : String(value);
+    if (raw === "IMPLEMENTED_BELOW_ACTIVATION_THRESHOLD") return "Below Threshold";
+    return raw.toLowerCase().split("_").map(function (part) {
+      return part.charAt(0).toUpperCase() + part.slice(1);
+    }).join(" ");
+  }
+
   function keys(obj) {
     return Object.keys(obj || {});
   }
@@ -318,7 +327,7 @@
     var readiness = replay.readiness || {};
     var reliability = replay.reliability || {};
     return h("div", {className: "mc-two-column"},
-      h(ShellCard, {title: "Replay Readiness", aside: readiness.status || "UNKNOWN"},
+      h(ShellCard, {title: "Replay Readiness", aside: statusLabel(readiness)},
         h(MetricGrid, {items: [
           ["Eligible", (readiness.eligible_source_traces || 0) + "/" + (readiness.minimum_eligible_traces || 500)],
           ["Known bad", (readiness.known_bad_source_traces || 0) + "/" + (readiness.minimum_known_bad_traces || 25)],
@@ -420,8 +429,8 @@
           ["Runtime", ((snapshot.overview || {}).runtime_status || {}).lifecycle_state || "UNKNOWN"],
           ["Gates", (snapshot.overview || {}).pending_gates || 0],
           ["Harvests", (snapshot.overview || {}).pending_harvests || 0],
-          ["Replay", (snapshot.overview || {}).replay_readiness || "UNKNOWN"],
-          ["Milestones", ((snapshot.overview || {}).milestone_health || {}).overall || "UNKNOWN"],
+          ["Replay", statusLabel((snapshot.overview || {}).replay_readiness)],
+          ["Milestones", statusLabel((snapshot.overview || {}).milestone_health)],
           ["Load", fmt((snapshot.overview || {}).operator_load_hours || 0) + "h"]
         ]})
       ),

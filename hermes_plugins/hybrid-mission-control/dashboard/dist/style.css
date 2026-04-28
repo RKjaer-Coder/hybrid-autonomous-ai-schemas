@@ -162,6 +162,7 @@
   margin-top: 0.35rem;
   font-size: 1.5rem;
   letter-spacing: 0;
+  overflow-wrap: anywhere;
 }
 
 .mc-mini-row,
