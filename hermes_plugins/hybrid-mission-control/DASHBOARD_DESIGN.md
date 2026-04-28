@@ -7,27 +7,25 @@ only the project-specific operator layer.
 
 ## Final Dashboard Map
 
-1. Overview: system logic map, compact status strip with green/yellow/red
-   operating state, per-area status cards, and active alerts. Yellow means the
-   operator is needed for a decision that is hampering continued work.
-2. Projects: kanban lanes mapped to real project/phase states with project
-   priority controls.
-3. Tasks: operator-created tasks plus system research and harvest queues,
-   segmented into workflow-specific kanban boards with priority/status controls
-   where safe.
-4. Council: bounded strategic verdict history, current deliberation
+1. Overview: a single system flow from research task to finding to opportunity,
+   with branches for council, backlog, and further research. The view shows
+   status, pressure, and model selection for each step.
+2. Work: active project lanes and workflow-specific task boards in one place,
+   with only the priority/status controls that are safe before live Hermes
+   write validation.
+3. Council: bounded strategic verdict history, current deliberation
    architecture and model lineup, Tier 2 pressure, decision queues, finished
    verdicts awaiting operator action, degradation, confidence, and
    deliberation-quality signals.
-5. Research: separate workflow lanes for model/tooling radar, system
+4. Research: separate workflow lanes for model/tooling radar, system
    architecture, business/opportunity work, security/compliance,
    operator-prompted research, standing briefs, and harvest follow-ups. Show
    the conversion path from research task to intelligence brief to action
    signal to opportunity candidate to council confirmation.
-6. Finance: project P&L, route mix, usage, resource pressure, token accounting,
+5. Finance: project P&L, route mix, usage, resource pressure, token accounting,
    G3 pressure, and explicit $0 autonomous paid spend posture.
-7. Self-Improve: Hermes harness activation threshold progress, reliability
-   watch rows, traces, and frontier summaries for prompt/skill improvement.
+6. Improve: Hermes harness activation threshold progress, reliability watch
+   rows, traces, and frontier summaries for prompt/skill improvement.
 Decision queues live under Council and remain read-only until Hermes dashboard
 auth, audit, timeout, and replay semantics pass gate validation.
 

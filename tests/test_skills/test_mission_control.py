@@ -233,12 +233,12 @@ def test_hermes_dashboard_plugin_artifacts_are_tiny_and_harness_backed():
     assert manifest["api"] == "plugin_api.py"
     assert "window.__HERMES_PLUGINS__.register(\"hybrid-mission-control\"" in index_js
     assert "/api/plugins/hybrid-mission-control" in index_js
-    assert "Final plugin shape" in index_js
-    assert "System Logic Map" in index_js
-    assert "Intelligence to Action Flow" in index_js
-    assert "Routing Outcomes" in index_js
+    assert "Pre-live Hermes contract" in index_js
+    assert "System Flow" in index_js
+    assert "Where Work Goes Next" in index_js
     assert "Model selection" in index_js
-    assert "Operator Focus" in index_js
+    assert "Needs Your Attention" in index_js
+    assert "Task Boards" in index_js
     assert "Current Council Architecture" in index_js
     assert "Council Deliberation Backlog" in index_js
     assert "Finished Deliberations Waiting On You" in index_js
@@ -247,14 +247,19 @@ def test_hermes_dashboard_plugin_artifacts_are_tiny_and_harness_backed():
     assert "Model Lifecycle" in index_js
     assert "Research to Opportunity Flow" in index_js
     assert "Local Resource Pressure" in index_js
+    assert "Usage" in index_js
     assert "Token Accounting" in index_js
+    assert "Useful Findings" in index_js
+    assert "Trace Feed" in index_js
     assert "[\"workflow\", \"Workflow\"]" not in index_js
     assert "[\"usage\", \"Usage\"]" not in index_js
     assert "[\"system\", \"System\"]" not in index_js
     assert "[\"decisions\", \"Decisions\"]" not in index_js
-    assert "[\"self_improvement\", \"Self-Improve\"]" in index_js
-    assert "Models in motion" in index_js
-    assert "System Alerts" in index_js
+    assert "[\"projects\", \"Projects\"]" not in index_js
+    assert "[\"tasks\", \"Tasks\"]" not in index_js
+    assert "[\"self_improvement\", \"Self-Improve\"]" not in index_js
+    assert "[\"work\", \"Work\"]" in index_js
+    assert "[\"improve\", \"Improve\"]" in index_js
     assert "/research-tasks" in index_js
     assert "focus_note" in index_js
     assert "No bundled React, no Node bridge, no live stream server" in index_js

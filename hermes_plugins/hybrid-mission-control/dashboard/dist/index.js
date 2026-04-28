@@ -136,7 +136,7 @@
       .concat((focus.tasks || []).map(function (item) {
         return {type: item.source || "Task", title: item.title, detail: item.lane, priority: item.priority};
       }));
-    return h(ShellCard, {title: "Operator Focus", aside: String(items.length)},
+    return h(ShellCard, {title: "Needs Your Attention", aside: String(items.length)},
       h("div", {className: "mc-focus-list"}, items.length ? items.slice(0, 10).map(function (item, index) {
         return h("div", {className: "mc-focus-item", key: item.type + item.title + index},
           h("div", null,
@@ -239,12 +239,11 @@
   function SectionTabs(props) {
     var tabs = [
       ["overview", "Overview"],
-      ["projects", "Projects"],
-      ["tasks", "Tasks"],
+      ["work", "Work"],
       ["council", "Council"],
       ["research", "Research"],
       ["finance", "Finance"],
-      ["self_improvement", "Self-Improve"]
+      ["improve", "Improve"]
     ];
     return h("div", {className: "mc-tabs"}, tabs.map(function (tab) {
       return h("button", {
@@ -406,6 +405,25 @@
           }))
         );
       }))
+    );
+  }
+
+  function Work(props) {
+    return h("div", {className: "mc-work-layout"},
+      h(ShellCard, {title: "Active Projects", aside: "focus and gates", className: "mc-span"},
+        h(Board, {
+          snapshot: props.snapshot,
+          onProjectPriority: props.onProjectPriority
+        })
+      ),
+      h(ShellCard, {title: "Task Boards", aside: "by workflow", className: "mc-span"},
+        h(Tasks, {
+          snapshot: props.snapshot,
+          onCreateManualTask: props.onCreateManualTask,
+          onTaskPriority: props.onTaskPriority,
+          onManualStatus: props.onManualStatus
+        })
+      )
     );
   }
 
@@ -595,7 +613,7 @@
           ["Shadow trials", lifecycle.shadow_trials || 0]
         ]})
       ),
-      h(ShellCard, {title: "Recent Briefs", className: "mc-span"},
+      h(ShellCard, {title: "Useful Findings", className: "mc-span"},
         h("div", {className: "mc-card-stack"}, (research.recent_briefs || []).length ? research.recent_briefs.map(function (brief) {
           return h("div", {className: "mc-feed-item", key: brief.brief_id},
             h("div", {className: "mc-card-top"}, h("strong", null, brief.title), h(Badge, null, brief.actionability)),
@@ -668,7 +686,7 @@
     );
   }
 
-  function SelfImprovement(props) {
+  function Improve(props) {
     var replay = (props.snapshot || {}).replay || {};
     var readiness = replay.readiness || {};
     var reliability = replay.reliability || {};
@@ -692,7 +710,7 @@
           }) : h("div", {className: "mc-empty"}, "No critical reliability rows")
         )
       ),
-      h(ShellCard, {title: "Harness Trace Feed", className: "mc-span"},
+      h(ShellCard, {title: "Trace Feed", className: "mc-span"},
         h("div", {className: "mc-card-stack"}, (replay.recent_traces || []).length ? replay.recent_traces.map(function (trace) {
           return h("div", {className: "mc-feed-item", key: trace.trace_id},
             h("div", {className: "mc-card-top"}, h("strong", null, trace.skill_name), h(Badge, null, trace.judge_verdict)),
@@ -866,7 +884,7 @@
           h("span", null, "Backlog ", h("strong", null, fmt(summary.backlog_items || 0)))
         )
       ),
-      h(ShellCard, {title: "Intelligence to Action Flow", aside: "research -> findings -> opportunity"},
+      h(ShellCard, {title: "System Flow", aside: "research -> findings -> opportunity"},
         h("div", {className: "mc-flow-main"}, (flow.main_stages || []).map(function (stage, index) {
           return h("div", {className: "mc-flow-main-wrap", key: stage.id},
             h(FlowStage, {stage: stage}),
@@ -874,7 +892,7 @@
           );
         }))
       ),
-      h(ShellCard, {title: "Routing Outcomes", aside: "what happens next"},
+      h(ShellCard, {title: "Where Work Goes Next", aside: "council, backlog, or more research"},
         h("div", {className: "mc-flow-branches"}, (flow.branch_stages || []).map(function (stage) {
           return h(FlowStage, {key: stage.id, stage: stage});
         }))
@@ -926,7 +944,7 @@
 
     function body() {
       if (!snapshot) return h("div", {className: "mc-loading"}, "Loading Mission Control...");
-      if (activeTab === "projects") return h(Board, {
+      if (activeTab === "work") return h(Work, {
         snapshot: snapshot,
         onProjectPriority: function (projectId, priority, focusNote) {
           return run(function () {
@@ -935,10 +953,7 @@
               focus_note: focusNote || ""
             });
           });
-        }
-      });
-      if (activeTab === "tasks") return h(Tasks, {
-        snapshot: snapshot,
+        },
         onCreateManualTask: function (event) {
           event.preventDefault();
           var form = event.currentTarget;
@@ -981,7 +996,7 @@
         }
       });
       if (activeTab === "finance") return h(Finance, {snapshot: snapshot});
-      if (activeTab === "self_improvement") return h(SelfImprovement, {snapshot: snapshot});
+      if (activeTab === "improve") return h(Improve, {snapshot: snapshot});
       return h(Overview, {
         snapshot: snapshot,
         onAckAlert: function (alertId) {
@@ -996,10 +1011,10 @@
         h("div", null,
           h("p", {className: "mc-eyebrow"}, "Hybrid Autonomous AI"),
           h("h1", null, "Mission Control"),
-          h("p", {className: "mc-subtitle"}, "Hermes-native operator cockpit that shows how the system senses, decides, builds, operates, and learns.")
+          h("p", {className: "mc-subtitle"}, "A lean operator cockpit for seeing what needs attention, where work is flowing, and which models are carrying each step.")
         ),
         h("div", {className: "mc-hero-note"},
-          h("strong", null, "Final plugin shape"),
+          h("strong", null, "Pre-live Hermes contract"),
           h("span", null, "No bundled React, no Node bridge, no live stream server. Gate and quarantine decisions remain read-only.")
         )
       ),
