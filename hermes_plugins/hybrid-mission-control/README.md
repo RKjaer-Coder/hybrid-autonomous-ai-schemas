@@ -1,8 +1,20 @@
 # Hybrid Mission Control Hermes Plugin
 
-This plugin is the Hermes-native replacement target for the standalone Mission
-Control prototype. It keeps the useful panels and actions, but renders them as a
-small dashboard tab inside Hermes instead of growing a separate frontend stack.
+This plugin is the Hermes-native Mission Control surface for Hybrid Autonomous
+AI. It renders the operator cockpit inside Hermes as a dashboard tab instead of
+growing a separate frontend stack.
+
+The bundle is intentionally small:
+
+- plain JavaScript IIFE
+- Hermes-provided React and UI components
+- Hermes theme CSS variables
+- bounded snapshot APIs
+- no Node bridge, Vite server, WebSocket fanout, or bundled React
+
+The dashboard covers Overview, Workflow, Projects, Tasks, Council, Research,
+Finance, Replay, System, and Decisions from the single
+`MissionControlService.snapshot()` contract.
 
 Install it through the runtime profile installer:
 
@@ -17,7 +29,6 @@ and writes `runtime_config.json` with the repo root and data directory. Then run
 hermes dashboard --no-open
 ```
 
-Gate and quarantine review actions are intentionally read-only in the first
-plugin version. They should become writable only after Hermes dashboard auth,
-audit logging, timeout handling, and replay semantics pass the same checks as
-the CLI gate path.
+Gate and quarantine review actions are intentionally read-only. They should
+become writable only after Hermes dashboard auth, audit logging, timeout
+handling, and replay semantics pass the same checks as the CLI gate path.

@@ -32,6 +32,19 @@
     return String(value);
   }
 
+  function money(value) {
+    return "$" + fmt(Number(value || 0));
+  }
+
+  function pct(value) {
+    if (value === null || value === undefined) return "n/a";
+    return Math.round(Number(value) * 100) + "%";
+  }
+
+  function keys(obj) {
+    return Object.keys(obj || {});
+  }
+
   function priorityTone(priority) {
     if (priority === "P0_IMMEDIATE") return "mc-priority mc-p0";
     if (priority === "P1_HIGH") return "mc-priority mc-p1";
@@ -49,22 +62,31 @@
     );
   }
 
-  function Kpis(props) {
-    var overview = props.overview || {};
-    var items = [
-      ["Runtime", overview.runtime_status || "UNKNOWN"],
-      ["Gates", overview.pending_gates || 0],
-      ["Harvests", overview.pending_harvests || 0],
-      ["Replay", overview.replay_readiness || "UNKNOWN"],
-      ["Milestones", overview.milestone_health || "UNKNOWN"],
-      ["Load", fmt(overview.operator_load_hours) + "h"]
-    ];
-    return h("div", {className: "mc-kpis"}, items.map(function (item) {
-      return h("div", {className: "mc-kpi", key: item[0]},
-        h("span", null, item[0]),
-        h("strong", null, item[1])
-      );
+  function Metric(props) {
+    return h("div", {className: "mc-kpi"},
+      h("span", null, props.label),
+      h("strong", null, props.value),
+      props.detail ? h("small", null, props.detail) : null
+    );
+  }
+
+  function MetricGrid(props) {
+    return h("div", {className: "mc-kpis"}, props.items.map(function (item) {
+      return h(Metric, {key: item[0], label: item[0], value: item[1], detail: item[2]});
     }));
+  }
+
+  function MiniRows(props) {
+    var source = props.items || {};
+    var rows = Array.isArray(source) ? source : keys(source).map(function (key) {
+      return [key, source[key]];
+    });
+    return h("div", {className: "mc-mini-list"}, rows.length ? rows.slice(0, props.limit || 8).map(function (row, index) {
+      return h("div", {className: "mc-mini-row", key: row[0] + index},
+        h("span", null, row[0]),
+        h("strong", null, fmt(row[1]))
+      );
+    }) : h("span", {className: "mc-muted"}, "No records"));
   }
 
   function SectionTabs(props) {
@@ -73,6 +95,11 @@
       ["workflow", "Workflow"],
       ["projects", "Projects"],
       ["tasks", "Tasks"],
+      ["council", "Council"],
+      ["research", "Research"],
+      ["finance", "Finance"],
+      ["replay", "Replay"],
+      ["system", "System"],
       ["decisions", "Decisions"]
     ];
     return h("div", {className: "mc-tabs"}, tabs.map(function (tab) {
@@ -87,16 +114,10 @@
   function Workflow(props) {
     var steps = (((props.snapshot || {}).workflow || {}).steps || []);
     return h("div", {className: "mc-workflow"}, steps.map(function (step) {
-      var details = Object.keys(step.detail || {}).slice(0, 5);
       return h("div", {className: "mc-flow-step", key: step.id},
         h("div", {className: "mc-flow-label"}, step.label),
         h("div", {className: "mc-flow-count"}, step.count || 0),
-        h("div", {className: "mc-mini-list"}, details.length ? details.map(function (key) {
-          return h("div", {className: "mc-mini-row", key: key},
-            h("span", null, key),
-            h("strong", null, step.detail[key])
-          );
-        }) : h("span", {className: "mc-muted"}, "No active items"))
+        h(MiniRows, {items: step.detail, limit: 5})
       );
     }));
   }
@@ -107,7 +128,7 @@
       value: props.value || "P3_BACKGROUND",
       onChange: function (event) { props.onChange(event.target.value); }
     }, priorities.map(function (priority) {
-      return h("option", {key: priority, value: priority}, priority.replace("P", "P").replace("_", " "));
+      return h("option", {key: priority, value: priority}, priority);
     }));
   }
 
@@ -122,8 +143,8 @@
       h("p", null, card.thesis || "No thesis recorded."),
       h("div", {className: "mc-meta-grid"},
         h("span", null, "Phase"), h("strong", null, card.phase_name || card.status),
-        h("span", null, "Cashflow"), h("strong", null, "$" + fmt(card.cashflow_actual_usd || 0)),
-        h("span", null, "Burn"), h("strong", null, card.executor_burn_ratio === null ? "n/a" : Math.round(card.executor_burn_ratio * 100) + "%")
+        h("span", null, "Cashflow"), h("strong", null, money(card.cashflow_actual_usd || 0)),
+        h("span", null, "Burn"), h("strong", null, card.executor_burn_ratio === null ? "n/a" : pct(card.executor_burn_ratio))
       ),
       h("div", {className: "mc-control-row"},
         h(PrioritySelect, {value: card.priority, onChange: function (priority) {
@@ -165,7 +186,7 @@
           value: task.status,
           onChange: function (event) { props.onManualStatus(task.id, event.target.value); }
         }, manualStatuses.map(function (status) {
-          return h("option", {key: status, value: status}, status.replace("_", " "));
+          return h("option", {key: status, value: status}, status);
         })) : null
       )
     );
@@ -201,24 +222,176 @@
     );
   }
 
+  function Council(props) {
+    var council = (props.snapshot || {}).council || {};
+    var summary = council.summary || {};
+    return h("div", {className: "mc-two-column"},
+      h(ShellCard, {title: "Council Signal", aside: "bounded"},
+        h(MetricGrid, {items: [
+          ["Verdicts", summary.total_verdicts || 0],
+          ["Tier 2", summary.tier2_verdicts || 0],
+          ["Degraded", summary.degraded_verdicts || 0],
+          ["Avg confidence", pct(summary.avg_confidence)],
+          ["DA quality", pct(summary.avg_da_quality)],
+          ["Tier 2 G3", summary.pending_tier2_g3 || 0]
+        ]})
+      ),
+      h(ShellCard, {title: "Decision Mix"},
+        h(MiniRows, {items: council.by_decision_type || {}})
+      ),
+      h(ShellCard, {title: "Recent Verdicts", className: "mc-span"},
+        h("div", {className: "mc-card-stack"}, (council.recent_verdicts || []).length ? council.recent_verdicts.map(function (item) {
+          return h("div", {className: "mc-feed-item", key: item.verdict_id},
+            h("div", {className: "mc-card-top"}, h("strong", null, item.decision_type), h(Badge, null, item.recommendation)),
+            h("p", null, item.reasoning_summary),
+            h("small", null, "tier " + item.tier_used + " · confidence " + pct(item.confidence))
+          );
+        }) : h("div", {className: "mc-empty"}, "No council verdicts"))
+      )
+    );
+  }
+
+  function Research(props) {
+    var research = (props.snapshot || {}).research || {};
+    var summary = research.summary || {};
+    return h("div", {className: "mc-two-column"},
+      h(ShellCard, {title: "Research Load"},
+        h(MetricGrid, {items: [
+          ["Briefs", summary.briefs_total || 0],
+          ["Actionable", summary.actionable_briefs || 0],
+          ["Quality holds", summary.quality_holds || 0],
+          ["Confidence", pct(summary.avg_brief_confidence)],
+          ["Harvests", summary.pending_harvests || 0],
+          ["Standing", summary.active_standing_briefs || 0]
+        ]})
+      ),
+      h(ShellCard, {title: "Task Status"},
+        h(MiniRows, {items: summary.tasks_by_status || {}})
+      ),
+      h(ShellCard, {title: "Recent Briefs", className: "mc-span"},
+        h("div", {className: "mc-card-stack"}, (research.recent_briefs || []).length ? research.recent_briefs.map(function (brief) {
+          return h("div", {className: "mc-feed-item", key: brief.brief_id},
+            h("div", {className: "mc-card-top"}, h("strong", null, brief.title), h(Badge, null, brief.actionability)),
+            h("p", null, brief.summary),
+            h("small", null, "domain " + brief.domain + " · " + brief.urgency + " · " + pct(brief.confidence))
+          );
+        }) : h("div", {className: "mc-empty"}, "No briefs"))
+      )
+    );
+  }
+
+  function Finance(props) {
+    var finance = (props.snapshot || {}).finance || {};
+    var summary = finance.summary || {};
+    return h("div", {className: "mc-two-column"},
+      h(ShellCard, {title: "Financial Posture", aside: "$0 autonomous spend"},
+        h(MetricGrid, {items: [
+          ["Revenue", money(summary.total_revenue_usd)],
+          ["Cost", money(summary.total_cost_usd)],
+          ["Cloud", money(summary.cloud_cost_usd)],
+          ["Net", money(summary.net_usd)],
+          ["Disputed", money(summary.disputed_cost_usd)],
+          ["Paid enabled", summary.autonomous_paid_spend_enabled ? "Yes" : "No"]
+        ]})
+      ),
+      h(ShellCard, {title: "Route Mix"},
+        h("div", {className: "mc-card-stack"}, (finance.route_mix || []).length ? finance.route_mix.map(function (route) {
+          return h("div", {className: "mc-mini-row", key: route.route},
+            h("span", null, route.route),
+            h("strong", null, route.count + " · " + money(route.cost_usd))
+          );
+        }) : h("div", {className: "mc-empty"}, "No routing decisions"))
+      ),
+      h(ShellCard, {title: "Project P&L", className: "mc-span"},
+        h("div", {className: "mc-card-stack"}, (finance.project_pnl || []).length ? finance.project_pnl.map(function (item) {
+          return h("div", {className: "mc-feed-item", key: item.project_id},
+            h("div", {className: "mc-card-top"}, h("strong", null, item.name), h(Badge, null, money(item.net_to_date))),
+            h(MiniRows, {items: [["Revenue", money(item.revenue_to_date)], ["Direct cost", money(item.direct_cost)]]})
+          );
+        }) : h("div", {className: "mc-empty"}, "No active project P&L"))
+      )
+    );
+  }
+
+  function Replay(props) {
+    var replay = (props.snapshot || {}).replay || {};
+    var readiness = replay.readiness || {};
+    var reliability = replay.reliability || {};
+    return h("div", {className: "mc-two-column"},
+      h(ShellCard, {title: "Replay Readiness", aside: readiness.status || "UNKNOWN"},
+        h(MetricGrid, {items: [
+          ["Eligible", (readiness.eligible_source_traces || 0) + "/" + (readiness.minimum_eligible_traces || 500)],
+          ["Known bad", (readiness.known_bad_source_traces || 0) + "/" + (readiness.minimum_known_bad_traces || 25)],
+          ["Skills", (readiness.distinct_skill_count || 0) + "/" + (readiness.minimum_distinct_skills || 3)],
+          ["Ack below threshold", readiness.operator_ack_required_below_threshold ? "Yes" : "No"]
+        ]})
+      ),
+      h(ShellCard, {title: "Reliability Watch"},
+        h("div", {className: "mc-card-stack"},
+          (reliability.critical_steps || []).length ? (reliability.critical_steps || []).map(function (step) {
+            return h("div", {className: "mc-mini-row", key: step.step_type + step.skill},
+              h("span", null, step.step_type + " / " + step.skill),
+              h("strong", null, pct(step.reliability_7d))
+            );
+          }) : h("div", {className: "mc-empty"}, "No critical reliability rows")
+        )
+      ),
+      h(ShellCard, {title: "Recent Traces", className: "mc-span"},
+        h("div", {className: "mc-card-stack"}, (replay.recent_traces || []).length ? replay.recent_traces.map(function (trace) {
+          return h("div", {className: "mc-feed-item", key: trace.trace_id},
+            h("div", {className: "mc-card-top"}, h("strong", null, trace.skill_name), h(Badge, null, trace.judge_verdict)),
+            h("p", null, trace.intent_goal),
+            h("small", null, "score " + fmt(trace.outcome_score) + " · " + fmt(trace.duration_ms) + "ms")
+          );
+        }) : h("div", {className: "mc-empty"}, "No execution traces"))
+      )
+    );
+  }
+
+  function System(props) {
+    var system = (props.snapshot || {}).system || {};
+    var runtime = system.runtime_control || {};
+    var breaker = system.circuit_breakers || {};
+    return h("div", {className: "mc-two-column"},
+      h(ShellCard, {title: "Runtime Control"},
+        h(MetricGrid, {items: [
+          ["Lifecycle", runtime.lifecycle_state || "UNKNOWN"],
+          ["Heartbeat", system.heartbeat_state || "UNKNOWN"],
+          ["Digest", system.recommended_digest_type || "daily"],
+          ["Blocked restarts", runtime.blocked_restart_attempts || 0],
+          ["Judge", (system.judge_deadlock || {}).mode || "UNKNOWN"],
+          ["Quarantines", ((system.quarantined_responses || {}).pending_review_count || 0)]
+        ]})
+      ),
+      h(ShellCard, {title: "Circuit Breakers"},
+        h(MiniRows, {items: [
+          ["Critical", (breaker.critical || []).length],
+          ["Degraded", (breaker.degraded || []).length],
+          ["Active", (breaker.logged_active || []).length],
+          ["T3 alerts", breaker.unacknowledged_t3_alerts || 0],
+          ["Operator overload", breaker.operator_overload ? "Yes" : "No"]
+        ]})
+      ),
+      h(ShellCard, {title: "Database Contracts", className: "mc-span"},
+        h(MiniRows, {items: system.db_status || {}})
+      )
+    );
+  }
+
   function Decisions(props) {
     var decisions = ((props.snapshot || {}).decisions || {});
-    var gates = decisions.pending_gates || [];
-    var g3 = decisions.pending_g3_requests || [];
-    var quarantines = decisions.pending_quarantines || [];
-    var halts = decisions.runtime_halts || [];
     return h("div", {className: "mc-decision-grid"},
-      decisionList("Pending Gates", gates, function (item) {
+      decisionList("Pending Gates", decisions.pending_gates || [], function (item) {
         return [item.gate_type, item.trigger_description, item.project_name || item.project_id || "No project"];
       }),
-      decisionList("G3 Spend Requests", g3, function (item) {
-        return [item.request_id || item.approval_id || "G3", item.reason || item.task_summary || "Approval required", "Read-only until dashboard gate validation"];
+      decisionList("G3 Spend Requests", decisions.pending_g3_requests || [], function (item) {
+        return [item.request_id || item.approval_id || "G3", item.justification || item.reason || "Approval required", "Read-only until dashboard gate validation"];
       }),
-      decisionList("Quarantines", quarantines, function (item) {
-        return [item.quarantine_id || "Quarantine", item.reason || item.block_reason || "Pending review", "Read-only until dashboard gate validation"];
+      decisionList("Quarantines", decisions.pending_quarantines || [], function (item) {
+        return [item.quarantine_id || "Quarantine", item.reason || item.source_breaker || "Pending review", "Read-only until dashboard gate validation"];
       }),
-      decisionList("Runtime Halts", halts, function (item) {
-        return [item.event_id || "Runtime halt", item.reason || item.trigger || "Active halt", item.status || "ACTIVE"];
+      decisionList("Runtime Halts", decisions.runtime_halts || [], function (item) {
+        return [item.halt_id || item.event_id || "Runtime halt", item.halt_reason || item.reason || "Active halt", item.status || "ACTIVE"];
       })
     );
   }
@@ -240,9 +413,25 @@
     var snapshot = props.snapshot || {};
     var alerts = snapshot.alerts || [];
     var digest = snapshot.latest_digest;
+    var posture = snapshot.runtime_posture || {};
     return h("div", {className: "mc-overview-grid"},
       h(ShellCard, {title: "System Pulse", aside: snapshot.generated_at ? SDK.utils.isoTimeAgo(snapshot.generated_at) : "Live"},
-        h(Kpis, {overview: snapshot.overview})
+        h(MetricGrid, {items: [
+          ["Runtime", ((snapshot.overview || {}).runtime_status || {}).lifecycle_state || "UNKNOWN"],
+          ["Gates", (snapshot.overview || {}).pending_gates || 0],
+          ["Harvests", (snapshot.overview || {}).pending_harvests || 0],
+          ["Replay", (snapshot.overview || {}).replay_readiness || "UNKNOWN"],
+          ["Milestones", ((snapshot.overview || {}).milestone_health || {}).overall || "UNKNOWN"],
+          ["Load", fmt((snapshot.overview || {}).operator_load_hours || 0) + "h"]
+        ]})
+      ),
+      h(ShellCard, {title: "Runtime Posture", aside: posture.substrate || "Hermes"},
+        h(MiniRows, {items: [
+          ["Mode", posture.mode || "prebuilt"],
+          ["Gate writes", posture.gate_actions_enabled ? "enabled" : "read-only"],
+          ["Poll interval", (posture.poll_interval_seconds || 15) + "s"],
+          ["Heavy services", (posture.heavy_services || []).length]
+        ]})
       ),
       h(ShellCard, {title: "Latest Digest"},
         digest ? h("pre", {className: "mc-digest"}, JSON.stringify(digest, null, 2)) : h("div", {className: "mc-empty"}, "No digest yet")
@@ -251,8 +440,8 @@
         h("div", {className: "mc-card-stack"}, alerts.length ? alerts.map(function (alert) {
           return h("div", {className: "mc-alert", key: alert.alert_id || alert.created_at},
             h("strong", null, alert.alert_type || alert.type || "Alert"),
-            h("p", null, alert.message || alert.trigger_description || "No message"),
-            alert.acknowledged_at ? null : h(Button, {
+            h("p", null, alert.content || alert.message || alert.trigger_description || "No message"),
+            alert.acknowledged ? null : h(Button, {
               variant: "secondary",
               onClick: function () { props.onAckAlert(alert.alert_id); }
             }, "Acknowledge")
@@ -286,7 +475,7 @@
 
     useEffect(function () {
       refresh();
-      var timer = setInterval(refresh, 5000);
+      var timer = setInterval(refresh, 15000);
       return function () { clearInterval(timer); };
     }, []);
 
@@ -329,6 +518,11 @@
           return run(function () { return post("/manual-tasks/" + encodeURIComponent(taskId), {status: status}); });
         }
       });
+      if (activeTab === "council") return h(Council, {snapshot: snapshot});
+      if (activeTab === "research") return h(Research, {snapshot: snapshot});
+      if (activeTab === "finance") return h(Finance, {snapshot: snapshot});
+      if (activeTab === "replay") return h(Replay, {snapshot: snapshot});
+      if (activeTab === "system") return h(System, {snapshot: snapshot});
       if (activeTab === "decisions") return h(Decisions, {snapshot: snapshot});
       return h(Overview, {
         snapshot: snapshot,
@@ -344,11 +538,11 @@
         h("div", null,
           h("p", {className: "mc-eyebrow"}, "Hybrid Autonomous AI"),
           h("h1", null, "Mission Control"),
-          h("p", {className: "mc-subtitle"}, "A Hermes-native operator tab for workflow state, boards, priorities, and decision pressure.")
+          h("p", {className: "mc-subtitle"}, "Hermes-native operator cockpit for strategy, projects, research, finance, replay, and system pressure.")
         ),
         h("div", {className: "mc-hero-note"},
-          h("strong", null, "Gate-safe v1"),
-          h("span", null, "Gates and quarantines are visible but read-only until dashboard auth and audit validation pass.")
+          h("strong", null, "Final plugin shape"),
+          h("span", null, "No bundled React, no Node bridge, no live stream server. Gate and quarantine decisions remain read-only.")
         )
       ),
       error ? h("div", {className: "mc-error"}, error) : null,

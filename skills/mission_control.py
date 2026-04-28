@@ -15,6 +15,7 @@ from skills.operator_interface.skill import OperatorInterfaceSkill
 
 PRIORITIES = ("P0_IMMEDIATE", "P1_HIGH", "P2_NORMAL", "P3_BACKGROUND")
 MANUAL_TASK_STATUSES = ("TODO", "IN_PROGRESS", "BLOCKED", "DONE")
+FINAL_DASHBOARD_CONTRACT = "hermes-dashboard-plugin-v1"
 PROJECT_LANES = (
     "PIPELINE",
     "VALIDATE",
@@ -52,6 +53,10 @@ def _task_lane_from_status(source: str, status: str | None) -> str:
     return "TODO"
 
 
+def _counter(rows: Any, key: str = "count") -> dict[str, int]:
+    return {row[0]: int(row[key]) for row in rows}
+
+
 class MissionControlService:
     def __init__(self, db_manager: DatabaseManager, *, interaction_channel: str = "mission_control"):
         self._db = db_manager
@@ -68,8 +73,21 @@ class MissionControlService:
         tasks = self.task_board()
         decisions = self.decisions()
         workflow = self.workflow()
+        council = self.council()
+        research = self.research()
+        finance = self.finance()
+        replay = self.replay()
+        system = self.system()
         return {
+            "contract": FINAL_DASHBOARD_CONTRACT,
             "generated_at": _utc_now(),
+            "runtime_posture": {
+                "substrate": "Hermes dashboard plugin",
+                "mode": "prebuilt_without_live_hermes",
+                "gate_actions_enabled": False,
+                "heavy_services": [],
+                "poll_interval_seconds": 15,
+            },
             "overview": {
                 "runtime_status": workspace["runtime_status"],
                 "replay_readiness": workspace["replay_readiness"],
@@ -89,6 +107,11 @@ class MissionControlService:
             "project_board": board,
             "tasks": tasks,
             "decisions": decisions,
+            "council": council,
+            "research": research,
+            "finance": finance,
+            "replay": replay,
+            "system": system,
         }
 
     def workflow(self) -> dict[str, Any]:
@@ -163,6 +186,219 @@ class MissionControlService:
             "opportunities": {row["status"]: int(row["count"]) for row in opportunity_rows},
             "projects": {row["status"]: int(row["count"]) for row in project_rows},
             "queues": queue_summary,
+        }
+
+    def council(self) -> dict[str, Any]:
+        strategic = self._db.get_connection("strategic_memory")
+        operator = self._db.get_connection("operator_digest")
+        verdict_rows = strategic.execute(
+            """
+            SELECT
+                verdict_id, tier_used, decision_type, recommendation, confidence,
+                reasoning_summary, dissenting_views, project_id, da_quality_score,
+                tie_break, degraded, confidence_cap, created_at
+            FROM council_verdicts
+            ORDER BY created_at DESC
+            LIMIT 10
+            """
+        ).fetchall()
+        by_type = strategic.execute(
+            "SELECT decision_type, COUNT(*) AS count FROM council_verdicts GROUP BY decision_type"
+        ).fetchall()
+        quality = strategic.execute(
+            """
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN tier_used = 2 THEN 1 ELSE 0 END) AS tier2,
+                SUM(CASE WHEN degraded = 1 THEN 1 ELSE 0 END) AS degraded,
+                SUM(CASE WHEN tie_break = 1 THEN 1 ELSE 0 END) AS tie_breaks,
+                AVG(confidence) AS avg_confidence,
+                AVG(da_quality_score) AS avg_da_quality
+            FROM council_verdicts
+            """
+        ).fetchone()
+        pending_tier2 = operator.execute(
+            """
+            SELECT gate_id, gate_type, trigger_description, project_id, expires_at
+            FROM gate_log
+            WHERE gate_type = 'G3' AND status = 'PENDING' AND trigger_description LIKE 'council_tier2:%'
+            ORDER BY expires_at ASC
+            LIMIT 8
+            """
+        ).fetchall()
+        return {
+            "summary": {
+                "total_verdicts": int(quality["total"] or 0),
+                "tier2_verdicts": int(quality["tier2"] or 0),
+                "degraded_verdicts": int(quality["degraded"] or 0),
+                "tie_breaks": int(quality["tie_breaks"] or 0),
+                "avg_confidence": float(quality["avg_confidence"] or 0.0),
+                "avg_da_quality": float(quality["avg_da_quality"] or 0.0),
+                "pending_tier2_g3": len(pending_tier2),
+            },
+            "by_decision_type": _counter(by_type, "count"),
+            "recent_verdicts": [dict(row) for row in verdict_rows],
+            "pending_tier2_gates": [dict(row) for row in pending_tier2],
+        }
+
+    def research(self) -> dict[str, Any]:
+        strategic = self._db.get_connection("strategic_memory")
+        operator = self._db.get_connection("operator_digest")
+        domain_rows = strategic.execute(
+            """
+            SELECT domain, status, COUNT(*) AS count
+            FROM research_tasks
+            GROUP BY domain, status
+            ORDER BY domain, status
+            """
+        ).fetchall()
+        brief_rows = strategic.execute(
+            """
+            SELECT brief_id, task_id, domain, title, summary, confidence, actionability,
+                   urgency, depth_tier, quality_warning, source_diversity_hold, created_at
+            FROM intelligence_briefs
+            ORDER BY created_at DESC
+            LIMIT 8
+            """
+        ).fetchall()
+        standing_rows = strategic.execute(
+            """
+            SELECT standing_brief_id, domain, title, status, target_interface, last_run_at, updated_at
+            FROM standing_briefs
+            ORDER BY updated_at DESC
+            LIMIT 8
+            """
+        ).fetchall()
+        harvest_rows = operator.execute(
+            """
+            SELECT harvest_id, task_id, target_interface, priority, status, expires_at, created_at
+            FROM harvest_requests
+            WHERE status IN ('PENDING', 'DELIVERED_PARTIAL', 'EXPIRED')
+            ORDER BY
+                CASE priority
+                    WHEN 'P0_IMMEDIATE' THEN 0
+                    WHEN 'P1_HIGH' THEN 1
+                    WHEN 'P2_NORMAL' THEN 2
+                    ELSE 3
+                END,
+                expires_at ASC
+            LIMIT 10
+            """
+        ).fetchall()
+        status_rows = strategic.execute(
+            "SELECT status, COUNT(*) AS count FROM research_tasks GROUP BY status"
+        ).fetchall()
+        brief_quality = strategic.execute(
+            """
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN actionability IN ('ACTION_RECOMMENDED','ACTION_REQUIRED','HARVEST_NEEDED') THEN 1 ELSE 0 END) AS actionable,
+                SUM(CASE WHEN quality_warning = 1 OR source_diversity_hold = 1 THEN 1 ELSE 0 END) AS quality_holds,
+                AVG(confidence) AS avg_confidence
+            FROM intelligence_briefs
+            """
+        ).fetchone()
+        domain_matrix: dict[str, dict[str, int]] = {}
+        for row in domain_rows:
+            domain_matrix.setdefault(str(row["domain"]), {})[row["status"]] = int(row["count"])
+        return {
+            "summary": {
+                "tasks_by_status": _counter(status_rows, "count"),
+                "active_standing_briefs": sum(1 for row in standing_rows if row["status"] == "ACTIVE"),
+                "pending_harvests": sum(1 for row in harvest_rows if row["status"] == "PENDING"),
+                "briefs_total": int(brief_quality["total"] or 0),
+                "actionable_briefs": int(brief_quality["actionable"] or 0),
+                "quality_holds": int(brief_quality["quality_holds"] or 0),
+                "avg_brief_confidence": float(brief_quality["avg_confidence"] or 0.0),
+            },
+            "domain_matrix": domain_matrix,
+            "recent_briefs": [dict(row) for row in brief_rows],
+            "standing_briefs": [dict(row) for row in standing_rows],
+            "harvest_queue": [dict(row) for row in harvest_rows],
+        }
+
+    def finance(self) -> dict[str, Any]:
+        financial = self._db.get_connection("financial_ledger")
+        pnl_rows = financial.execute(
+            """
+            SELECT project_id, name, revenue_to_date, direct_cost, net_to_date
+            FROM project_pnl
+            ORDER BY net_to_date DESC, name ASC
+            LIMIT 10
+            """
+        ).fetchall()
+        route_rows = financial.execute(
+            """
+            SELECT route_selected, COUNT(*) AS count, COALESCE(SUM(cost_usd), 0.0) AS cost_usd
+            FROM routing_decisions
+            GROUP BY route_selected
+            ORDER BY count DESC
+            """
+        ).fetchall()
+        spend = financial.execute(
+            """
+            SELECT
+                COALESCE(SUM(amount_usd), 0.0) AS total_cost,
+                COALESCE(SUM(CASE WHEN cost_category = 'cloud_api' THEN amount_usd ELSE 0.0 END), 0.0) AS cloud_cost,
+                COALESCE(SUM(CASE WHEN cost_status = 'DISPUTED' THEN amount_usd ELSE 0.0 END), 0.0) AS disputed_cost
+            FROM cost_records
+            """
+        ).fetchone()
+        revenue = financial.execute(
+            "SELECT COALESCE(SUM(amount_usd), 0.0) AS total_revenue FROM revenue_records"
+        ).fetchone()
+        g3_rows = financial.execute(
+            "SELECT status, COUNT(*) AS count FROM g3_approval_requests GROUP BY status"
+        ).fetchall()
+        pending_g3 = self._operator.list_g3_approval_requests(limit=8, status="PENDING")
+        return {
+            "summary": {
+                "total_revenue_usd": float(revenue["total_revenue"] or 0.0),
+                "total_cost_usd": float(spend["total_cost"] or 0.0),
+                "cloud_cost_usd": float(spend["cloud_cost"] or 0.0),
+                "disputed_cost_usd": float(spend["disputed_cost"] or 0.0),
+                "net_usd": float((revenue["total_revenue"] or 0.0) - (spend["total_cost"] or 0.0)),
+                "g3_by_status": _counter(g3_rows, "count"),
+                "autonomous_paid_spend_enabled": False,
+            },
+            "route_mix": [
+                {"route": row["route_selected"], "count": int(row["count"]), "cost_usd": float(row["cost_usd"] or 0.0)}
+                for row in route_rows
+            ],
+            "project_pnl": [dict(row) for row in pnl_rows],
+            "pending_g3_requests": pending_g3,
+        }
+
+    def replay(self) -> dict[str, Any]:
+        report = self._observability.replay_readiness_report()
+        reliability = self._observability.reliability_dashboard(limit=10)
+        traces = self._observability.execution_traces(limit=8)
+        variants = self._observability.harness_variants(limit=8)
+        frontier = self._observability.harness_frontier(limit=6)
+        summary = self._observability.harness_variant_summary()
+        return {
+            "readiness": report,
+            "reliability": reliability,
+            "execution_trace_summary": summary["execution_traces"],
+            "variant_summary": summary["variants"],
+            "recent_traces": traces,
+            "variants": variants,
+            "frontier": frontier,
+        }
+
+    def system(self) -> dict[str, Any]:
+        health = self._observability.system_health()
+        return {
+            "db_status": health["db_status"],
+            "heartbeat_state": health["heartbeat_state"],
+            "last_heartbeat_at": health["last_heartbeat_at"],
+            "runtime_control": health["runtime_control"],
+            "judge_deadlock": health["judge_deadlock"],
+            "circuit_breakers": health["circuit_breakers"],
+            "quarantined_responses": health["quarantined_responses"],
+            "disputed_costs": health["disputed_costs"],
+            "operator_load": health["operator_load"],
+            "recommended_digest_type": health["recommended_digest_type"],
         }
 
     def project_board(self) -> dict[str, Any]:

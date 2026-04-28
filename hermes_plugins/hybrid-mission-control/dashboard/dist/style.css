@@ -10,7 +10,7 @@
   gap: 1rem;
   padding: 1.2rem;
   border: 1px solid var(--color-border);
-  border-radius: 1.2rem;
+  border-radius: 0.5rem;
   background:
     radial-gradient(circle at top left, color-mix(in srgb, var(--color-primary) 22%, transparent), transparent 32%),
     linear-gradient(135deg, color-mix(in srgb, var(--color-card) 92%, var(--color-primary)), var(--color-card));
@@ -29,15 +29,15 @@
   margin: 0 0 0.35rem;
   font-size: 0.75rem;
   font-weight: 700;
-  letter-spacing: 0.08em;
+  letter-spacing: 0;
   text-transform: uppercase;
 }
 
 .mc-hero h1 {
   margin: 0;
-  font-size: clamp(2rem, 5vw, 4rem);
-  letter-spacing: -0.06em;
-  line-height: 0.9;
+  font-size: 2.2rem;
+  letter-spacing: 0;
+  line-height: 1;
 }
 
 .mc-subtitle {
@@ -57,7 +57,7 @@
 .mc-alert,
 .mc-empty {
   border: 1px solid var(--color-border);
-  border-radius: 0.95rem;
+  border-radius: 0.5rem;
   background: color-mix(in srgb, var(--color-card) 88%, transparent);
 }
 
@@ -84,7 +84,7 @@
 
 .mc-tab {
   border: 1px solid var(--color-border);
-  border-radius: 999px;
+  border-radius: 0.5rem;
   background: var(--color-card);
   color: var(--color-foreground);
   cursor: pointer;
@@ -113,7 +113,7 @@
 }
 
 .mc-card-title {
-  letter-spacing: -0.03em;
+  letter-spacing: 0;
 }
 
 .mc-card-content,
@@ -152,7 +152,7 @@
   color: var(--color-muted-foreground);
   font-size: 0.78rem;
   font-weight: 700;
-  letter-spacing: 0.07em;
+  letter-spacing: 0;
   text-transform: uppercase;
 }
 
@@ -161,7 +161,7 @@
   display: block;
   margin-top: 0.35rem;
   font-size: 1.5rem;
-  letter-spacing: -0.04em;
+  letter-spacing: 0;
 }
 
 .mc-mini-row,
@@ -173,6 +173,16 @@
   align-items: center;
   justify-content: space-between;
   gap: 0.6rem;
+}
+
+.mc-two-column {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.75fr);
+  gap: 1rem;
+}
+
+.mc-span {
+  grid-column: 1 / -1;
 }
 
 .mc-board {
@@ -221,7 +231,7 @@
 .mc-board-card h4,
 .mc-task h4 {
   margin: 0.55rem 0 0.35rem;
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
 }
 
 .mc-board-card p,
@@ -242,13 +252,13 @@
 
 .mc-priority,
 .mc-pill {
-  border-radius: 999px;
+  border-radius: 0.5rem;
   padding: 0.2rem 0.45rem;
   background: var(--color-muted);
   color: var(--color-muted-foreground);
   font-size: 0.68rem;
   font-weight: 700;
-  letter-spacing: 0.04em;
+  letter-spacing: 0;
 }
 
 .mc-p0 {
@@ -275,7 +285,7 @@
 .mc-task-form textarea {
   width: 100%;
   border: 1px solid var(--color-border);
-  border-radius: 0.7rem;
+  border-radius: 0.5rem;
   background: var(--color-background);
   color: var(--color-foreground);
   padding: 0.45rem 0.55rem;
@@ -298,7 +308,7 @@
 .mc-digest {
   max-height: 18rem;
   overflow: auto;
-  border-radius: 0.8rem;
+  border-radius: 0.5rem;
   padding: 0.75rem;
   background: var(--color-muted);
   color: var(--color-muted-foreground);
@@ -307,7 +317,7 @@
 
 .mc-error {
   border: 1px solid color-mix(in srgb, var(--color-destructive) 40%, transparent);
-  border-radius: 0.85rem;
+  border-radius: 0.5rem;
   padding: 0.75rem;
   color: var(--color-destructive);
   background: color-mix(in srgb, var(--color-destructive) 10%, transparent);
@@ -321,7 +331,12 @@
 @media (max-width: 900px) {
   .mc-hero,
   .mc-overview-grid,
-  .mc-task-layout {
+  .mc-task-layout,
+  .mc-two-column {
     grid-template-columns: 1fr;
+  }
+
+  .mc-span {
+    grid-column: auto;
   }
 }

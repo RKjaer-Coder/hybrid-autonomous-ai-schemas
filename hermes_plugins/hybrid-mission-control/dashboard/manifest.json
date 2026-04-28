@@ -1,9 +1,9 @@
 {
   "name": "hybrid-mission-control",
   "label": "Mission Control",
-  "description": "Operator view for Hybrid Autonomous AI workflow, boards, priorities, and decision queues.",
+  "description": "Lean operator cockpit for Hybrid Autonomous AI strategy, projects, research, finance, replay, and system health.",
   "icon": "Activity",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "tab": {
     "path": "/mission-control",
     "position": "after:skills"

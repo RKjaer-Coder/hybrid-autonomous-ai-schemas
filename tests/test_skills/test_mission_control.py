@@ -109,8 +109,17 @@ def test_mission_control_snapshot_surfaces_workflow_board_and_tasks(test_data_di
     service.create_manual_task(title="Review workflow board", priority="P1_HIGH", status="TODO", project_id="proj-1")
     snapshot = service.snapshot()
 
+    assert snapshot["contract"] == "hermes-dashboard-plugin-v1"
+    assert snapshot["runtime_posture"]["mode"] == "prebuilt_without_live_hermes"
+    assert snapshot["runtime_posture"]["heavy_services"] == []
     assert snapshot["overview"]["pending_gates"] == 1
     assert snapshot["workflow"]["projects"]["ACTIVE"] == 1
+    assert "council" in snapshot
+    assert "research" in snapshot
+    assert "finance" in snapshot
+    assert "replay" in snapshot
+    assert "system" in snapshot
+    assert snapshot["finance"]["summary"]["autonomous_paid_spend_enabled"] is False
     assert any(lane["id"] == "BUILD" and lane["count"] == 1 for lane in snapshot["project_board"]["lanes"])
     assert any(card["kind"] == "manual" for card in snapshot["tasks"]["cards"])
     assert any(card["priority"] == "P0_IMMEDIATE" for card in snapshot["project_board"]["cards"])
@@ -184,11 +193,18 @@ def test_hermes_dashboard_plugin_artifacts_are_tiny_and_harness_backed():
     assert manifest["api"] == "plugin_api.py"
     assert "window.__HERMES_PLUGINS__.register(\"hybrid-mission-control\"" in index_js
     assert "/api/plugins/hybrid-mission-control" in index_js
-    assert "Gate-safe v1" in index_js
+    assert "Final plugin shape" in index_js
+    assert "No bundled React, no Node bridge, no live stream server" in index_js
+    assert "setInterval(refresh, 15000)" in index_js
+    assert "\"council\", \"Council\"" in index_js
+    assert "\"finance\", \"Finance\"" in index_js
+    assert "\"replay\", \"Replay\"" in index_js
     assert "MissionControlService" in plugin_api
     assert "review_g3" not in plugin_api
     assert "review_quarantine" not in plugin_api
     assert "var(--color-card)" in style_css
+    assert "letter-spacing: -" not in style_css
+    assert "vw" not in style_css
 
 
 def test_mission_control_http_server_serves_snapshot_api(test_data_dir):
