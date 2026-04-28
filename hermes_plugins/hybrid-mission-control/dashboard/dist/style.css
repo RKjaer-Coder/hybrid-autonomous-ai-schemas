@@ -20,7 +20,9 @@
 .mc-muted,
 .mc-mini-row,
 .mc-meta-grid,
-.mc-decision small {
+.mc-decision small,
+.mc-work-card small,
+.mc-council-role small {
   color: var(--color-muted-foreground);
 }
 
@@ -51,7 +53,7 @@
 .mc-lane,
 .mc-task-form,
 .mc-board-card,
-.mc-task,
+.mc-work-card,
 .mc-decision,
 .mc-alert,
 .mc-empty {
@@ -69,9 +71,10 @@
 
 .mc-hero-note span,
 .mc-board-card p,
-.mc-task p,
+.mc-work-card p,
 .mc-decision p,
-.mc-alert p {
+.mc-alert p,
+.mc-council-role p {
   color: var(--color-muted-foreground);
 }
 
@@ -750,7 +753,7 @@
 }
 
 .mc-board-card,
-.mc-task,
+.mc-work-card,
 .mc-decision,
 .mc-alert,
 .mc-empty,
@@ -759,13 +762,13 @@
 }
 
 .mc-board-card h4,
-.mc-task h4 {
+.mc-work-card h4 {
   margin: 0.55rem 0 0.35rem;
   letter-spacing: 0;
 }
 
 .mc-board-card p,
-.mc-task p,
+.mc-work-card p,
 .mc-decision p,
 .mc-alert p {
   margin: 0.25rem 0 0;
@@ -865,6 +868,38 @@
   display: flex;
   align-items: center;
   gap: 0.55rem;
+}
+
+.mc-work-grid,
+.mc-council-role-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 0.75rem;
+}
+
+.mc-council-architecture {
+  display: grid;
+  gap: 1rem;
+}
+
+.mc-council-architecture h3 {
+  margin: 0 0 0.7rem;
+  font-size: 0.95rem;
+}
+
+.mc-council-role {
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+  background: color-mix(in srgb, var(--color-card) 90%, transparent);
+  padding: 0.75rem;
+  display: grid;
+  gap: 0.45rem;
+}
+
+.mc-council-role p {
+  margin: 0;
+  font-size: 0.86rem;
+  line-height: 1.35;
 }
 
 .mc-digest {

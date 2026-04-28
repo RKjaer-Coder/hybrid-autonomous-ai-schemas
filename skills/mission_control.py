@@ -226,6 +226,11 @@ class MissionControlService:
         replay = self.replay()
         system = self.system()
         model_assignments = self.model_assignments()
+        council["architecture"] = self.council_architecture(model_assignments)
+        council["decision_backlog"] = self.council_decision_backlog(decisions)
+        council["operator_pending_verdicts"] = self.council_operator_pending_verdicts(
+            council.get("recent_verdicts", []), decisions
+        )
         resource_pressure = _system_resource_pressure()
         usage = self.usage(resource_pressure)
         area_status = self.area_status(
@@ -274,6 +279,118 @@ class MissionControlService:
             "replay": replay,
             "system": system,
         }
+
+    def council_architecture(self, model_assignments: list[dict[str, Any]]) -> dict[str, Any]:
+        council_models = self._models_for_area(model_assignments, "Council")
+        primary_models = self._models_for_area(model_assignments, "Projects")
+        finance_models = self._models_for_area(model_assignments, "Finance")
+
+        def model_for(index: int, fallback: str = "unassigned") -> dict[str, Any]:
+            candidates = council_models or primary_models or finance_models
+            if not candidates:
+                return {"role": "Model", "model": fallback, "route": "unassigned", "count": 0}
+            return candidates[index % len(candidates)]
+
+        tier1_roles = [
+            ("strategist", "Strategist", "Builds the strongest pursue case."),
+            ("critic", "Critic", "Builds the strongest failure case."),
+            ("realist", "Realist", "Checks execution requirements and constraints."),
+            ("devils_advocate", "Devil's Advocate", "Finds the shared blind spot."),
+            ("synthesizer", "Synthesizer", "Produces the final CouncilVerdict."),
+        ]
+        tier2_roles = [
+            ("model_a", "Independent Model A", "First independent position."),
+            ("model_b", "Independent Model B", "Second independent position."),
+            ("model_c", "Independent Model C", "Optional third position when value justifies cost."),
+            ("synthesis", "Synthesis Model", "Records minority positions and final verdict."),
+        ]
+        return {
+            "trigger": "Tier 1 by default; Tier 2 for low confidence, novelty, high stakes, or justified spend.",
+            "tier1": [
+                {
+                    "id": role_id,
+                    "label": label,
+                    "detail": detail,
+                    "model": model_for(idx),
+                    "mode": "isolated Hermes subagent" if role_id != "synthesizer" else "synthesis pass",
+                }
+                for idx, (role_id, label, detail) in enumerate(tier1_roles)
+            ],
+            "tier2": [
+                {
+                    "id": role_id,
+                    "label": label,
+                    "detail": detail,
+                    "model": model_for(idx),
+                    "mode": "mixture_of_agents" if role_id != "synthesis" else "debate synthesis",
+                }
+                for idx, (role_id, label, detail) in enumerate(tier2_roles)
+            ],
+        }
+
+    def council_decision_backlog(self, decisions: dict[str, Any]) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for gate in decisions.get("pending_gates", []):
+            items.append(
+                {
+                    "id": gate.get("gate_id"),
+                    "kind": gate.get("gate_type", "gate"),
+                    "title": gate.get("trigger_description", "Pending gate"),
+                    "details": gate.get("project_name") or gate.get("project_id") or "No project",
+                    "priority": "P0_IMMEDIATE",
+                    "status": "OPERATOR_PENDING",
+                    "lane": "TODO",
+                    "source": "Council Gate",
+                    "expires_at": gate.get("expires_at"),
+                }
+            )
+        for request in decisions.get("pending_g3_requests", []):
+            items.append(
+                {
+                    "id": request.get("request_id"),
+                    "kind": "G3",
+                    "title": request.get("justification") or "Spend approval",
+                    "details": f"{request.get('requested_model', 'model')} · ${float(request.get('estimated_cost_usd') or 0.0):.2f}",
+                    "priority": "P0_IMMEDIATE",
+                    "status": "OPERATOR_PENDING",
+                    "lane": "TODO",
+                    "source": "Council Spend",
+                    "expires_at": request.get("expires_at"),
+                }
+            )
+        return sorted(items, key=lambda item: (item.get("expires_at") or "", item.get("title") or ""))[:12]
+
+    def council_operator_pending_verdicts(
+        self,
+        recent_verdicts: list[dict[str, Any]],
+        decisions: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        pending_project_ids = {
+            item.get("project_id")
+            for item in decisions.get("pending_gates", [])
+            if item.get("project_id")
+        }
+        pending_titles = [item.get("trigger_description", "") for item in decisions.get("pending_gates", [])]
+        items: list[dict[str, Any]] = []
+        for verdict in recent_verdicts:
+            project_id = verdict.get("project_id")
+            if not project_id or project_id not in pending_project_ids:
+                continue
+            items.append(
+                {
+                    "id": verdict.get("verdict_id"),
+                    "kind": verdict.get("decision_type"),
+                    "title": verdict.get("recommendation"),
+                    "details": verdict.get("reasoning_summary"),
+                    "priority": "P0_IMMEDIATE",
+                    "status": "VERDICT_COMPLETE_OPERATOR_PENDING",
+                    "lane": "TODO",
+                    "source": f"Tier {verdict.get('tier_used')} Council",
+                    "confidence": verdict.get("confidence"),
+                    "pending_gate": next((title for title in pending_titles if project_id in title), None),
+                }
+            )
+        return items[:8]
 
     def overview_flow(
         self,
@@ -2910,6 +3027,62 @@ def seed_demo_state(data_dir: str) -> dict[str, Any]:
                 (now - datetime.timedelta(minutes=44 - idx * 3)).isoformat(),
                 (now - datetime.timedelta(minutes=43 - idx * 3)).isoformat(),
                 0.0,
+            ),
+        )
+
+    council_verdicts = [
+        (
+            "verdict-demo-1",
+            2,
+            "kill_rec",
+            "PAUSE",
+            0.74,
+            "Workflow Library should pause until buyer clarity improves and reusable assets are separated from speculative packaging.",
+            "The reusable asset inventory may still be valuable if scoped as internal tooling first.",
+            "proj-demo-3",
+            0.82,
+        ),
+        (
+            "verdict-demo-2",
+            1,
+            "go_no_go",
+            "PURSUE",
+            0.81,
+            "Mission Control should continue because it reduces operator load and strengthens the Hermes-native contract before live hardware exists.",
+            "The UI may still overfit demo data unless the next pass tightens real empty states.",
+            "proj-demo-1",
+            0.79,
+        ),
+    ]
+    for verdict_id, tier_used, decision_type, recommendation, confidence, reasoning, dissent, project_id, da_quality in council_verdicts:
+        strategic.execute(
+            """
+            INSERT INTO council_verdicts (
+                verdict_id, tier_used, decision_type, recommendation, confidence,
+                reasoning_summary, dissenting_views, minority_positions, full_debate_record,
+                cost_usd, project_id, outcome_record, da_quality_score,
+                da_assessment, tie_break, degraded, confidence_cap, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                verdict_id,
+                tier_used,
+                decision_type,
+                recommendation,
+                confidence,
+                reasoning,
+                dissent,
+                json.dumps([]),
+                "Demo debate record for Mission Control preview.",
+                0.0,
+                project_id,
+                None,
+                da_quality,
+                json.dumps({"quality": "demo"}),
+                0,
+                0,
+                None,
+                (now - datetime.timedelta(hours=2)).isoformat(),
             ),
         )
 

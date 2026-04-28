@@ -244,8 +244,7 @@
       ["council", "Council"],
       ["research", "Research"],
       ["finance", "Finance"],
-      ["self_improvement", "Self-Improve"],
-      ["decisions", "Decisions"]
+      ["self_improvement", "Self-Improve"]
     ];
     return h("div", {className: "mc-tabs"}, tabs.map(function (tab) {
       return h("button", {
@@ -330,7 +329,7 @@
 
   function TaskCard(props) {
     var task = props.task;
-    return h("div", {className: "mc-task"},
+    return h("div", {className: "mc-work-card"},
       h("div", {className: "mc-card-top"},
         h(Badge, null, task.source),
         h("span", {className: priorityTone(task.priority)}, task.priority)
@@ -348,6 +347,23 @@
         }, manualStatuses.map(function (status) {
           return h("option", {key: status, value: status}, status);
         })) : null
+      )
+    );
+  }
+
+  function WorkItemCard(props) {
+    var item = props.item || {};
+    return h("div", {className: "mc-work-card"},
+      h("div", {className: "mc-card-top"},
+        h(Badge, null, item.source || item.kind || "Task"),
+        item.priority ? h("span", {className: priorityTone(item.priority)}, item.priority) : null
+      ),
+      h("h4", null, item.title || item.kind || "Untitled"),
+      h("p", null, item.details || "No detail."),
+      h("div", {className: "mc-meta-grid"},
+        h("span", null, "Status"), h("strong", null, statusLabel(item.status || item.lane || "pending")),
+        item.expires_at ? [h("span", {key: "expires-label"}, "Expires"), h("strong", {key: "expires-value"}, SDK.utils.isoTimeAgo(item.expires_at))] : null,
+        item.confidence !== undefined && item.confidence !== null ? [h("span", {key: "confidence-label"}, "Confidence"), h("strong", {key: "confidence-value"}, pct(item.confidence))] : null
       )
     );
   }
@@ -395,7 +411,9 @@
 
   function Council(props) {
     var council = (props.snapshot || {}).council || {};
+    var decisions = (props.snapshot || {}).decisions || {};
     var summary = council.summary || {};
+    var architecture = council.architecture || {};
     return h("div", {className: "mc-two-column"},
       h(ShellCard, {title: "Council Signal", aside: "bounded"},
         h(MetricGrid, {items: [
@@ -410,9 +428,61 @@
       h(ShellCard, {title: "Decision Mix"},
         h(MiniRows, {items: council.by_decision_type || {}})
       ),
+      h(ShellCard, {title: "Current Council Architecture", aside: architecture.trigger || "tiered deliberation", className: "mc-span"},
+        h("div", {className: "mc-council-architecture"},
+          h("section", null,
+            h("h3", null, "Tier 1 isolated roles"),
+            h("div", {className: "mc-council-role-grid"}, (architecture.tier1 || []).map(function (role) {
+              var model = role.model || {};
+              return h("div", {className: "mc-council-role", key: role.id},
+                h("div", {className: "mc-card-top"}, h("strong", null, role.label), h(Badge, null, role.mode)),
+                h("p", null, role.detail),
+                h("small", null, (model.model || "unassigned") + " · " + (model.route || "route") + " · " + fmt(model.count || 0) + " runs")
+              );
+            }))
+          ),
+          h("section", null,
+            h("h3", null, "Tier 2 multi-model escalation"),
+            h("div", {className: "mc-council-role-grid"}, (architecture.tier2 || []).map(function (role) {
+              var model = role.model || {};
+              return h("div", {className: "mc-council-role", key: role.id},
+                h("div", {className: "mc-card-top"}, h("strong", null, role.label), h(Badge, null, role.mode)),
+                h("p", null, role.detail),
+                h("small", null, (model.model || "unassigned") + " · " + (model.route || "route") + " · " + fmt(model.count || 0) + " runs")
+              );
+            }))
+          )
+        )
+      ),
+      h(ShellCard, {title: "Council Deliberation Backlog", aside: String((council.decision_backlog || []).length), className: "mc-span"},
+        h("div", {className: "mc-work-grid"}, (council.decision_backlog || []).length ? council.decision_backlog.map(function (item) {
+          return h(WorkItemCard, {key: item.kind + ":" + item.id, item: item});
+        }) : h("div", {className: "mc-empty"}, "No pending council decisions"))
+      ),
+      h(ShellCard, {title: "Finished Deliberations Waiting On You", aside: String((council.operator_pending_verdicts || []).length), className: "mc-span"},
+        h("div", {className: "mc-work-grid"}, (council.operator_pending_verdicts || []).length ? council.operator_pending_verdicts.map(function (item) {
+          return h(WorkItemCard, {key: item.id, item: item});
+        }) : h("div", {className: "mc-empty"}, "No completed verdicts waiting on an operator decision"))
+      ),
+      h(ShellCard, {title: "Decision Queues", className: "mc-span"},
+        h("div", {className: "mc-decision-grid"},
+          decisionList("Pending Gates", decisions.pending_gates || [], function (item) {
+            return [item.gate_type, item.trigger_description, item.project_name || item.project_id || "No project"];
+          }),
+          decisionList("G3 Spend Requests", decisions.pending_g3_requests || [], function (item) {
+            return [item.request_id || item.approval_id || "G3", item.justification || item.reason || "Approval required", "Read-only until dashboard gate validation"];
+          }),
+          decisionList("Quarantines", decisions.pending_quarantines || [], function (item) {
+            return [item.quarantine_id || "Quarantine", item.reason || item.source_breaker || "Pending review", "Read-only until dashboard gate validation"];
+          }),
+          decisionList("Runtime Halts", decisions.runtime_halts || [], function (item) {
+            return [item.halt_id || item.event_id || "Runtime halt", item.halt_reason || item.reason || "Active halt", item.status || "ACTIVE"];
+          })
+        )
+      ),
       h(ShellCard, {title: "Recent Verdicts", className: "mc-span"},
         h("div", {className: "mc-card-stack"}, (council.recent_verdicts || []).length ? council.recent_verdicts.map(function (item) {
-          return h("div", {className: "mc-feed-item", key: item.verdict_id},
+          return h("div", {className: "mc-work-card", key: item.verdict_id},
             h("div", {className: "mc-card-top"}, h("strong", null, item.decision_type), h(Badge, null, item.recommendation)),
             h("p", null, item.reasoning_summary),
             h("small", null, "tier " + item.tier_used + " · confidence " + pct(item.confidence))
@@ -912,7 +982,6 @@
       });
       if (activeTab === "finance") return h(Finance, {snapshot: snapshot});
       if (activeTab === "self_improvement") return h(SelfImprovement, {snapshot: snapshot});
-      if (activeTab === "decisions") return h(Decisions, {snapshot: snapshot});
       return h(Overview, {
         snapshot: snapshot,
         onAckAlert: function (alertId) {

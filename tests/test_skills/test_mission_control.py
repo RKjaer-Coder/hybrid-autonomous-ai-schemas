@@ -132,6 +132,10 @@ def test_mission_control_snapshot_surfaces_workflow_board_and_tasks(test_data_di
     assert snapshot["overview"]["pending_gates"] == 1
     assert snapshot["workflow"]["projects"]["ACTIVE"] == 1
     assert "council" in snapshot
+    assert "architecture" in snapshot["council"]
+    assert "decision_backlog" in snapshot["council"]
+    assert "operator_pending_verdicts" in snapshot["council"]
+    assert snapshot["council"]["architecture"]["tier1"][0]["label"] == "Strategist"
     assert "research" in snapshot
     assert "finance" in snapshot
     assert "replay" in snapshot
@@ -235,6 +239,10 @@ def test_hermes_dashboard_plugin_artifacts_are_tiny_and_harness_backed():
     assert "Routing Outcomes" in index_js
     assert "Model selection" in index_js
     assert "Operator Focus" in index_js
+    assert "Current Council Architecture" in index_js
+    assert "Council Deliberation Backlog" in index_js
+    assert "Finished Deliberations Waiting On You" in index_js
+    assert "Decision Queues" in index_js
     assert "Research Workflow Lanes" in index_js
     assert "Model Lifecycle" in index_js
     assert "Research to Opportunity Flow" in index_js
@@ -243,6 +251,7 @@ def test_hermes_dashboard_plugin_artifacts_are_tiny_and_harness_backed():
     assert "[\"workflow\", \"Workflow\"]" not in index_js
     assert "[\"usage\", \"Usage\"]" not in index_js
     assert "[\"system\", \"System\"]" not in index_js
+    assert "[\"decisions\", \"Decisions\"]" not in index_js
     assert "[\"self_improvement\", \"Self-Improve\"]" in index_js
     assert "Models in motion" in index_js
     assert "System Alerts" in index_js

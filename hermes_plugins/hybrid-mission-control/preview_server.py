@@ -326,7 +326,7 @@ class PreviewHandler(BaseHTTPRequestHandler):
 
 
 def run(host: str = "127.0.0.1", port: int = 8770) -> None:
-    data_dir = REPO_ROOT.parent / "tmp" / "mission-control-preview-v4"
+    data_dir = REPO_ROOT.parent / "tmp" / "mission-control-preview-v5"
     data_dir.mkdir(parents=True, exist_ok=True)
     for db_name, schema_rel in SCHEMAS.items():
         apply_schema(data_dir / f"{db_name}.db", REPO_ROOT / schema_rel)

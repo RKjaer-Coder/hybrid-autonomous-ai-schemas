@@ -15,8 +15,10 @@ only the project-specific operator layer.
 3. Tasks: operator-created tasks plus system research and harvest queues,
    segmented into workflow-specific kanban boards with priority/status controls
    where safe.
-4. Council: bounded strategic verdict history, Tier 2 pressure, degradation,
-   confidence, and deliberation-quality signals.
+4. Council: bounded strategic verdict history, current deliberation
+   architecture and model lineup, Tier 2 pressure, decision queues, finished
+   verdicts awaiting operator action, degradation, confidence, and
+   deliberation-quality signals.
 5. Research: separate workflow lanes for model/tooling radar, system
    architecture, business/opportunity work, security/compliance,
    operator-prompted research, standing briefs, and harvest follow-ups. Show
@@ -26,8 +28,8 @@ only the project-specific operator layer.
    G3 pressure, and explicit $0 autonomous paid spend posture.
 7. Self-Improve: Hermes harness activation threshold progress, reliability
    watch rows, traces, and frontier summaries for prompt/skill improvement.
-8. Decisions: read-only G1-G4/G3/quarantine/runtime-halt queues until Hermes
-   dashboard auth, audit, timeout, and replay semantics pass gate validation.
+Decision queues live under Council and remain read-only until Hermes dashboard
+auth, audit, timeout, and replay semantics pass gate validation.
 
 ## Design Rules
 
