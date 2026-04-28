@@ -1369,7 +1369,7 @@ class MissionControlService:
         ).fetchall()
         research_rows = strategic.execute(
             """
-            SELECT task_id, title, brief, priority, status, created_at, updated_at
+            SELECT task_id, domain, source, title, brief, priority, status, tags, created_at, updated_at
             FROM research_tasks
             WHERE status IN ('PENDING', 'ACTIVE', 'STALE', 'FAILED', 'COMPLETE')
             ORDER BY
@@ -1402,9 +1402,12 @@ class MissionControlService:
 
         cards: list[dict[str, Any]] = []
         for row in manual_rows:
+            workflow_id = "operator_manual"
             cards.append(
                 {
                     "kind": "manual",
+                    "workflow_id": workflow_id,
+                    "workflow_label": "Operator Manual",
                     "id": row["task_id"],
                     "title": row["title"],
                     "details": row["details"],
@@ -1419,9 +1422,16 @@ class MissionControlService:
                 }
             )
         for row in research_rows:
+            workflow_id = _research_workflow_id(row)
+            workflow_label = next(
+                (label for current_id, label, _purpose in RESEARCH_WORKFLOW_DEFINITIONS if current_id == workflow_id),
+                "Research",
+            )
             cards.append(
                 {
                     "kind": "research",
+                    "workflow_id": workflow_id,
+                    "workflow_label": workflow_label,
                     "id": row["task_id"],
                     "title": row["title"],
                     "details": row["brief"],
@@ -1436,9 +1446,12 @@ class MissionControlService:
                 }
             )
         for row in harvest_rows:
+            workflow_id = "harvest_followups"
             cards.append(
                 {
                     "kind": "harvest",
+                    "workflow_id": workflow_id,
+                    "workflow_label": "Harvest Follow-ups",
                     "id": row["harvest_id"],
                     "title": row["target_interface"],
                     "details": row["prompt_text"],
@@ -1470,9 +1483,39 @@ class MissionControlService:
                     "cards": lane_cards,
                 }
             )
+        workflow_defs = [
+            ("operator_manual", "Operator Manual", "Tasks created directly by the operator."),
+            *[
+                (workflow_id, label, purpose)
+                for workflow_id, label, purpose in RESEARCH_WORKFLOW_DEFINITIONS
+            ],
+        ]
+        workflow_boards = []
+        for workflow_id, label, purpose in workflow_defs:
+            workflow_cards = [card for card in cards if card["workflow_id"] == workflow_id]
+            if not workflow_cards and workflow_id not in {"operator_manual", "model_radar", "system_architecture", "business_market", "security_compliance", "harvest_followups"}:
+                continue
+            workflow_boards.append(
+                {
+                    "id": workflow_id,
+                    "label": label,
+                    "purpose": purpose,
+                    "count": len(workflow_cards),
+                    "lanes": [
+                        {
+                            "id": lane,
+                            "label": lane.replace("_", " ").title(),
+                            "count": len([card for card in workflow_cards if card["lane"] == lane]),
+                            "cards": [card for card in workflow_cards if card["lane"] == lane],
+                        }
+                        for lane in TASK_LANES
+                    ],
+                }
+            )
         source_counts = Counter(card["source"] for card in cards)
         return {
             "lanes": lanes,
+            "workflow_boards": workflow_boards,
             "cards": cards,
             "source_counts": dict(source_counts),
         }

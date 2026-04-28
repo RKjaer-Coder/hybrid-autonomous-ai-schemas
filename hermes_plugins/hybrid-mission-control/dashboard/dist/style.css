@@ -708,6 +708,32 @@
   gap: 0.85rem;
 }
 
+.mc-task-workflows {
+  display: grid;
+  gap: 1rem;
+}
+
+.mc-task-board {
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+  background: color-mix(in srgb, var(--color-card) 92%, transparent);
+  padding: 0.85rem;
+  display: grid;
+  gap: 0.85rem;
+}
+
+.mc-task-board h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.mc-task-board p {
+  margin: 0.25rem 0 0;
+  color: var(--color-muted-foreground);
+  font-size: 0.86rem;
+  line-height: 1.35;
+}
+
 .mc-lane {
   min-height: 12rem;
   padding: 0.75rem;

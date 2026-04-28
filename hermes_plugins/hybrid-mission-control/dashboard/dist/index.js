@@ -239,15 +239,12 @@
   function SectionTabs(props) {
     var tabs = [
       ["overview", "Overview"],
-      ["workflow", "Workflow"],
       ["projects", "Projects"],
       ["tasks", "Tasks"],
       ["council", "Council"],
       ["research", "Research"],
       ["finance", "Finance"],
       ["self_improvement", "Self-Improve"],
-      ["usage", "Usage"],
-      ["system", "System"],
       ["decisions", "Decisions"]
     ];
     return h("div", {className: "mc-tabs"}, tabs.map(function (tab) {
@@ -356,7 +353,7 @@
   }
 
   function Tasks(props) {
-    var lanes = (((props.snapshot || {}).tasks || {}).lanes || []);
+    var boards = (((props.snapshot || {}).tasks || {}).workflow_boards || []);
     return h("div", {className: "mc-task-layout"},
       h("form", {className: "mc-task-form", onSubmit: props.onCreateManualTask},
         h("h3", null, "Add Operator Task"),
@@ -369,17 +366,28 @@
           h(Button, {type: "submit"}, "Add task")
         )
       ),
-      h("div", {className: "mc-task-lanes"}, lanes.map(function (lane) {
-        return h("section", {className: "mc-lane", key: lane.id},
-          h("h3", null, h("span", null, lane.label), h("small", null, lane.count)),
-          h("div", {className: "mc-card-stack"}, (lane.cards || []).length ? lane.cards.map(function (task) {
-            return h(TaskCard, {
-              key: task.kind + ":" + task.id,
-              task: task,
-              onPriority: props.onTaskPriority,
-              onManualStatus: props.onManualStatus
-            });
-          }) : h("div", {className: "mc-empty"}, "No tasks"))
+      h("div", {className: "mc-task-workflows"}, boards.map(function (board) {
+        return h("section", {className: "mc-task-board", key: board.id},
+          h("div", {className: "mc-card-top"},
+            h("div", null,
+              h("h3", null, board.label),
+              h("p", null, board.purpose)
+            ),
+            h("span", {className: "mc-pill"}, board.count)
+          ),
+          h("div", {className: "mc-task-lanes"}, (board.lanes || []).map(function (lane) {
+            return h("section", {className: "mc-lane", key: board.id + lane.id},
+              h("h3", null, h("span", null, lane.label), h("small", null, lane.count)),
+              h("div", {className: "mc-card-stack"}, (lane.cards || []).length ? lane.cards.map(function (task) {
+                return h(TaskCard, {
+                  key: task.kind + ":" + task.id,
+                  task: task,
+                  onPriority: props.onTaskPriority,
+                  onManualStatus: props.onManualStatus
+                });
+              }) : h("div", {className: "mc-empty"}, "No tasks"))
+            );
+          }))
         );
       }))
     );
@@ -532,6 +540,9 @@
   function Finance(props) {
     var finance = (props.snapshot || {}).finance || {};
     var summary = finance.summary || {};
+    var usage = (props.snapshot || {}).usage || {};
+    var tokens = usage.tokens || {};
+    var traces = usage.traces || {};
     return h("div", {className: "mc-two-column"},
       h(ShellCard, {title: "Financial Posture", aside: "$0 autonomous spend"},
         h(MetricGrid, {items: [
@@ -558,6 +569,31 @@
             h(MiniRows, {items: [["Revenue", money(item.revenue_to_date)], ["Direct cost", money(item.direct_cost)]]})
           );
         }) : h("div", {className: "mc-empty"}, "No active project P&L"))
+      ),
+      h(ResourcePressure, {snapshot: props.snapshot}),
+      h(ShellCard, {title: "Token Accounting", aside: tokens.tracked ? "trace payloads" : "not attached"},
+        h(MetricGrid, {items: [
+          ["Total", tokens.tracked ? fmt(tokens.total || 0) : "n/a"],
+          ["Input", tokens.tracked ? fmt(tokens.tokens_in || 0) : "n/a"],
+          ["Output", tokens.tracked ? fmt(tokens.tokens_out || 0) : "n/a"],
+          ["Records", tokens.records || 0]
+        ]}),
+        h("p", {className: "mc-usage-note"}, tokens.note || "No token accounting note.")
+      ),
+      h(ShellCard, {title: "Trace Usage", className: "mc-span"},
+        h(MetricGrid, {items: [
+          ["Traces", traces.count || 0],
+          ["Trace cost", money(traces.cost_usd || 0)],
+          ["Runtime", fmt(Math.round((traces.duration_ms || 0) / 1000)) + "s"]
+        ]})
+      ),
+      h(ShellCard, {title: "Route Usage", className: "mc-span"},
+        h("div", {className: "mc-card-stack"}, (usage.routes || []).length ? usage.routes.map(function (route) {
+          return h("div", {className: "mc-mini-row", key: route.route},
+            h("span", null, route.route),
+            h("strong", null, route.count + " · " + money(route.cost_usd))
+          );
+        }) : h("div", {className: "mc-empty"}, "No routing usage yet"))
       )
     );
   }
@@ -820,7 +856,6 @@
 
     function body() {
       if (!snapshot) return h("div", {className: "mc-loading"}, "Loading Mission Control...");
-      if (activeTab === "workflow") return h(Workflow, {snapshot: snapshot});
       if (activeTab === "projects") return h(Board, {
         snapshot: snapshot,
         onProjectPriority: function (projectId, priority, focusNote) {
@@ -877,14 +912,6 @@
       });
       if (activeTab === "finance") return h(Finance, {snapshot: snapshot});
       if (activeTab === "self_improvement") return h(SelfImprovement, {snapshot: snapshot});
-      if (activeTab === "usage") return h(Usage, {snapshot: snapshot});
-      if (activeTab === "system") return h(System, {
-        snapshot: snapshot,
-        onAckAlert: function (alertId) {
-          if (!alertId) return Promise.resolve();
-          return run(function () { return post("/alerts/" + encodeURIComponent(alertId) + "/ack", {}); });
-        }
-      });
       if (activeTab === "decisions") return h(Decisions, {snapshot: snapshot});
       return h(Overview, {
         snapshot: snapshot,

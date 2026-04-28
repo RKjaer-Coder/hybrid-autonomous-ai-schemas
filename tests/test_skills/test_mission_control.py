@@ -152,6 +152,9 @@ def test_mission_control_snapshot_surfaces_workflow_board_and_tasks(test_data_di
     assert snapshot["overview_flow"]["summary"]["pending_decisions"] >= 1
     assert snapshot["operator_focus"]["projects"][0]["focus_note"] == "Make the operator cockpit legible."
     assert any(lane["id"] == "BUILD" and lane["count"] == 1 for lane in snapshot["project_board"]["lanes"])
+    assert "workflow_boards" in snapshot["tasks"]
+    assert any(board["id"] == "operator_manual" for board in snapshot["tasks"]["workflow_boards"])
+    assert any(board["id"] == "system_architecture" for board in snapshot["tasks"]["workflow_boards"])
     assert any(card["kind"] == "manual" for card in snapshot["tasks"]["cards"])
     assert created_research["priority"] == "P1_HIGH"
     assert any(card["kind"] == "research" and card["id"] == created_research["task_id"] for card in snapshot["tasks"]["cards"])
@@ -237,7 +240,9 @@ def test_hermes_dashboard_plugin_artifacts_are_tiny_and_harness_backed():
     assert "Research to Opportunity Flow" in index_js
     assert "Local Resource Pressure" in index_js
     assert "Token Accounting" in index_js
-    assert "[\"usage\", \"Usage\"]" in index_js
+    assert "[\"workflow\", \"Workflow\"]" not in index_js
+    assert "[\"usage\", \"Usage\"]" not in index_js
+    assert "[\"system\", \"System\"]" not in index_js
     assert "[\"self_improvement\", \"Self-Improve\"]" in index_js
     assert "Models in motion" in index_js
     assert "System Alerts" in index_js

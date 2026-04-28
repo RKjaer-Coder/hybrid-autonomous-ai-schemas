@@ -12,8 +12,8 @@ The bundle is intentionally small:
 - bounded snapshot APIs
 - no Node bridge, Vite server, WebSocket fanout, or bundled React
 
-The dashboard covers Overview, Workflow, Projects, Tasks, Council, Research,
-Finance, Self-Improve, Usage, System, and Decisions from the single
+The dashboard covers Overview, Projects, Tasks, Council, Research, Finance,
+Self-Improve, and Decisions from the single
 `MissionControlService.snapshot()` contract.
 
 Install it through the runtime profile installer:

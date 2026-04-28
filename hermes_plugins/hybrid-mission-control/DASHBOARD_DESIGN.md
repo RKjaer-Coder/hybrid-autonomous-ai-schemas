@@ -10,28 +10,23 @@ only the project-specific operator layer.
 1. Overview: system logic map, compact status strip with green/yellow/red
    operating state, per-area status cards, and active alerts. Yellow means the
    operator is needed for a decision that is hampering continued work.
-2. Workflow: lightweight view of how work moves through Opportunity Pipeline,
-   Projects, Phase Engine, Research Tasks, and Operator Queues.
-3. Projects: kanban lanes mapped to real project/phase states with project
+2. Projects: kanban lanes mapped to real project/phase states with project
    priority controls.
-4. Tasks: operator-created tasks plus system research and harvest queues, with
-   priority/status controls where safe.
-5. Council: bounded strategic verdict history, Tier 2 pressure, degradation,
+3. Tasks: operator-created tasks plus system research and harvest queues,
+   segmented into workflow-specific kanban boards with priority/status controls
+   where safe.
+4. Council: bounded strategic verdict history, Tier 2 pressure, degradation,
    confidence, and deliberation-quality signals.
-6. Research: separate workflow lanes for model/tooling radar, system
+5. Research: separate workflow lanes for model/tooling radar, system
    architecture, business/opportunity work, security/compliance,
    operator-prompted research, standing briefs, and harvest follow-ups. Show
    the conversion path from research task to intelligence brief to action
    signal to opportunity candidate to council confirmation.
-7. Finance: project P&L, route mix, G3 pressure, and explicit $0 autonomous paid
-   spend posture.
-8. Self-Improve: Hermes harness activation threshold progress, reliability
+6. Finance: project P&L, route mix, usage, resource pressure, token accounting,
+   G3 pressure, and explicit $0 autonomous paid spend posture.
+7. Self-Improve: Hermes harness activation threshold progress, reliability
    watch rows, traces, and frontier summaries for prompt/skill improvement.
-9. Usage: lightweight CPU/RAM pressure, explicit GPU sampling status, token
-   accounting status, trace usage, and route usage.
-10. System: runtime control, heartbeat, judge deadlock, circuit breakers,
-   database contract health, quarantines, and operator load.
-11. Decisions: read-only G1-G4/G3/quarantine/runtime-halt queues until Hermes
+8. Decisions: read-only G1-G4/G3/quarantine/runtime-halt queues until Hermes
    dashboard auth, audit, timeout, and replay semantics pass gate validation.
 
 ## Design Rules
