@@ -9,7 +9,7 @@ import re
 import sqlite3
 from pathlib import Path
 
-SCHEMAS = {
+LEGACY_SCHEMAS = {
     "strategic_memory": "schemas/strategic_memory.sql",
     "telemetry": "schemas/telemetry.sql",
     "immune_system": "schemas/immune_system.sql",
@@ -17,7 +17,38 @@ SCHEMAS = {
     "operator_digest": "schemas/operator_digest.sql",
 }
 
+KERNEL_SCHEMAS = {
+    "kernel": "schemas/kernel.sql",
+}
+
+SCHEMAS = {**KERNEL_SCHEMAS, **LEGACY_SCHEMAS}
+
 EXPECTED_OBJECTS = {
+    "kernel": {
+        "tables": {
+            "commands",
+            "events",
+            "capability_grants",
+            "budgets",
+            "budget_reservations",
+            "artifact_refs",
+            "side_effect_intents",
+            "side_effect_receipts",
+            "projection_outbox",
+        },
+        "indexes": {
+            "idx_commands_idempotency_key",
+            "idx_events_entity",
+            "idx_events_command",
+            "idx_capability_grants_subject",
+            "idx_budgets_owner",
+            "idx_budget_reservations_budget_status",
+            "idx_artifact_refs_data_class",
+            "idx_side_effect_intents_status",
+            "idx_side_effect_receipts_intent",
+            "idx_projection_outbox_status",
+        },
+    },
     "strategic_memory": {
         "tables": {
             "opportunity_records", "council_verdicts", "brief_quality_signals", "calibration_records",

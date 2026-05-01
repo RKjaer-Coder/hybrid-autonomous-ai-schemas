@@ -46,7 +46,7 @@ from immune.types import (
     generate_uuid_v7,
 )
 from immune.verdict_logger import VerdictLogger
-from migrate import SCHEMAS, apply_schema, verify_database
+from migrate import LEGACY_SCHEMAS as SCHEMAS, apply_schema, verify_database
 from runtime_control import RuntimeControlManager
 from skills.bootstrap import BootstrapOrchestrator
 from skills.config import IntegrationConfig

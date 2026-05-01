@@ -1,12 +1,12 @@
 # v3.1 Module Migration Map
 
 Date: 2026-05-01
-Status: kernel-readiness baseline
+Status: kernel-readiness baseline; first foundation-kernel slice implemented
 
-This map classifies the current v2-era repo modules before foundation-kernel
-implementation begins. It is intentionally conservative: preserve verified
-behavior where it helps v3.1, wrap unsafe authority paths, convert domain state
-to projections, and retire only after replacement or compatibility evidence.
+This map classifies the current legacy repo modules for the v3.1 migration. It
+is intentionally conservative: preserve verified behavior where it helps v3.1,
+wrap unsafe authority paths, convert domain state to projections, and retire
+only after replacement or compatibility evidence.
 
 ## Categories
 
@@ -113,8 +113,9 @@ to projections, and retire only after replacement or compatibility evidence.
 ### Retire
 
 `bootstrap_patch.py`
-: Superseded compatibility shim. Remove only after confirming no tests or imports
-  depend on it.
+: Retired. The root-level Hermes compatibility shim was removed after confirming
+  runtime/bootstrap code and remaining tests use `immune.bootstrap_patch`
+  directly.
 
 `.DS_Store`, `.pytest_cache/`, `data/`, `alerts/`, `logs/`
 : Local ignored runtime artifacts. Never commit them.
@@ -166,11 +167,11 @@ to projections, and retire only after replacement or compatibility evidence.
 
 ## Execution Order
 
-1. Create the foundation kernel schema and transaction boundary in a new module,
-   without modifying legacy domain schemas.
-2. Implement command, event, capability, budget, artifact, and side-effect
-   records as the first authoritative contracts.
-3. Wrap `financial_router/`, `skills/local_forward_proxy.py`, and `immune/` as
+1. Done: create the foundation kernel schema and transaction boundary in a new
+   module, without modifying legacy domain schemas.
+2. Done: implement command, event, capability, budget, artifact, and
+   side-effect records as the first authoritative contracts.
+3. Next: wrap `financial_router/`, `skills/local_forward_proxy.py`, and `immune/` as
    enforcement helpers called by kernel-owned command processing.
 4. Convert research, memory, opportunity, operator, observability, and Mission
    Control surfaces into projections fed by kernel events.
