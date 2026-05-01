@@ -13,15 +13,16 @@ current blockers, and latest verification, use `../CURRENT_STATE.md`.
 - Treat this README as a repo runbook, not a rolling project-status document.
 - Treat `../spec/*.md` as the architecture source of truth and this repo as
   implemented behavior.
-- Read `docs/V31_MODULE_MIGRATION_MAP.md` before beginning foundation-kernel
+- Read `docs/V31_MODULE_MIGRATION_MAP.md` before extending foundation-kernel
   implementation.
-- The current code is a useful v2-era substrate. Do not assume its five-database
-  schemas or broad runtime harness are v3.1 authority.
+- The current code is a useful legacy substrate plus the first v3.1 kernel
+  slice. Do not assume the legacy five-database schemas or broad runtime harness
+  are v3.1 authority.
 
-## v3.1 Kernel-Ready Posture
+## v3.1 Kernel Posture
 
-The next build phase is the deterministic foundation kernel. Before adding it,
-the existing modules have been classified as:
+The first deterministic foundation-kernel slice lives in `kernel/` and
+`schemas/kernel.sql`. The existing modules are classified as:
 
 - `adopt`: keep as v3.1 authoritative behavior with minimal changes
 - `adapt`: preserve and change to satisfy v3.1 contracts
@@ -34,8 +35,8 @@ The canonical repo-side map is
 
 The highest-level posture is:
 
-- build new kernel authority in a new module rather than mutating legacy domain
-  schemas first
+- extend kernel authority in `kernel/` and `schemas/kernel.sql` rather than
+  mutating legacy domain schemas first
 - adapt `immune/`, `financial_router/`, `skills/local_forward_proxy.py`,
   `council/`, `eval/`, `harness_variants.py`, `migrate.py`, and
   `runtime_control.py`
@@ -44,8 +45,8 @@ The highest-level posture is:
 - convert strategic memory, research domain, opportunity pipeline, operator
   interface, observability, Mission Control, and current `schemas/*.sql` into
   projections
-- retire only ignored local artifacts and superseded shims after tests prove
-  they are unused
+- retire ignored local artifacts and superseded shims after tests prove they
+  are unused; the root `bootstrap_patch.py` shim has been retired
 
 ## Common Workflows
 
@@ -75,16 +76,17 @@ tests/               Unit and integration coverage
 
 ## Current Databases
 
+- `kernel.db`: v3.1 command/event, capability grant, budget, artifact, and
+  side-effect authority
 - `strategic_memory.db`: briefs, opportunities, research tasks, council outputs
 - `telemetry.db`: step outcomes, execution traces, harness variants, replay data
 - `immune_system.db`: immune verdicts, alerts, breakers, quarantine/fallback audit
 - `financial_ledger.db`: routing decisions, costs, revenue, projects, phase state
 - `operator_digest.db`: digests, alerts, gates, harvest requests, runtime control
 
-These databases are the verified current implementation baseline, not the v3.1
-authority model. The foundation kernel should introduce command/event,
-capability, budget, artifact, and side-effect authority first, then feed these
-surfaces as projections where they remain useful.
+`kernel.db` is the new v3.1 authority baseline. The other databases are verified
+legacy implementation surfaces and should be fed as projections where they
+remain useful.
 
 ## Quick Start
 
@@ -220,5 +222,5 @@ python3 -m skills.runtime --mac-studio-day-one
 
 The best short description of this repository is:
 
-> The tested v2-era substrate being migrated toward the v3.1 deterministic
-> control-kernel architecture.
+> The tested legacy substrate plus the first v3.1 deterministic control-kernel
+> authority slice.

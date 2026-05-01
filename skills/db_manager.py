@@ -19,6 +19,7 @@ class DatabaseConfig:
 
 
 DATABASE_CONFIGS: Dict[str, DatabaseConfig] = {
+    "kernel": DatabaseConfig("kernel", "kernel.db"),
     "strategic_memory": DatabaseConfig("strategic_memory", "strategic_memory.db"),
     "immune": DatabaseConfig("immune", "immune_system.db"),
     "immune_system": DatabaseConfig("immune_system", "immune_system.db"),
