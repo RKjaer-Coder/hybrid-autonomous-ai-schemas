@@ -95,6 +95,9 @@ class HermesProfileContract:
             "url": self.config.hermes_workspace_url,
             "enabled": True,
             "preferred_surfaces": [
+                "models",
+                "chat",
+                "plugins",
                 "gates",
                 "execution_traces",
                 "quarantines",
@@ -102,6 +105,30 @@ class HermesProfileContract:
                 "runtime_halt_state",
                 "milestone_health",
             ],
+        }
+
+    def local_provider_mapping(self) -> dict[str, Any]:
+        return {
+            "provider": "lm_studio",
+            "base_url": DEFAULT_LOCAL_BASE_URL,
+            "doctor_required": True,
+            "defer_without_hermes": True,
+        }
+
+    def curator_mapping(self) -> dict[str, Any]:
+        return {
+            "enabled": False,
+            "mode": "report_first",
+            "status_required": True,
+            "report_required": True,
+            "pinned_skills_mutable": False,
+            "pinned_skills": ["immune_system", "financial_router", "operator_interface"],
+        }
+
+    def plugin_hooks_mapping(self) -> dict[str, Any]:
+        return {
+            "required_hooks": ["pre_tool_call", "pre_approval_request", "post_approval_response"],
+            "fail_closed_for": ["g3_paid_spend", "sheriff_block", "runtime_halt"],
         }
 
     def skill_config(self) -> dict[str, Any]:
@@ -120,6 +147,9 @@ class HermesProfileContract:
                 "strong_model_strategy": "frontier-if-configured-else-local",
                 "max_api_spend_usd": self.config.max_api_spend_usd,
             },
+            "local_provider": self.local_provider_mapping(),
+            "curator": self.curator_mapping(),
+            "plugin_hooks": self.plugin_hooks_mapping(),
             "dangerous_command_families": {
                 name: list(variants)
                 for name, variants in EXPECTED_DANGEROUS_COMMAND_FAMILIES.items()
@@ -184,6 +214,9 @@ class HermesProfileContract:
             "network_controls": self.network_controls(),
             "gateway": self.gateway_mapping(),
             "workspace": self.workspace_mapping(),
+            "local_provider": self.local_provider_mapping(),
+            "curator": self.curator_mapping(),
+            "plugin_hooks": self.plugin_hooks_mapping(),
         }
 
     def generated_checks(
@@ -258,6 +291,18 @@ class HermesProfileContract:
                 or [],
                 self.workspace_mapping()["preferred_surfaces"],
             ),
+            "local_provider_lm_studio": contains_subset(
+                nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "local_provider") or {},
+                self.local_provider_mapping(),
+            ),
+            "curator_report_first": contains_subset(
+                nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "curator") or {},
+                self.curator_mapping(),
+            ),
+            "plugin_hooks_v012": contains_subset(
+                nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "plugin_hooks") or {},
+                self.plugin_hooks_mapping(),
+            ),
         }
 
     def live_config_checks(self, actual_config_doc: dict[str, Any] | None) -> dict[str, bool]:
@@ -324,5 +369,17 @@ class HermesProfileContract:
                 )
                 or [],
                 self.workspace_mapping()["preferred_surfaces"],
+            ),
+            "local_provider_lm_studio": contains_subset(
+                nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "local_provider") or {},
+                self.local_provider_mapping(),
+            ),
+            "curator_report_first": contains_subset(
+                nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "curator") or {},
+                self.curator_mapping(),
+            ),
+            "plugin_hooks_v012": contains_subset(
+                nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "plugin_hooks") or {},
+                self.plugin_hooks_mapping(),
             ),
         }

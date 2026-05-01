@@ -29,6 +29,7 @@ from skills.runtime import (
     prepare_runtime_directories,
     replay_readiness_report,
     require_runtime_databases,
+    run_flywheel_drill,
     run_research_cron_proof,
     run_evidence_factory,
     run_proxy_self_test,
@@ -206,7 +207,10 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
     assert Path(manifest["proxy_allowlist_path"]).is_file()
     assert Path(manifest["gateway_manifest_path"]).is_file()
     assert Path(manifest["workspace_manifest_path"]).is_file()
+    assert Path(manifest["local_provider_doctor_path"]).is_file()
+    assert Path(manifest["curator_readiness_path"]).is_file()
     assert Path(manifest["operator_validation_checklist_path"]).is_file()
+    assert Path(manifest["flywheel_drill_report_path"]).is_file()
     assert Path(manifest["evidence_factory_manifest_path"]).is_file()
     assert Path(manifest["replay_readiness_report_path"]).is_file()
     assert Path(manifest["replay_corpus_export_path"]).is_file()
@@ -217,6 +221,7 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
     assert manifest["dashboard_plugins"]["hybrid-mission-control"]["path"] == result.dashboard_plugin_path
     assert manifest["dashboard_plugins"]["hybrid-mission-control"]["route"] == "/mission-control"
     assert manifest["dashboard_plugins"]["hybrid-mission-control"]["gate_actions_enabled"] is False
+    assert manifest["dashboard_plugins"]["hybrid-mission-control"]["page_scoped_slots"] == ["models", "chat", "plugins"]
     plugin_config = json.loads((Path(result.dashboard_plugin_path) / "runtime_config.json").read_text(encoding="utf-8"))
     assert plugin_config["repo_root"] == str(repo_root.resolve())
     assert plugin_config["data_dir"] == cfg.data_dir
@@ -234,12 +239,23 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
         "tts",
     ]
     assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["workspace"]["preferred_surfaces"] == [
+        "models",
+        "chat",
+        "plugins",
         "gates",
         "execution_traces",
         "quarantines",
         "replay_readiness",
         "runtime_halt_state",
         "milestone_health",
+    ]
+    assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["local_provider"]["provider"] == "lm_studio"
+    assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["curator"]["mode"] == "report_first"
+    assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["curator"]["pinned_skills_mutable"] is False
+    assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["plugin_hooks"]["required_hooks"] == [
+        "pre_tool_call",
+        "pre_approval_request",
+        "post_approval_response",
     ]
     assert profile_config["approvals"]["mode"] == "manual"
     assert spec_profile["profile"] == "hybrid-test"
@@ -253,6 +269,7 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
     assert "bootstrap_stack" in manifest["commands"]
     assert "task_loop_proof" in manifest["commands"]
     assert "research_cron_proof" in manifest["commands"]
+    assert "flywheel_drill" in manifest["commands"]
     assert "evidence_factory" in manifest["commands"]
     assert "replay_readiness_report" in manifest["commands"]
     assert "export_replay_corpus" in manifest["commands"]
@@ -291,6 +308,9 @@ def test_doctor_runtime_reports_ready_runtime(tmp_path):
     assert result.path_status["start_proxy_launcher"] is True
     assert result.path_status["proxy_self_test_launcher"] is True
     assert result.path_status["contract_harness_launcher"] is True
+    assert result.path_status["local_provider_doctor"] is True
+    assert result.path_status["curator_readiness"] is True
+    assert result.path_status["flywheel_drill_launcher"] is True
     assert result.path_status["evidence_factory_launcher"] is True
     assert result.path_status["replay_readiness_report_launcher"] is True
     assert result.path_status["mac_studio_day_one_launcher"] is True
@@ -343,6 +363,7 @@ def test_exercise_hermes_contract_runs_full_lifecycle_and_logs_trace(tmp_path):
     assert result.approval_review["status"] == "APPROVED"
     assert result.dispatch_result is not None
     assert result.dispatch_result["dispatch_status"] == "DISPATCHED"
+    assert all(result.v012_contract_checks.values())
     assert result.runtime_halt is not None
     assert result.runtime_halt["source"] == "JUDGE_DEADLOCK"
     assert result.blocked_dispatch_pre_side_effect is True
@@ -402,6 +423,8 @@ def test_assess_hermes_readiness_fails_clearly_without_hermes(tmp_path, monkeypa
     assert Path(result.install.profile_config_path).is_file()
     assert Path(result.install.spec_profile_path).is_file()
     assert any("not found in PATH" in item for item in result.blocking_items)
+    assert "lm_studio_local_provider_doctor" in result.deferred_items
+    assert "hermes_z_one_shot_smoke" in result.deferred_items
     assert result.replay_report["growth_plan"]["next_actions"]
     assert result.recommended_actions
     assert VERSION_DRIFT_NOTE in result.drift_items
@@ -422,7 +445,7 @@ def test_assess_hermes_readiness_passes_with_live_hermes_signals(tmp_path, monke
     def runner(argv):
         key = tuple(argv)
         if key == ("hermes", "--version"):
-            return ExternalCommandResult(True, key, 0, "Hermes Agent 0.11.0", "")
+            return ExternalCommandResult(True, key, 0, "Hermes Agent 0.12.0", "")
         if key == ("hermes", "profile", "list"):
             return ExternalCommandResult(True, key, 0, "default\nhybrid-test\n", "")
         if key == ("hermes", "tools", "list"):
@@ -449,6 +472,8 @@ def test_assess_hermes_readiness_passes_with_live_hermes_signals(tmp_path, monke
                 (tmp_path / "profiles" / "hybrid-test" / "config.yaml").read_text(encoding="utf-8"),
                 "",
             )
+        if key == ("hermes", "doctor", "providers", "--provider", "lm_studio"):
+            return ExternalCommandResult(True, key, 0, "lm_studio ok", "")
         raise AssertionError(f"unexpected command: {key}")
 
     result = assess_hermes_readiness(
@@ -460,7 +485,7 @@ def test_assess_hermes_readiness_passes_with_live_hermes_signals(tmp_path, monke
 
     assert result.ok is True
     assert result.hermes_installed is True
-    assert result.hermes_version == "0.11.0"
+    assert result.hermes_version == "0.12.0"
     assert result.profile_listed is True
     assert all(result.seed_tool_status.values())
     assert all(result.config_status.values())
@@ -517,6 +542,8 @@ def test_assess_hermes_readiness_rejects_0_8_x_even_if_checklist_allows_it(tmp_p
                 (tmp_path / "profiles" / "hybrid-test" / "config.yaml").read_text(encoding="utf-8"),
                 "",
             )
+        if key == ("hermes", "doctor", "providers", "--provider", "lm_studio"):
+            return ExternalCommandResult(True, key, 0, "lm_studio ok", "")
         raise AssertionError(f"unexpected command: {key}")
 
     result = assess_hermes_readiness(
@@ -549,7 +576,7 @@ def test_assess_hermes_readiness_fails_when_live_config_contract_drifts(tmp_path
     def runner(argv):
         key = tuple(argv)
         if key == ("hermes", "--version"):
-            return ExternalCommandResult(True, key, 0, "Hermes Agent 0.11.0", "")
+            return ExternalCommandResult(True, key, 0, "Hermes Agent 0.12.0", "")
         if key == ("hermes", "profile", "list"):
             return ExternalCommandResult(True, key, 0, "hybrid-test\n", "")
         if key == ("hermes", "tools", "list"):
@@ -569,6 +596,8 @@ def test_assess_hermes_readiness_fails_when_live_config_contract_drifts(tmp_path
                 ),
                 "",
             )
+        if key == ("hermes", "doctor", "providers", "--provider", "lm_studio"):
+            return ExternalCommandResult(True, key, 0, "lm_studio ok", "")
         raise AssertionError(f"unexpected command: {key}")
 
     result = assess_hermes_readiness(
@@ -604,7 +633,7 @@ def test_assess_hermes_readiness_cli_smoke_checks_step_outcome_and_logs(tmp_path
     def runner(argv):
         key = tuple(argv)
         if key == ("hermes", "--version"):
-            return ExternalCommandResult(True, key, 0, "Hermes Agent 0.11.0", "")
+            return ExternalCommandResult(True, key, 0, "Hermes Agent 0.12.0", "")
         if key == ("hermes", "profile", "list"):
             return ExternalCommandResult(True, key, 0, "hybrid-test\n", "")
         if key == ("hermes", "tools", "list"):
@@ -617,7 +646,9 @@ def test_assess_hermes_readiness_cli_smoke_checks_step_outcome_and_logs(tmp_path
                 (tmp_path / "profiles" / "hybrid-test" / "config.yaml").read_text(encoding="utf-8"),
                 "",
             )
-        if key[:4] == ("hermes", "--profile", "hybrid-test", "chat"):
+        if key == ("hermes", "doctor", "providers", "--provider", "lm_studio"):
+            return ExternalCommandResult(True, key, 0, "lm_studio ok", "")
+        if key[:4] == ("hermes", "--profile", "hybrid-test", "-z"):
             query = key[-1]
             marker = query.split("`echo ", 1)[1].split("`", 1)[0]
             db_path = Path(cfg.data_dir) / "telemetry.db"
@@ -645,6 +676,8 @@ def test_assess_hermes_readiness_cli_smoke_checks_step_outcome_and_logs(tmp_path
     assert result.ok is True
     assert result.cli_smoke_attempted is True
     assert result.cli_smoke_ok is True
+    assert result.one_shot_smoke_attempted is True
+    assert result.one_shot_smoke_ok is True
     assert result.doctor.profile_validation.ok is True
     assert result.cli_smoke_step_outcomes_delta == 1
     assert result.cli_smoke_log_trace is True
@@ -763,6 +796,50 @@ def test_run_operator_workflow_fails_closed_when_runtime_is_halted(tmp_path):
             (result.trace_id,),
         ).fetchone()
     assert trace_row == ("operator_workflow", "FAIL", "FAILURE_AUDIT")
+
+
+def test_run_flywheel_drill_generates_phase_gate_and_replay_artifact(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+    runtime = MockHermesRuntime(data_dir=str(tmp_path / "data"))
+
+    result = run_flywheel_drill(
+        config=cfg,
+        repo_root=str(tmp_path),
+        tool_registry=runtime,
+        report_limit=5,
+    )
+
+    assert result.ok is True
+    assert result.workflow.opportunity_id
+    assert result.workflow.project_id
+    assert result.workflow.phase_gate_id
+    assert result.workflow.phase_gate_verdict == "CONTINUE"
+    assert len(result.workflow.council_verdict_ids) == 2
+    assert result.trace_id == result.workflow.trace_id
+    assert result.generated_trace_count > 0
+    assert result.generated_activation_trace_count > 0
+    assert result.generated_known_bad_trace_count == 0
+    assert Path(result.artifact_path).is_file()
+    artifact = json.loads(Path(result.artifact_path).read_text(encoding="utf-8"))
+    assert artifact["status"] == "PASS"
+    assert artifact["dashboard_dependency"] is False
+    assert artifact["goal"] == "Research -> Opportunity -> Council -> Project phase gate -> replay trace"
+    assert artifact["trace_id"] == result.trace_id
+    assert artifact["phase_gate_verdict"] == "CONTINUE"
+    assert artifact["generated_activation_trace_count"] == result.generated_activation_trace_count
+    assert result.replay_report["eligible_source_traces"] > result.before_replay_report["eligible_source_traces"]
+
+    with sqlite3.connect(tmp_path / "data" / "telemetry.db") as conn:
+        trace_row = conn.execute(
+            "SELECT role, judge_verdict, training_eligible FROM execution_traces WHERE trace_id = ?",
+            (result.trace_id,),
+        ).fetchone()
+    assert trace_row == ("operator_workflow", "PASS", 1)
 
 
 def test_replay_readiness_report_writes_runtime_artifact(tmp_path):

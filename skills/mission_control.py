@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
+import platform
+import subprocess
 import uuid
 from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -16,6 +20,22 @@ from skills.operator_interface.skill import OperatorInterfaceSkill
 PRIORITIES = ("P0_IMMEDIATE", "P1_HIGH", "P2_NORMAL", "P3_BACKGROUND")
 MANUAL_TASK_STATUSES = ("TODO", "IN_PROGRESS", "BLOCKED", "DONE")
 FINAL_DASHBOARD_CONTRACT = "hermes-dashboard-plugin-v1"
+RESEARCH_DOMAIN_LABELS = {
+    1: "Security",
+    2: "Model Ecosystem",
+    3: "Business & Market",
+    4: "Regulatory & Compliance",
+    5: "Intelligence Opportunity",
+}
+RESEARCH_WORKFLOW_DEFINITIONS = (
+    ("model_radar", "Model & Tooling Radar", "New models, MLX feasibility, role fit, benchmark deltas"),
+    ("system_architecture", "System Architecture", "Efficiency, reliability, Hermes fit, simplification, control surfaces"),
+    ("business_market", "Business & Opportunity", "Market demand, monetization, competitors, opportunity feed"),
+    ("security_compliance", "Security & Compliance", "CVE, policy, regulatory, patch urgency, compliance deadlines"),
+    ("operator_prompts", "Operator Prompts", "Ad hoc research explicitly assigned by the operator"),
+    ("standing_monitoring", "Standing Briefs", "Scheduled monitoring loops and recurring intelligence"),
+    ("harvest_followups", "Harvest Follow-ups", "Requests for missing external/manual evidence"),
+)
 PROJECT_LANES = (
     "PIPELINE",
     "VALIDATE",
@@ -57,6 +77,132 @@ def _counter(rows: Any, key: str = "count") -> dict[str, int]:
     return {row[0]: int(row[key]) for row in rows}
 
 
+def _json_list(raw: str | None) -> list[Any]:
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _research_workflow_id(row: Any) -> str:
+    title = str(row["title"] or "").lower()
+    brief = str(row["brief"] or "").lower()
+    tags = {str(tag).lower() for tag in _json_list(row["tags"])}
+    haystack = " ".join([title, brief, " ".join(sorted(tags))])
+    domain = int(row["domain"])
+    if any(term in haystack for term in ("model", "mlx", "llm", "benchmark", "frontier", "inference", "embedding", "lora", "quant")):
+        return "model_radar"
+    if any(term in haystack for term in ("architecture", "architectural", "efficiency", "efficient", "reliability", "hermes", "runtime", "dashboard", "token", "simplification")):
+        return "system_architecture"
+    if domain in {1, 4}:
+        return "security_compliance"
+    if domain == 3 or any(term in haystack for term in ("market", "business", "monetization", "competitor", "pricing", "customer", "opportunity")):
+        return "business_market"
+    if row["source"] == "operator":
+        return "operator_prompts"
+    if domain in {2, 5}:
+        return "model_radar"
+    return "operator_prompts"
+
+
+def _research_tags_for_workflow(workflow_id: str) -> list[str]:
+    return {
+        "model_radar": ["model", "scout"],
+        "system_architecture": ["architecture", "system"],
+        "business_market": ["market", "opportunity"],
+        "security_compliance": ["security", "compliance"],
+        "operator_prompts": ["operator_prompt"],
+        "standing_monitoring": ["standing_brief"],
+        "harvest_followups": ["harvest"],
+    }.get(workflow_id, ["operator_prompt"])
+
+
+def _research_domain_for_workflow(workflow_id: str) -> int:
+    return {
+        "model_radar": 5,
+        "system_architecture": 2,
+        "business_market": 3,
+        "security_compliance": 1,
+        "operator_prompts": 2,
+        "standing_monitoring": 2,
+        "harvest_followups": 2,
+    }.get(workflow_id, 2)
+
+
+def _system_resource_pressure() -> dict[str, Any]:
+    cpu_count = os.cpu_count() or 1
+    load_1m = os.getloadavg()[0] if hasattr(os, "getloadavg") else 0.0
+    cpu_pressure = min(load_1m / cpu_count, 1.0)
+    ram = _memory_pressure()
+    return {
+        "cpu": {
+            "label": "CPU",
+            "pressure": round(cpu_pressure, 3),
+            "detail": f"1m load {load_1m:.2f} across {cpu_count} cores",
+        },
+        "ram": ram,
+        "gpu": {
+            "label": "GPU",
+            "pressure": None,
+            "detail": "Not sampled; Apple GPU utilization needs heavier system tooling.",
+        },
+    }
+
+
+def _memory_pressure() -> dict[str, Any]:
+    if platform.system() == "Darwin":
+        try:
+            vm_result = subprocess.run(["vm_stat"], capture_output=True, text=True, check=True, timeout=1)
+            first_line = vm_result.stdout.splitlines()[0] if vm_result.stdout else ""
+            page_size_digits = "".join(ch for ch in first_line if ch.isdigit())
+            page_size = int(page_size_digits or os.sysconf("SC_PAGE_SIZE"))
+            values: dict[str, int] = {}
+            for line in vm_result.stdout.splitlines():
+                if ":" not in line:
+                    continue
+                key, raw = line.split(":", 1)
+                digits = "".join(ch for ch in raw if ch.isdigit())
+                if digits:
+                    values[key.strip()] = int(digits)
+            free = values.get("Pages free", 0) + values.get("Pages inactive", 0) + values.get("Pages speculative", 0)
+            used_keys = (
+                "Pages active",
+                "Pages wired down",
+                "Pages occupied by compressor",
+                "Pages throttled",
+            )
+            used = sum(values.get(key, 0) for key in used_keys)
+            total = free + used
+            pressure = (used / total) if total else 0.0
+            return {
+                "label": "RAM",
+                "pressure": round(min(pressure, 1.0), 3),
+                "detail": f"{used * page_size / (1024 ** 3):.1f}GB used of {total * page_size / (1024 ** 3):.1f}GB",
+            }
+        except Exception:
+            pass
+    try:
+        meminfo = Path("/proc/meminfo").read_text(encoding="utf-8")
+        values = {}
+        for line in meminfo.splitlines():
+            key, raw = line.split(":", 1)
+            values[key] = int(raw.strip().split()[0])
+        total = values.get("MemTotal", 0)
+        available = values.get("MemAvailable", 0)
+        used = max(total - available, 0)
+        pressure = (used / total) if total else 0.0
+        return {
+            "label": "RAM",
+            "pressure": round(min(pressure, 1.0), 3),
+            "detail": f"{used / (1024 ** 2):.1f}GB used of {total / (1024 ** 2):.1f}GB",
+        }
+    except Exception:
+        return {"label": "RAM", "pressure": None, "detail": "Unavailable"}
+
+
 class MissionControlService:
     def __init__(self, db_manager: DatabaseManager, *, interaction_channel: str = "mission_control"):
         self._db = db_manager
@@ -73,11 +219,24 @@ class MissionControlService:
         tasks = self.task_board()
         decisions = self.decisions()
         workflow = self.workflow()
+        operator_focus = self.operator_focus(board, tasks, decisions)
         council = self.council()
         research = self.research()
         finance = self.finance()
         replay = self.replay()
         system = self.system()
+        model_assignments = self.model_assignments()
+        council["architecture"] = self.council_architecture(model_assignments)
+        council["decision_backlog"] = self.council_decision_backlog(decisions)
+        council["operator_pending_verdicts"] = self.council_operator_pending_verdicts(
+            council.get("recent_verdicts", []), decisions
+        )
+        resource_pressure = _system_resource_pressure()
+        usage = self.usage(resource_pressure)
+        area_status = self.area_status(
+            board, tasks, decisions, council, research, finance, replay, system, model_assignments
+        )
+        overview_flow = self.overview_flow(board, tasks, decisions, council, research, model_assignments)
         return {
             "contract": FINAL_DASHBOARD_CONTRACT,
             "generated_at": _utc_now(),
@@ -88,6 +247,11 @@ class MissionControlService:
                 "heavy_services": [],
                 "poll_interval_seconds": 15,
             },
+            "resource_pressure": resource_pressure,
+            "usage": usage,
+            "model_assignments": model_assignments,
+            "area_status": area_status,
+            "overview_flow": overview_flow,
             "overview": {
                 "runtime_status": workspace["runtime_status"],
                 "replay_readiness": workspace["replay_readiness"],
@@ -104,6 +268,8 @@ class MissionControlService:
             "latest_digest": latest_digest,
             "alerts": alerts,
             "workflow": workflow,
+            "system_map": self.system_map(workflow, board, tasks, decisions),
+            "operator_focus": operator_focus,
             "project_board": board,
             "tasks": tasks,
             "decisions": decisions,
@@ -112,6 +278,236 @@ class MissionControlService:
             "finance": finance,
             "replay": replay,
             "system": system,
+        }
+
+    def council_architecture(self, model_assignments: list[dict[str, Any]]) -> dict[str, Any]:
+        council_models = self._models_for_area(model_assignments, "Council")
+        primary_models = self._models_for_area(model_assignments, "Projects")
+        finance_models = self._models_for_area(model_assignments, "Finance")
+
+        def model_for(index: int, fallback: str = "unassigned") -> dict[str, Any]:
+            candidates = council_models or primary_models or finance_models
+            if not candidates:
+                return {"role": "Model", "model": fallback, "route": "unassigned", "count": 0}
+            return candidates[index % len(candidates)]
+
+        tier1_roles = [
+            ("strategist", "Strategist", "Builds the strongest pursue case."),
+            ("critic", "Critic", "Builds the strongest failure case."),
+            ("realist", "Realist", "Checks execution requirements and constraints."),
+            ("devils_advocate", "Devil's Advocate", "Finds the shared blind spot."),
+            ("synthesizer", "Synthesizer", "Produces the final CouncilVerdict."),
+        ]
+        tier2_roles = [
+            ("model_a", "Independent Model A", "First independent position."),
+            ("model_b", "Independent Model B", "Second independent position."),
+            ("model_c", "Independent Model C", "Optional third position when value justifies cost."),
+            ("synthesis", "Synthesis Model", "Records minority positions and final verdict."),
+        ]
+        return {
+            "trigger": "Tier 1 by default; Tier 2 for low confidence, novelty, high stakes, or justified spend.",
+            "tier1": [
+                {
+                    "id": role_id,
+                    "label": label,
+                    "detail": detail,
+                    "model": model_for(idx),
+                    "mode": "isolated Hermes subagent" if role_id != "synthesizer" else "synthesis pass",
+                }
+                for idx, (role_id, label, detail) in enumerate(tier1_roles)
+            ],
+            "tier2": [
+                {
+                    "id": role_id,
+                    "label": label,
+                    "detail": detail,
+                    "model": model_for(idx),
+                    "mode": "mixture_of_agents" if role_id != "synthesis" else "debate synthesis",
+                }
+                for idx, (role_id, label, detail) in enumerate(tier2_roles)
+            ],
+        }
+
+    def council_decision_backlog(self, decisions: dict[str, Any]) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for gate in decisions.get("pending_gates", []):
+            items.append(
+                {
+                    "id": gate.get("gate_id"),
+                    "kind": gate.get("gate_type", "gate"),
+                    "title": gate.get("trigger_description", "Pending gate"),
+                    "details": gate.get("project_name") or gate.get("project_id") or "No project",
+                    "priority": "P0_IMMEDIATE",
+                    "status": "OPERATOR_PENDING",
+                    "lane": "TODO",
+                    "source": "Council Gate",
+                    "expires_at": gate.get("expires_at"),
+                }
+            )
+        for request in decisions.get("pending_g3_requests", []):
+            items.append(
+                {
+                    "id": request.get("request_id"),
+                    "kind": "G3",
+                    "title": request.get("justification") or "Spend approval",
+                    "details": f"{request.get('requested_model', 'model')} · ${float(request.get('estimated_cost_usd') or 0.0):.2f}",
+                    "priority": "P0_IMMEDIATE",
+                    "status": "OPERATOR_PENDING",
+                    "lane": "TODO",
+                    "source": "Council Spend",
+                    "expires_at": request.get("expires_at"),
+                }
+            )
+        return sorted(items, key=lambda item: (item.get("expires_at") or "", item.get("title") or ""))[:12]
+
+    def council_operator_pending_verdicts(
+        self,
+        recent_verdicts: list[dict[str, Any]],
+        decisions: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        pending_project_ids = {
+            item.get("project_id")
+            for item in decisions.get("pending_gates", [])
+            if item.get("project_id")
+        }
+        pending_titles = [item.get("trigger_description", "") for item in decisions.get("pending_gates", [])]
+        items: list[dict[str, Any]] = []
+        for verdict in recent_verdicts:
+            project_id = verdict.get("project_id")
+            if not project_id or project_id not in pending_project_ids:
+                continue
+            items.append(
+                {
+                    "id": verdict.get("verdict_id"),
+                    "kind": verdict.get("decision_type"),
+                    "title": verdict.get("recommendation"),
+                    "details": verdict.get("reasoning_summary"),
+                    "priority": "P0_IMMEDIATE",
+                    "status": "VERDICT_COMPLETE_OPERATOR_PENDING",
+                    "lane": "TODO",
+                    "source": f"Tier {verdict.get('tier_used')} Council",
+                    "confidence": verdict.get("confidence"),
+                    "pending_gate": next((title for title in pending_titles if project_id in title), None),
+                }
+            )
+        return items[:8]
+
+    def overview_flow(
+        self,
+        board: dict[str, Any],
+        tasks: dict[str, Any],
+        decisions: dict[str, Any],
+        council: dict[str, Any],
+        research: dict[str, Any],
+        model_assignments: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        research_summary = research.get("summary") or {}
+        conversion = research.get("conversion_flow") or {}
+        conversion_stages = {stage.get("id"): stage for stage in conversion.get("stages", [])}
+        task_cards = tasks.get("cards", [])
+        backlog_cards = [card for card in task_cards if card.get("lane") in {"TODO", "IN_PROGRESS", "BLOCKED"}]
+        pending_gates = decisions.get("pending_gates", [])
+        pending_quarantines = decisions.get("pending_quarantines", [])
+        pending_g3 = decisions.get("pending_g3_requests", [])
+        council_summary = council.get("summary") or {}
+        opportunity_count = int((conversion_stages.get("opportunity") or {}).get("count") or 0)
+        pending_decisions = len(pending_gates) + len(pending_quarantines) + len(pending_g3)
+        follow_up_count = int(research_summary.get("pending_harvests") or 0)
+        follow_up_count += sum(int(item.get("blocked") or 0) for item in research.get("workflows", []))
+
+        def stage(
+            stage_id: str,
+            label: str,
+            detail: str,
+            *,
+            count: int,
+            status: str,
+            area: str,
+            pending: int = 0,
+            blocked: int = 0,
+        ) -> dict[str, Any]:
+            return {
+                "id": stage_id,
+                "label": label,
+                "detail": detail,
+                "count": count,
+                "status": status,
+                "pending": pending,
+                "blocked": blocked,
+                "models": self._models_for_area(model_assignments, area),
+            }
+
+        return {
+            "status": "operator_needed" if pending_decisions else ("blocked" if follow_up_count else "flowing"),
+            "summary": {
+                "pending_decisions": pending_decisions,
+                "active_research": int((conversion_stages.get("task") or {}).get("count") or 0),
+                "actionable_findings": int((conversion_stages.get("action_signal") or {}).get("count") or 0),
+                "opportunity_candidates": opportunity_count,
+                "backlog_items": len(backlog_cards),
+                "follow_up_research": follow_up_count,
+            },
+            "main_stages": [
+                stage(
+                    "research_task",
+                    "Research Tasks",
+                    "Assigned, standing, council-requested, or operator-prompted questions.",
+                    count=int((conversion_stages.get("task") or {}).get("count") or 0),
+                    pending=int((research_summary.get("tasks_by_status") or {}).get("PENDING", 0)),
+                    blocked=sum(int(item.get("blocked") or 0) for item in research.get("workflows", [])),
+                    status="active",
+                    area="Research",
+                ),
+                stage(
+                    "finding",
+                    "Findings",
+                    "Structured intelligence briefs with confidence, uncertainty, and actionability.",
+                    count=int((conversion_stages.get("brief") or {}).get("count") or 0),
+                    pending=int((conversion_stages.get("action_signal") or {}).get("count") or 0),
+                    status="active" if int((conversion_stages.get("brief") or {}).get("count") or 0) else "quiet",
+                    area="Research",
+                ),
+                stage(
+                    "opportunity",
+                    "Opportunities",
+                    "Research findings that create or strengthen a candidate opportunity.",
+                    count=opportunity_count,
+                    pending=opportunity_count,
+                    status="active" if opportunity_count else "quiet",
+                    area="Projects",
+                ),
+            ],
+            "branch_stages": [
+                stage(
+                    "council",
+                    "Council Review",
+                    "Important or risky findings are routed through deliberation and hard gates.",
+                    count=int(council_summary.get("total_verdicts") or 0),
+                    pending=pending_decisions,
+                    status="attention" if pending_decisions else "active",
+                    area="Council",
+                ),
+                stage(
+                    "task_backlog",
+                    "Task Backlog",
+                    "Approved work becomes operator or system tasks for execution.",
+                    count=len(backlog_cards),
+                    pending=sum(1 for card in backlog_cards if card.get("lane") in {"TODO", "IN_PROGRESS"}),
+                    blocked=sum(1 for card in backlog_cards if card.get("lane") == "BLOCKED"),
+                    status="blocked" if any(card.get("lane") == "BLOCKED" for card in backlog_cards) else ("active" if backlog_cards else "quiet"),
+                    area="Projects",
+                ),
+                stage(
+                    "further_research",
+                    "Further Research",
+                    "Thin, stale, or manually blocked findings loop back for more evidence.",
+                    count=follow_up_count,
+                    pending=int(research_summary.get("pending_harvests") or 0),
+                    blocked=max(follow_up_count - int(research_summary.get("pending_harvests") or 0), 0),
+                    status="attention" if follow_up_count else "quiet",
+                    area="Research",
+                ),
+            ],
         }
 
     def workflow(self) -> dict[str, Any]:
@@ -188,6 +584,275 @@ class MissionControlService:
             "queues": queue_summary,
         }
 
+    def system_map(
+        self,
+        workflow: dict[str, Any],
+        board: dict[str, Any],
+        tasks: dict[str, Any],
+        decisions: dict[str, Any],
+    ) -> dict[str, Any]:
+        workflow_counts = {step["id"]: int(step["count"]) for step in workflow.get("steps", [])}
+        task_cards = tasks.get("cards", [])
+        blocked_tasks = sum(1 for card in task_cards if card.get("lane") == "BLOCKED")
+        active_tasks = sum(1 for card in task_cards if card.get("lane") in {"TODO", "IN_PROGRESS"})
+        p0_items = sum(1 for card in board.get("cards", []) if card.get("priority") == "P0_IMMEDIATE")
+        p0_items += sum(1 for card in task_cards if card.get("priority") == "P0_IMMEDIATE")
+        pending_decisions = sum(
+            len(decisions.get(key, []))
+            for key in ("pending_gates", "pending_g3_requests", "pending_quarantines", "runtime_halts")
+        )
+        nodes = [
+            {
+                "id": "sense",
+                "label": "Sense",
+                "detail": "Opportunity and research intake",
+                "count": workflow_counts.get("opportunity", 0) + workflow_counts.get("research", 0),
+                "state": "active" if workflow_counts.get("opportunity", 0) or workflow_counts.get("research", 0) else "quiet",
+            },
+            {
+                "id": "decide",
+                "label": "Decide",
+                "detail": "Council, gates, and operator calls",
+                "count": pending_decisions,
+                "state": "attention" if pending_decisions else "clear",
+            },
+            {
+                "id": "build",
+                "label": "Build",
+                "detail": "Projects and phase engine",
+                "count": workflow_counts.get("projects", 0) + workflow_counts.get("phases", 0),
+                "state": "active" if workflow_counts.get("projects", 0) or workflow_counts.get("phases", 0) else "quiet",
+            },
+            {
+                "id": "operate",
+                "label": "Operate",
+                "detail": "Tasks, harvests, and manual work",
+                "count": active_tasks,
+                "state": "blocked" if blocked_tasks else ("active" if active_tasks else "quiet"),
+            },
+            {
+                "id": "learn",
+                "label": "Learn",
+                "detail": "Harness traces, reliability, and self-improvement",
+                "count": workflow_counts.get("operator", 0),
+                "state": "attention" if p0_items else "quiet",
+            },
+        ]
+        edges = [
+            {"from": "sense", "to": "decide", "label": "screen"},
+            {"from": "decide", "to": "build", "label": "approve"},
+            {"from": "build", "to": "operate", "label": "ship"},
+            {"from": "operate", "to": "learn", "label": "trace"},
+            {"from": "learn", "to": "sense", "label": "refine"},
+        ]
+        return {
+            "nodes": nodes,
+            "edges": edges,
+            "pressure": {
+                "p0_items": p0_items,
+                "blocked_tasks": blocked_tasks,
+                "pending_decisions": pending_decisions,
+            },
+        }
+
+    def operator_focus(
+        self,
+        board: dict[str, Any],
+        tasks: dict[str, Any],
+        decisions: dict[str, Any],
+    ) -> dict[str, Any]:
+        project_cards = sorted(
+            board.get("cards", []),
+            key=lambda item: (_priority_rank(item.get("priority")), -int(item.get("pending_gate_count") or 0), item.get("name", "").lower()),
+        )
+        task_cards = sorted(
+            tasks.get("cards", []),
+            key=lambda item: (_priority_rank(item.get("priority")), item.get("lane") == "DONE", item.get("title", "").lower()),
+        )
+        decision_items: list[dict[str, Any]] = []
+        for gate in decisions.get("pending_gates", [])[:6]:
+            decision_items.append(
+                {
+                    "kind": gate.get("gate_type", "gate"),
+                    "title": gate.get("trigger_description", "Pending gate"),
+                    "target": gate.get("project_name") or gate.get("project_id") or "Unassigned",
+                    "priority": "P0_IMMEDIATE",
+                }
+            )
+        for request in decisions.get("pending_g3_requests", [])[:4]:
+            decision_items.append(
+                {
+                    "kind": "G3",
+                    "title": request.get("justification") or request.get("reason") or "Spend approval",
+                    "target": request.get("project_id") or "Finance",
+                    "priority": "P0_IMMEDIATE",
+                }
+            )
+        return {
+            "projects": [
+                {
+                    "id": card.get("project_id"),
+                    "title": card.get("name"),
+                    "priority": card.get("priority"),
+                    "lane": card.get("lane"),
+                    "focus_note": card.get("focus_note") or "",
+                    "pending_gate_count": card.get("pending_gate_count") or 0,
+                }
+                for card in project_cards
+                if card.get("priority") in {"P0_IMMEDIATE", "P1_HIGH"} or int(card.get("pending_gate_count") or 0) > 0
+            ][:8],
+            "tasks": [
+                {
+                    "id": card.get("id"),
+                    "kind": card.get("kind"),
+                    "title": card.get("title"),
+                    "priority": card.get("priority"),
+                    "lane": card.get("lane"),
+                    "source": card.get("source"),
+                }
+                for card in task_cards
+                if card.get("lane") != "DONE" and card.get("priority") in {"P0_IMMEDIATE", "P1_HIGH"}
+            ][:8],
+            "decisions": decision_items[:8],
+        }
+
+    def area_status(
+        self,
+        board: dict[str, Any],
+        tasks: dict[str, Any],
+        decisions: dict[str, Any],
+        council: dict[str, Any],
+        research: dict[str, Any],
+        finance: dict[str, Any],
+        replay: dict[str, Any],
+        system: dict[str, Any],
+        model_assignments: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        pending_gates = decisions.get("pending_gates", [])
+        pending_g3 = decisions.get("pending_g3_requests", [])
+        pending_quarantines = decisions.get("pending_quarantines", [])
+        runtime_halts = decisions.get("runtime_halts", [])
+        research_active = sum(int(item.get("active") or 0) for item in research.get("workflows", []))
+        research_blocked = sum(int(item.get("blocked") or 0) for item in research.get("workflows", []))
+        active_projects = sum(1 for card in board.get("cards", []) if card.get("status") in {"ACTIVE", "PAUSED", "KILL_RECOMMENDED"})
+        project_gate_count = sum(int(card.get("pending_gate_count") or 0) for card in board.get("cards", []))
+        replay_readiness = replay.get("readiness", {})
+        replay_below_threshold = bool(replay_readiness.get("operator_ack_required_below_threshold"))
+        breaker = system.get("circuit_breakers", {})
+        runtime = system.get("runtime_control", {})
+        runtime_state = str(runtime.get("lifecycle_state") or "UNKNOWN")
+        return [
+            self._area(
+                "Research",
+                "Research tasks, standing briefs, harvest follow-ups",
+                active=research_active,
+                pending=int((research.get("summary") or {}).get("pending_harvests") or 0),
+                blocked=research_blocked,
+                operator_needed=False,
+                models=self._models_for_area(model_assignments, "Research"),
+            ),
+            self._area(
+                "Council",
+                "Deliberation, escalation, and confirmation",
+                active=int((council.get("summary") or {}).get("total_verdicts") or 0),
+                pending=int((council.get("summary") or {}).get("pending_tier2_g3") or 0),
+                blocked=0,
+                operator_needed=bool((council.get("summary") or {}).get("pending_tier2_g3")),
+                models=self._models_for_area(model_assignments, "Council"),
+            ),
+            self._area(
+                "Projects",
+                "Pipeline, build, deploy, operate",
+                active=active_projects,
+                pending=project_gate_count,
+                blocked=sum(1 for card in board.get("cards", []) if card.get("lane") == "KILL_REVIEW"),
+                operator_needed=bool(pending_gates),
+                models=self._models_for_area(model_assignments, "Projects"),
+            ),
+            self._area(
+                "Finance",
+                "$0 autonomous paid spend posture and approvals",
+                active=len(finance.get("route_mix", [])),
+                pending=len(pending_g3),
+                blocked=int((finance.get("summary") or {}).get("g3_by_status", {}).get("PENDING", 0)),
+                operator_needed=bool(pending_g3),
+                models=self._models_for_area(model_assignments, "Finance"),
+            ),
+            self._area(
+                "Self-Improvement",
+                "Hermes harness readiness, traces, and reliability",
+                active=len(replay.get("recent_traces", [])),
+                pending=0,
+                blocked=1 if replay_below_threshold else 0,
+                operator_needed=replay_below_threshold,
+                models=self._models_for_area(model_assignments, "Self-Improvement"),
+            ),
+        ]
+
+    @staticmethod
+    def _area(
+        name: str,
+        detail: str,
+        *,
+        active: int,
+        pending: int,
+        blocked: int,
+        operator_needed: bool,
+        forced_state: str | None = None,
+        models: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        state = forced_state or ("yellow" if operator_needed else ("red" if blocked > 0 and active == 0 else "green"))
+        return {
+            "name": name,
+            "detail": detail,
+            "state": state,
+            "active": active,
+            "pending": pending,
+            "blocked": blocked,
+            "operator_needed": operator_needed,
+            "models": models or [],
+        }
+
+    @staticmethod
+    def _models_for_area(assignments: list[dict[str, Any]], area: str) -> list[dict[str, Any]]:
+        return [item for item in assignments if item.get("area") == area][:3]
+
+    def model_assignments(self) -> list[dict[str, Any]]:
+        financial = self._db.get_connection("financial_ledger")
+        rows = financial.execute(
+            """
+            SELECT
+                role,
+                route_selected,
+                COALESCE(NULLIF(model_used, ''), 'unassigned') AS model_used,
+                COUNT(*) AS count,
+                MAX(created_at) AS last_used_at
+            FROM routing_decisions
+            GROUP BY role, route_selected, COALESCE(NULLIF(model_used, ''), 'unassigned')
+            ORDER BY last_used_at DESC, count DESC
+            LIMIT 20
+            """
+        ).fetchall()
+        area_by_role = {
+            "Primary Reasoning": "Projects",
+            "Execution": "Projects",
+            "Validation": "Council",
+            "Training/Reward": "Self-Improvement",
+            "Embedding": "Research",
+            "Cloud Escalation": "Finance",
+        }
+        return [
+            {
+                "area": area_by_role.get(row["role"], "Projects"),
+                "role": row["role"],
+                "route": row["route_selected"],
+                "model": row["model_used"],
+                "count": int(row["count"]),
+                "last_used_at": row["last_used_at"],
+            }
+            for row in rows
+        ]
+
     def council(self) -> dict[str, Any]:
         strategic = self._db.get_connection("strategic_memory")
         operator = self._db.get_connection("operator_digest")
@@ -244,6 +909,22 @@ class MissionControlService:
     def research(self) -> dict[str, Any]:
         strategic = self._db.get_connection("strategic_memory")
         operator = self._db.get_connection("operator_digest")
+        task_rows = strategic.execute(
+            """
+            SELECT task_id, domain, source, title, brief, priority, status, tags,
+                   depth_upgrade, created_at, updated_at
+            FROM research_tasks
+            ORDER BY
+                CASE priority
+                    WHEN 'P0_IMMEDIATE' THEN 0
+                    WHEN 'P1_HIGH' THEN 1
+                    WHEN 'P2_NORMAL' THEN 2
+                    ELSE 3
+                END,
+                updated_at DESC
+            LIMIT 80
+            """
+        ).fetchall()
         domain_rows = strategic.execute(
             """
             SELECT domain, status, COUNT(*) AS count
@@ -285,8 +966,23 @@ class MissionControlService:
             LIMIT 10
             """
         ).fetchall()
+        actionable_rows = strategic.execute(
+            """
+            SELECT brief_id, task_id, domain, title, summary, confidence, actionability,
+                   urgency, action_type, spawned_opportunity_id, created_at
+            FROM intelligence_briefs
+            WHERE actionability IN ('ACTION_RECOMMENDED','ACTION_REQUIRED','HARVEST_NEEDED')
+               OR action_type IN ('council_review','opportunity_feed','operator_surface','security_escalation')
+               OR spawned_opportunity_id IS NOT NULL
+            ORDER BY created_at DESC
+            LIMIT 8
+            """
+        ).fetchall()
         status_rows = strategic.execute(
             "SELECT status, COUNT(*) AS count FROM research_tasks GROUP BY status"
+        ).fetchall()
+        source_rows = strategic.execute(
+            "SELECT source, COUNT(*) AS count FROM research_tasks GROUP BY source"
         ).fetchall()
         brief_quality = strategic.execute(
             """
@@ -298,12 +994,101 @@ class MissionControlService:
             FROM intelligence_briefs
             """
         ).fetchone()
+        opportunity_from_research = strategic.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM opportunity_records
+            WHERE detected_by IN ('research_loop', 'research_prompted')
+            """
+        ).fetchone()
+        council_action_briefs = strategic.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM intelligence_briefs
+            WHERE action_type IN ('council_review', 'security_escalation')
+            """
+        ).fetchone()
         domain_matrix: dict[str, dict[str, int]] = {}
         for row in domain_rows:
             domain_matrix.setdefault(str(row["domain"]), {})[row["status"]] = int(row["count"])
+        workflow_map = {
+            workflow_id: {
+                "id": workflow_id,
+                "label": label,
+                "purpose": purpose,
+                "total": 0,
+                "active": 0,
+                "blocked": 0,
+                "p0_p1": 0,
+                "tasks": [],
+            }
+            for workflow_id, label, purpose in RESEARCH_WORKFLOW_DEFINITIONS
+        }
+        for row in task_rows:
+            workflow_id = _research_workflow_id(row)
+            workflow = workflow_map[workflow_id]
+            status = str(row["status"])
+            priority = str(row["priority"])
+            workflow["total"] += 1
+            workflow["active"] += 1 if status in {"PENDING", "ACTIVE", "STALE"} else 0
+            workflow["blocked"] += 1 if status in {"FAILED", "CANCELLED", "STALE"} else 0
+            workflow["p0_p1"] += 1 if priority in {"P0_IMMEDIATE", "P1_HIGH"} else 0
+            if len(workflow["tasks"]) < 4:
+                workflow["tasks"].append(
+                    {
+                        "task_id": row["task_id"],
+                        "title": row["title"],
+                        "priority": priority,
+                        "status": status,
+                        "source": row["source"],
+                        "domain": int(row["domain"]),
+                        "domain_label": RESEARCH_DOMAIN_LABELS.get(int(row["domain"]), f"Domain {row['domain']}"),
+                    }
+                )
+        standing_active = sum(1 for row in standing_rows if row["status"] == "ACTIVE")
+        standing_workflow = workflow_map["standing_monitoring"]
+        standing_workflow["total"] = len(standing_rows)
+        standing_workflow["active"] = standing_active
+        standing_workflow["blocked"] = sum(1 for row in standing_rows if row["status"] in {"PAUSED", "ARCHIVED"})
+        standing_workflow["p0_p1"] = standing_active
+        standing_workflow["tasks"] = [
+            {
+                "task_id": row["standing_brief_id"],
+                "title": row["title"],
+                "priority": "P1_HIGH" if row["status"] == "ACTIVE" else "P3_BACKGROUND",
+                "status": row["status"],
+                "source": row["target_interface"],
+                "domain": int(row["domain"]),
+                "domain_label": RESEARCH_DOMAIN_LABELS.get(int(row["domain"]), f"Domain {row['domain']}"),
+            }
+            for row in standing_rows[:4]
+        ]
+        harvest_workflow = workflow_map["harvest_followups"]
+        harvest_workflow["total"] = len(harvest_rows)
+        harvest_workflow["active"] = sum(1 for row in harvest_rows if row["status"] in {"PENDING", "DELIVERED_PARTIAL"})
+        harvest_workflow["blocked"] = sum(1 for row in harvest_rows if row["status"] == "EXPIRED")
+        harvest_workflow["p0_p1"] = sum(1 for row in harvest_rows if row["priority"] in {"P0_IMMEDIATE", "P1_HIGH"})
+        harvest_workflow["tasks"] = [
+            {
+                "task_id": row["harvest_id"],
+                "title": row["target_interface"],
+                "priority": row["priority"],
+                "status": row["status"],
+                "source": "harvest",
+                "domain": None,
+                "domain_label": "Manual evidence",
+            }
+            for row in harvest_rows[:4]
+        ]
+        model_lifecycle = {
+            "scouted": int(strategic.execute("SELECT COUNT(*) FROM model_scout_reports").fetchone()[0]),
+            "assessed": int(strategic.execute("SELECT COUNT(*) FROM model_assess_reports").fetchone()[0]),
+            "shadow_trials": int(strategic.execute("SELECT COUNT(*) FROM shadow_trial_reports").fetchone()[0]),
+        }
         return {
             "summary": {
                 "tasks_by_status": _counter(status_rows, "count"),
+                "tasks_by_source": _counter(source_rows, "count"),
                 "active_standing_briefs": sum(1 for row in standing_rows if row["status"] == "ACTIVE"),
                 "pending_harvests": sum(1 for row in harvest_rows if row["status"] == "PENDING"),
                 "briefs_total": int(brief_quality["total"] or 0),
@@ -311,7 +1096,45 @@ class MissionControlService:
                 "quality_holds": int(brief_quality["quality_holds"] or 0),
                 "avg_brief_confidence": float(brief_quality["avg_confidence"] or 0.0),
             },
+            "conversion_flow": {
+                "stages": [
+                    {
+                        "id": "task",
+                        "label": "Research Task",
+                        "count": sum(1 for row in task_rows if row["status"] in {"PENDING", "ACTIVE", "STALE"}),
+                        "detail": "Assigned, loop-generated, or council-requested question",
+                    },
+                    {
+                        "id": "brief",
+                        "label": "Intelligence Brief",
+                        "count": int(brief_quality["total"] or 0),
+                        "detail": "Structured finding with confidence and uncertainty",
+                    },
+                    {
+                        "id": "action_signal",
+                        "label": "Action Signal",
+                        "count": int(brief_quality["actionable"] or 0),
+                        "detail": "Finding recommends action, harvest, or operator attention",
+                    },
+                    {
+                        "id": "opportunity",
+                        "label": "Opportunity Candidate",
+                        "count": int(opportunity_from_research["count"] or 0),
+                        "detail": "Research creates or strengthens a commercial/system opportunity",
+                    },
+                    {
+                        "id": "council",
+                        "label": "Council Confirmation",
+                        "count": int(council_action_briefs["count"] or 0),
+                        "detail": "Important enough for deliberation or escalation",
+                    },
+                ],
+                "actionable_briefs": [dict(row) for row in actionable_rows],
+            },
+            "domain_labels": {str(key): value for key, value in RESEARCH_DOMAIN_LABELS.items()},
             "domain_matrix": domain_matrix,
+            "workflows": list(workflow_map.values()),
+            "model_lifecycle": model_lifecycle,
             "recent_briefs": [dict(row) for row in brief_rows],
             "standing_briefs": [dict(row) for row in standing_rows],
             "harvest_queue": [dict(row) for row in harvest_rows],
@@ -385,6 +1208,94 @@ class MissionControlService:
             "variants": variants,
             "frontier": frontier,
         }
+
+    def usage(self, resource_pressure: dict[str, Any]) -> dict[str, Any]:
+        telemetry = self._db.get_connection("telemetry")
+        financial = self._db.get_connection("financial_ledger")
+        trace_summary = telemetry.execute(
+            """
+            SELECT
+                COUNT(*) AS trace_count,
+                COALESCE(SUM(cost_usd), 0.0) AS trace_cost_usd,
+                COALESCE(SUM(duration_ms), 0) AS duration_ms
+            FROM execution_traces
+            """
+        ).fetchone()
+        recent_traces = telemetry.execute(
+            """
+            SELECT trace_id, skill_name, role, steps_json, cost_usd, duration_ms, created_at
+            FROM execution_traces
+            ORDER BY created_at DESC
+            LIMIT 40
+            """
+        ).fetchall()
+        tokens_in = 0
+        tokens_out = 0
+        token_records = 0
+        for row in recent_traces:
+            extracted = self._extract_tokens(row["steps_json"])
+            tokens_in += extracted["tokens_in"]
+            tokens_out += extracted["tokens_out"]
+            token_records += extracted["records"]
+        route_rows = financial.execute(
+            """
+            SELECT route_selected, COUNT(*) AS count, COALESCE(SUM(cost_usd), 0.0) AS cost_usd
+            FROM routing_decisions
+            GROUP BY route_selected
+            ORDER BY count DESC
+            """
+        ).fetchall()
+        return {
+            "resource_pressure": resource_pressure,
+            "tokens": {
+                "tracked": token_records > 0,
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "total": tokens_in + tokens_out,
+                "records": token_records,
+                "note": "Best-effort extraction from trace payloads; live Hermes token accounting is not attached yet.",
+            },
+            "traces": {
+                "count": int(trace_summary["trace_count"] or 0),
+                "cost_usd": float(trace_summary["trace_cost_usd"] or 0.0),
+                "duration_ms": int(trace_summary["duration_ms"] or 0),
+            },
+            "routes": [
+                {"route": row["route_selected"], "count": int(row["count"]), "cost_usd": float(row["cost_usd"] or 0.0)}
+                for row in route_rows
+            ],
+        }
+
+    @classmethod
+    def _extract_tokens(cls, raw_json: str | None) -> dict[str, int]:
+        try:
+            payload = json.loads(raw_json or "[]")
+        except json.JSONDecodeError:
+            return {"tokens_in": 0, "tokens_out": 0, "records": 0}
+        totals = {"tokens_in": 0, "tokens_out": 0, "records": 0}
+
+        def walk(value: Any) -> None:
+            if isinstance(value, dict):
+                found = False
+                if isinstance(value.get("tokens_in"), int):
+                    totals["tokens_in"] += int(value["tokens_in"])
+                    found = True
+                if isinstance(value.get("tokens_out"), int):
+                    totals["tokens_out"] += int(value["tokens_out"])
+                    found = True
+                if isinstance(value.get("token_count"), int) and not found:
+                    totals["tokens_out"] += int(value["token_count"])
+                    found = True
+                if found:
+                    totals["records"] += 1
+                for child in value.values():
+                    walk(child)
+            elif isinstance(value, list):
+                for child in value:
+                    walk(child)
+
+        walk(payload)
+        return totals
 
     def system(self) -> dict[str, Any]:
         health = self._observability.system_health()
@@ -575,7 +1486,7 @@ class MissionControlService:
         ).fetchall()
         research_rows = strategic.execute(
             """
-            SELECT task_id, title, brief, priority, status, created_at, updated_at
+            SELECT task_id, domain, source, title, brief, priority, status, tags, created_at, updated_at
             FROM research_tasks
             WHERE status IN ('PENDING', 'ACTIVE', 'STALE', 'FAILED', 'COMPLETE')
             ORDER BY
@@ -608,9 +1519,12 @@ class MissionControlService:
 
         cards: list[dict[str, Any]] = []
         for row in manual_rows:
+            workflow_id = "operator_manual"
             cards.append(
                 {
                     "kind": "manual",
+                    "workflow_id": workflow_id,
+                    "workflow_label": "Operator Manual",
                     "id": row["task_id"],
                     "title": row["title"],
                     "details": row["details"],
@@ -625,9 +1539,16 @@ class MissionControlService:
                 }
             )
         for row in research_rows:
+            workflow_id = _research_workflow_id(row)
+            workflow_label = next(
+                (label for current_id, label, _purpose in RESEARCH_WORKFLOW_DEFINITIONS if current_id == workflow_id),
+                "Research",
+            )
             cards.append(
                 {
                     "kind": "research",
+                    "workflow_id": workflow_id,
+                    "workflow_label": workflow_label,
                     "id": row["task_id"],
                     "title": row["title"],
                     "details": row["brief"],
@@ -642,9 +1563,12 @@ class MissionControlService:
                 }
             )
         for row in harvest_rows:
+            workflow_id = "harvest_followups"
             cards.append(
                 {
                     "kind": "harvest",
+                    "workflow_id": workflow_id,
+                    "workflow_label": "Harvest Follow-ups",
                     "id": row["harvest_id"],
                     "title": row["target_interface"],
                     "details": row["prompt_text"],
@@ -676,9 +1600,39 @@ class MissionControlService:
                     "cards": lane_cards,
                 }
             )
+        workflow_defs = [
+            ("operator_manual", "Operator Manual", "Tasks created directly by the operator."),
+            *[
+                (workflow_id, label, purpose)
+                for workflow_id, label, purpose in RESEARCH_WORKFLOW_DEFINITIONS
+            ],
+        ]
+        workflow_boards = []
+        for workflow_id, label, purpose in workflow_defs:
+            workflow_cards = [card for card in cards if card["workflow_id"] == workflow_id]
+            if not workflow_cards and workflow_id not in {"operator_manual", "model_radar", "system_architecture", "business_market", "security_compliance", "harvest_followups"}:
+                continue
+            workflow_boards.append(
+                {
+                    "id": workflow_id,
+                    "label": label,
+                    "purpose": purpose,
+                    "count": len(workflow_cards),
+                    "lanes": [
+                        {
+                            "id": lane,
+                            "label": lane.replace("_", " ").title(),
+                            "count": len([card for card in workflow_cards if card["lane"] == lane]),
+                            "cards": [card for card in workflow_cards if card["lane"] == lane],
+                        }
+                        for lane in TASK_LANES
+                    ],
+                }
+            )
         source_counts = Counter(card["source"] for card in cards)
         return {
             "lanes": lanes,
+            "workflow_boards": workflow_boards,
             "cards": cards,
             "source_counts": dict(source_counts),
         }
@@ -788,6 +1742,65 @@ class MissionControlService:
             "created_at": now,
             "updated_at": now,
         }
+
+    def create_research_task(
+        self,
+        *,
+        title: str,
+        brief: str,
+        workflow_id: str = "operator_prompts",
+        domain: int | None = None,
+        priority: str = "P2_NORMAL",
+        source: str = "operator",
+        depth: str = "QUICK",
+        stale_after: str | None = None,
+    ) -> dict[str, Any]:
+        if priority not in PRIORITIES:
+            raise ValueError(f"Unknown research task priority: {priority}")
+        if source not in {"autonomous_loop", "operator", "council"}:
+            raise ValueError(f"Unknown research task source: {source}")
+        resolved_domain = _research_domain_for_workflow(workflow_id) if domain is None else int(domain)
+        if not 1 <= resolved_domain <= 5:
+            raise ValueError(f"Unknown research domain: {domain}")
+        if depth not in {"QUICK", "FULL"}:
+            raise ValueError(f"Unknown research depth: {depth}")
+        title = title.strip()
+        brief = brief.strip()
+        if not title:
+            raise ValueError("Research task title is required")
+        if not brief:
+            brief = title
+        from skills.research_domain.skill import ResearchDomainSkill
+
+        tags = list(dict.fromkeys([workflow_id, *_research_tags_for_workflow(workflow_id), depth.lower()]))
+        task_id = ResearchDomainSkill(self._db).create_task(
+            title,
+            brief,
+            priority=priority,
+            domain=resolved_domain,
+            source=source,
+            tags=tags,
+            stale_after=stale_after or None,
+        )
+        strategic = self._db.get_connection("strategic_memory")
+        if depth == "FULL":
+            strategic.execute("UPDATE research_tasks SET depth_upgrade = 1 WHERE task_id = ?", (task_id,))
+            strategic.commit()
+        task = strategic.execute(
+            """
+            SELECT task_id, domain, source, title, brief, priority, status, tags,
+                   depth_upgrade, created_at, updated_at
+            FROM research_tasks
+            WHERE task_id = ?
+            """,
+            (task_id,),
+        ).fetchone()
+        now = _utc_now()
+        operator = self._db.get_connection("operator_digest")
+        self._record_heartbeat(operator, interaction_type="message", when=now, channel=self._interaction_channel)
+        operator.commit()
+        assert task is not None
+        return dict(task)
 
     def update_manual_task(
         self,
@@ -1604,6 +2617,19 @@ class MissionControlHandler(BaseHTTPRequestHandler):
                 )
                 self._json_response(result, status=201)
                 return
+            if parsed.path == "/api/research-tasks":
+                result = self.server.service.create_research_task(
+                    title=payload["title"],
+                    brief=payload.get("brief", ""),
+                    workflow_id=payload.get("workflow_id", "operator_prompts"),
+                    domain=int(payload["domain"]) if payload.get("domain") not in (None, "") else None,
+                    priority=payload.get("priority", "P2_NORMAL"),
+                    source=payload.get("source", "operator"),
+                    depth=payload.get("depth", "QUICK"),
+                    stale_after=payload.get("stale_after"),
+                )
+                self._json_response(result, status=201)
+                return
             if parsed.path.startswith("/api/manual-tasks/"):
                 task_id = parsed.path.split("/")[3]
                 result = self.server.service.update_manual_task(
@@ -1704,6 +2730,7 @@ def seed_demo_state(data_dir: str) -> dict[str, Any]:
         ("opp-demo-1", "software_product", "Mission Control UI", "Build a lean operator control surface", "GO_NO_GO"),
         ("opp-demo-2", "client_work", "Operator Setup Sprint", "Package day-one deployment support", "IN_VALIDATION"),
         ("opp-demo-3", "ip_asset", "Workflow Templates", "Extract reusable operating templates", "SCREENED"),
+        ("opp-demo-4", "ip_asset", "Memory Compaction Pattern", "Turn research on lower-token operations into a reusable system improvement", "QUALIFIED"),
     ]
     for idx, (opp_id, mechanism, title, thesis, status) in enumerate(opportunities):
         ts = (now - datetime.timedelta(hours=12 - idx)).isoformat()
@@ -1720,7 +2747,7 @@ def seed_demo_state(data_dir: str) -> dict[str, Any]:
                 mechanism,
                 title,
                 thesis,
-                "operator",
+                "research_prompted" if opp_id == "opp-demo-4" else "operator",
                 None,
                 0.0,
                 None,
@@ -1737,11 +2764,15 @@ def seed_demo_state(data_dir: str) -> dict[str, Any]:
         )
 
     research_tasks = [
-        ("research-demo-1", 2, "Research operator dashboards competitors", "P1_HIGH", "ACTIVE"),
-        ("research-demo-2", 4, "Map monetization options for agent operations support", "P2_NORMAL", "PENDING"),
-        ("research-demo-3", 1, "Review local-first notification pathways", "P1_HIGH", "STALE"),
+        ("research-demo-1", 2, "Research operator dashboards competitors", "operator", "P1_HIGH", "ACTIVE", ["mission_control", "dashboard", "architecture"]),
+        ("research-demo-2", 3, "Map monetization options for agent operations support", "autonomous_loop", "P2_NORMAL", "PENDING", ["market", "monetization"]),
+        ("research-demo-3", 1, "Review local-first notification pathways", "operator", "P1_HIGH", "STALE", ["security", "operator_interface"]),
+        ("research-demo-4", 5, "Scout Hermes-compatible frontier model candidates", "autonomous_loop", "P1_HIGH", "ACTIVE", ["model", "frontier", "scout"]),
+        ("research-demo-5", 2, "Assess MLX inference architecture for council roles", "council", "P2_NORMAL", "PENDING", ["architecture", "mlx", "efficiency"]),
+        ("research-demo-6", 4, "Check AI agent compliance obligations for EU operators", "autonomous_loop", "P2_NORMAL", "PENDING", ["regulatory", "compliance"]),
+        ("research-demo-7", 2, "Compare token-saving memory compaction strategies", "operator", "P1_HIGH", "PENDING", ["architecture", "token", "memory"]),
     ]
-    for idx, (task_id, domain, title, priority, status) in enumerate(research_tasks):
+    for idx, (task_id, domain, title, source, priority, status, tags) in enumerate(research_tasks):
         ts = (now - datetime.timedelta(hours=8 - idx)).isoformat()
         strategic.execute(
             """
@@ -1754,7 +2785,7 @@ def seed_demo_state(data_dir: str) -> dict[str, Any]:
             (
                 task_id,
                 domain,
-                "operator",
+                source,
                 title,
                 f"{title}. Keep the output tight and operator-oriented.",
                 priority,
@@ -1764,11 +2795,136 @@ def seed_demo_state(data_dir: str) -> dict[str, Any]:
                 None,
                 "[]",
                 (now + datetime.timedelta(days=1)).isoformat(),
-                json.dumps(["mission_control"]),
+                json.dumps(tags),
                 0,
                 ts,
                 ts,
             ),
+        )
+
+    standing_briefs = [
+        ("sb-demo-frontier", 5, "Frontier model watch", "Track model releases, free-tier changes, and role candidates.", "0 8 */14 * *", "mission_control", ["model", "standing_brief"]),
+        ("sb-demo-architecture", 2, "System architecture radar", "Watch architecture changes that could simplify or improve the workspace.", "0 9 1 * *", "mission_control", ["architecture", "standing_brief"]),
+    ]
+    for standing_id, domain, title, brief, cron_expr, target_interface, tags in standing_briefs:
+        strategic.execute(
+            """
+            INSERT INTO standing_briefs (
+                standing_brief_id, domain, title, brief, cron_expr, target_interface,
+                include_council_review, status, tags, last_task_id, last_job_id,
+                last_run_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                standing_id,
+                domain,
+                title,
+                brief,
+                cron_expr,
+                target_interface,
+                1 if "architecture" in tags else 0,
+                "ACTIVE",
+                json.dumps(tags),
+                None,
+                None,
+                None,
+                (now - datetime.timedelta(days=1)).isoformat(),
+                (now - datetime.timedelta(hours=4)).isoformat(),
+            ),
+        )
+
+    strategic.execute(
+        """
+        INSERT INTO model_scout_reports (
+            report_id, candidate_model_id, target_role, model_card_summary, licence,
+            quantisation_available, memory_footprint_gb, benchmark_scores,
+            plausible_fit, disqualifiers, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "model-scout-demo-1",
+            "demo-frontier-local-32b",
+            "Primary Reasoning",
+            "Promising local reasoning candidate for shadow evaluation.",
+            "Apache-2.0",
+            1,
+            22.0,
+            json.dumps({"reasoning": 0.78, "tool_use": 0.72}),
+            1,
+            "[]",
+            (now - datetime.timedelta(hours=5)).isoformat(),
+        ),
+    )
+
+    intelligence_briefs = [
+        (
+            "brief-demo-model",
+            "research-demo-4",
+            5,
+            "Frontier model candidate may deserve shadow eval",
+            "A Hermes-compatible local model candidate appears plausible for primary reasoning after a small benchmark delta.",
+            0.82,
+            "ACTION_RECOMMENDED",
+            "ELEVATED",
+            "council_review",
+            None,
+            ["model", "scout"],
+        ),
+        (
+            "brief-demo-architecture",
+            "research-demo-7",
+            2,
+            "Memory compaction may reduce routine token load",
+            "A staged memory compaction pattern could reduce repeated context without changing safety gates.",
+            0.78,
+            "ACTION_REQUIRED",
+            "ELEVATED",
+            "opportunity_feed",
+            "opp-demo-4",
+            ["architecture", "token", "memory"],
+        ),
+    ]
+    for brief_id, task_id, domain, title, summary, confidence, actionability, urgency, action_type, spawned_opportunity_id, tags in intelligence_briefs:
+        strategic.execute(
+            """
+            INSERT INTO intelligence_briefs (
+                brief_id, task_id, domain, title, summary, detail, source_urls,
+                source_assessments, confidence, uncertainty_statement, counter_thesis,
+                actionability, urgency, depth_tier, action_type, spawned_tasks,
+                spawned_opportunity_id, related_brief_ids, tags, quality_warning,
+                source_diversity_hold, provenance_links, trust_tier, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                brief_id,
+                task_id,
+                domain,
+                title,
+                summary,
+                summary + " Demo detail for Mission Control preview.",
+                json.dumps(["https://example.com/research"]),
+                json.dumps([{"url": "https://example.com/research", "relevance": 0.8, "freshness": now.date().isoformat(), "source_type": "tier2_web"}]),
+                confidence,
+                "Demo uncertainty: live evidence and broader benchmark coverage are still thin.",
+                "The apparent gain may disappear under production workload.",
+                actionability,
+                urgency,
+                "FULL",
+                action_type,
+                "[]",
+                spawned_opportunity_id,
+                "[]",
+                json.dumps(tags),
+                0,
+                0,
+                "[]",
+                3,
+                (now - datetime.timedelta(hours=2)).isoformat(),
+            ),
+        )
+        strategic.execute(
+            "UPDATE research_tasks SET output_brief_id = ?, status = 'COMPLETE', updated_at = ? WHERE task_id = ?",
+            (brief_id, (now - datetime.timedelta(hours=1)).isoformat(), task_id),
         )
 
     projects = [
@@ -1826,6 +2982,107 @@ def seed_demo_state(data_dir: str) -> dict[str, Any]:
                 created_at,
                 (now - datetime.timedelta(hours=idx + 2)).isoformat() if phase_status == "GATE_PENDING" else None,
                 None,
+            ),
+        )
+
+    route_rows = [
+        ("route-demo-research", "research-demo-4", None, "Embedding", "local", "bge-m3-local", "Research brief retrieval and clustering."),
+        ("route-demo-council", None, None, "Validation", "subscription", "gpt-5.2", "Council validation for elevated findings."),
+        ("route-demo-execution", None, "proj-demo-1", "Execution", "local", "qwen3-coder-30b-a3b", "Mission Control implementation work."),
+        ("route-demo-primary", None, "proj-demo-1", "Primary Reasoning", "local", "demo-frontier-local-32b", "Planning and synthesis shadow candidate."),
+        ("route-demo-training", None, None, "Training/Reward", "local", "judge-replay-local", "Harness trace review below activation threshold."),
+    ]
+    for idx, (decision_id, task_id, project_id, role, route_selected, model_used, justification) in enumerate(route_rows):
+        financial.execute(
+            """
+            INSERT INTO routing_decisions (
+                decision_id, task_id, chain_id, role, route_selected, model_used,
+                commercial_use_ok, quality_warning, cost_usd, justification,
+                g3_required, g3_status, reservation_id, created_at, project_id,
+                session_id, correlation_id, cost_status, approval_request_id,
+                dispatch_status, dispatched_at, finalized_at, final_cost_usd
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                decision_id,
+                task_id,
+                "mission-control-preview",
+                role,
+                route_selected,
+                model_used,
+                1,
+                0,
+                0.0,
+                justification,
+                0,
+                None,
+                None,
+                (now - datetime.timedelta(minutes=45 - idx * 3)).isoformat(),
+                project_id,
+                "preview-session",
+                f"preview-{idx}",
+                "NOT_APPLICABLE",
+                None,
+                "FINALIZED",
+                (now - datetime.timedelta(minutes=44 - idx * 3)).isoformat(),
+                (now - datetime.timedelta(minutes=43 - idx * 3)).isoformat(),
+                0.0,
+            ),
+        )
+
+    council_verdicts = [
+        (
+            "verdict-demo-1",
+            2,
+            "kill_rec",
+            "PAUSE",
+            0.74,
+            "Workflow Library should pause until buyer clarity improves and reusable assets are separated from speculative packaging.",
+            "The reusable asset inventory may still be valuable if scoped as internal tooling first.",
+            "proj-demo-3",
+            0.82,
+        ),
+        (
+            "verdict-demo-2",
+            1,
+            "go_no_go",
+            "PURSUE",
+            0.81,
+            "Mission Control should continue because it reduces operator load and strengthens the Hermes-native contract before live hardware exists.",
+            "The UI may still overfit demo data unless the next pass tightens real empty states.",
+            "proj-demo-1",
+            0.79,
+        ),
+    ]
+    for verdict_id, tier_used, decision_type, recommendation, confidence, reasoning, dissent, project_id, da_quality in council_verdicts:
+        strategic.execute(
+            """
+            INSERT INTO council_verdicts (
+                verdict_id, tier_used, decision_type, recommendation, confidence,
+                reasoning_summary, dissenting_views, minority_positions, full_debate_record,
+                cost_usd, project_id, outcome_record, da_quality_score,
+                da_assessment, tie_break, degraded, confidence_cap, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                verdict_id,
+                tier_used,
+                decision_type,
+                recommendation,
+                confidence,
+                reasoning,
+                dissent,
+                json.dumps([]),
+                "Demo debate record for Mission Control preview.",
+                0.0,
+                project_id,
+                None,
+                da_quality,
+                json.dumps({"quality": "demo"}),
+                0,
+                0,
+                None,
+                (now - datetime.timedelta(hours=2)).isoformat(),
             ),
         )
 

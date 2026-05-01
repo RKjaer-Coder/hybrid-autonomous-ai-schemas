@@ -153,9 +153,10 @@ Check live-Hermes readiness on a machine with Hermes installed:
 python3 -m skills.runtime --readiness
 ```
 
-Readiness also requires the Council delegate isolation canary and the repo-local
-v0.11 policy adapter contract before Council Tier 1 or paid-capable operation is
-treated as launch-safe.
+Readiness also requires the Council delegate isolation canary, the repo-local
+v0.12 approval-hook adapter contract, LM Studio/local-provider doctor readiness,
+and `hermes -z` one-shot smoke evidence before Council Tier 1 or paid-capable
+operation is treated as launch-safe.
 
 ## Useful Commands
 

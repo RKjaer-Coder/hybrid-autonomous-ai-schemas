@@ -116,6 +116,21 @@ async def update_manual_task(task_id: str, body: dict[str, Any]) -> dict[str, An
     )
 
 
+@router.post("/research-tasks")
+async def create_research_task(body: dict[str, Any]) -> dict[str, Any]:
+    return _with_service(
+        "create_research_task",
+        title=str(body.get("title", "")),
+        brief=str(body.get("brief", "")),
+        workflow_id=str(body.get("workflow_id", "operator_prompts")),
+        domain=int(body["domain"]) if body.get("domain") not in (None, "") else None,
+        priority=str(body.get("priority", "P2_NORMAL")),
+        source=str(body.get("source", "operator")),
+        depth=str(body.get("depth", "QUICK")),
+        stale_after=body.get("stale_after"),
+    )
+
+
 @router.post("/tasks/priority")
 async def update_system_task_priority(body: dict[str, Any]) -> dict[str, Any]:
     return _with_service(

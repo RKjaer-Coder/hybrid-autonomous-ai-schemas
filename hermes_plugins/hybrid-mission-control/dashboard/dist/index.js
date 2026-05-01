@@ -13,6 +13,15 @@
   var apiBase = "/api/plugins/hybrid-mission-control";
   var priorities = ["P0_IMMEDIATE", "P1_HIGH", "P2_NORMAL", "P3_BACKGROUND"];
   var manualStatuses = ["TODO", "IN_PROGRESS", "BLOCKED", "DONE"];
+  var researchWorkflows = [
+    ["model_radar", "Model & Tooling Radar"],
+    ["system_architecture", "System Architecture"],
+    ["business_market", "Business & Opportunity"],
+    ["security_compliance", "Security & Compliance"],
+    ["operator_prompts", "Operator Prompt"],
+    ["standing_monitoring", "Standing Brief"],
+    ["harvest_followups", "Harvest Follow-up"]
+  ];
 
   function api(path, options) {
     return SDK.fetchJSON(apiBase + path, options || {});
@@ -39,6 +48,13 @@
   function pct(value) {
     if (value === null || value === undefined) return "n/a";
     return Math.round(Number(value) * 100) + "%";
+  }
+
+  function pressureTone(value) {
+    if (value === null || value === undefined) return "unknown";
+    if (Number(value) >= 0.8) return "high";
+    if (Number(value) >= 0.55) return "medium";
+    return "low";
   }
 
   function statusLabel(value) {
@@ -85,6 +101,128 @@
     }));
   }
 
+  function SystemMap(props) {
+    var map = (props.snapshot || {}).system_map || {};
+    var nodes = map.nodes || [];
+    var pressure = map.pressure || {};
+    return h(ShellCard, {title: "System Logic Map", aside: "sense -> decide -> build -> operate -> learn"},
+      h("div", {className: "mc-system-map"}, nodes.map(function (node, index) {
+        return h("div", {className: "mc-map-wrap", key: node.id},
+          h("div", {className: "mc-map-node " + (node.state || "quiet")},
+            h("span", null, node.label),
+            h("strong", null, fmt(node.count || 0)),
+            h("small", null, node.detail)
+          ),
+          index < nodes.length - 1 ? h("span", {className: "mc-map-arrow"}, "->") : null
+        );
+      })),
+      h("div", {className: "mc-pressure-row"},
+        h("span", null, "P0 items ", h("strong", null, fmt(pressure.p0_items || 0))),
+        h("span", null, "Blocked tasks ", h("strong", null, fmt(pressure.blocked_tasks || 0))),
+        h("span", null, "Pending decisions ", h("strong", null, fmt(pressure.pending_decisions || 0)))
+      )
+    );
+  }
+
+  function FocusQueue(props) {
+    var focus = (props.snapshot || {}).operator_focus || {};
+    var items = []
+      .concat((focus.decisions || []).map(function (item) {
+        return {type: item.kind || "Decision", title: item.title, detail: item.target, priority: item.priority};
+      }))
+      .concat((focus.projects || []).map(function (item) {
+        return {type: "Project", title: item.title, detail: item.focus_note || item.lane, priority: item.priority};
+      }))
+      .concat((focus.tasks || []).map(function (item) {
+        return {type: item.source || "Task", title: item.title, detail: item.lane, priority: item.priority};
+      }));
+    return h(ShellCard, {title: "Needs Your Attention", aside: String(items.length)},
+      h("div", {className: "mc-focus-list"}, items.length ? items.slice(0, 10).map(function (item, index) {
+        return h("div", {className: "mc-focus-item", key: item.type + item.title + index},
+          h("div", null,
+            h("span", {className: priorityTone(item.priority)}, item.priority || "P2_NORMAL"),
+            h("strong", null, item.title || "Untitled")
+          ),
+          h("small", null, item.type + " · " + (item.detail || "No detail"))
+        );
+      }) : h("div", {className: "mc-empty"}, "No priority focus items"))
+    );
+  }
+
+  function ResourcePressure(props) {
+    var resources = (props.snapshot || {}).resource_pressure || {};
+    var items = [resources.cpu, resources.gpu, resources.ram].filter(Boolean);
+    return h(ShellCard, {title: "Local Resource Pressure", aside: "lightweight sample"},
+      h("div", {className: "mc-resource-grid"}, items.map(function (item) {
+        var tone = pressureTone(item.pressure);
+        return h("div", {className: "mc-resource " + tone, key: item.label},
+          h("div", {className: "mc-card-top"},
+            h("span", null, item.label),
+            h("strong", null, pct(item.pressure))
+          ),
+          h("div", {className: "mc-resource-bar"},
+            h("span", {style: {width: item.pressure === null || item.pressure === undefined ? "0%" : pct(item.pressure)}})
+          ),
+          h("small", null, item.detail || "No sample")
+        );
+      }))
+    );
+  }
+
+  function SystemStatusStrip(props) {
+    var areas = (props.snapshot || {}).area_status || [];
+    var resources = (props.snapshot || {}).resource_pressure || {};
+    var usage = (props.snapshot || {}).usage || {};
+    var tokens = usage.tokens || {};
+    var worst = areas.some(function (area) { return area.state === "red"; }) ? "red" :
+      (areas.some(function (area) { return area.state === "yellow"; }) ? "yellow" : "green");
+    return h("div", {className: "mc-status-strip"},
+      h("div", {className: "mc-status-main"},
+        h("span", {className: "mc-status-light " + worst}),
+        h("strong", null, worst === "green" ? "System flowing" : (worst === "yellow" ? "Operator decision needed" : "System blocked")),
+        h("small", null, areas.filter(function (area) { return area.operator_needed; }).length + " areas need attention")
+      ),
+      h("div", {className: "mc-status-meters"},
+        h("span", null, "CPU ", h("strong", null, pct((resources.cpu || {}).pressure))),
+        h("span", null, "GPU ", h("strong", null, pct((resources.gpu || {}).pressure))),
+        h("span", null, "RAM ", h("strong", null, pct((resources.ram || {}).pressure))),
+        h("span", null, "Tokens ", h("strong", null, tokens.tracked ? fmt(tokens.total || 0) : "n/a"))
+      )
+    );
+  }
+
+  function AreaStatusGrid(props) {
+    var areas = (props.snapshot || {}).area_status || [];
+    return h("div", {className: "mc-area-grid"}, areas.map(function (area) {
+      var models = area.models || [];
+      return h("section", {className: "mc-area-card " + area.state, key: area.name},
+        h("div", {className: "mc-card-top"},
+          h("div", {className: "mc-area-title"},
+            h("span", {className: "mc-status-light " + area.state}),
+            h("strong", null, area.name)
+          ),
+          area.operator_needed ? h("span", {className: "mc-pill danger"}, "decision needed") : h("span", {className: "mc-pill"}, area.state)
+        ),
+        h("p", null, area.detail),
+        h(MiniRows, {items: [
+          ["Active", area.active || 0],
+          ["Pending", area.pending || 0],
+          ["Blocked", area.blocked || 0]
+        ], limit: 3}),
+        h("div", {className: "mc-model-stack"},
+          h("small", null, "Models in motion"),
+          models.length ? models.map(function (model, index) {
+            return h("div", {className: "mc-model-row", key: area.name + model.role + index},
+              h("span", null, model.role),
+              h("strong", null, model.model || "unassigned"),
+              h("em", null, (model.route || "route") + " · " + fmt(model.count || 0))
+            );
+          }) : h("span", {className: "mc-muted"}, "No live route telemetry yet")
+        )
+      );
+    }));
+  }
+
   function MiniRows(props) {
     var source = props.items || {};
     var rows = Array.isArray(source) ? source : keys(source).map(function (key) {
@@ -101,15 +239,11 @@
   function SectionTabs(props) {
     var tabs = [
       ["overview", "Overview"],
-      ["workflow", "Workflow"],
-      ["projects", "Projects"],
-      ["tasks", "Tasks"],
+      ["work", "Work"],
       ["council", "Council"],
       ["research", "Research"],
       ["finance", "Finance"],
-      ["replay", "Replay"],
-      ["system", "System"],
-      ["decisions", "Decisions"]
+      ["improve", "Improve"]
     ];
     return h("div", {className: "mc-tabs"}, tabs.map(function (tab) {
       return h("button", {
@@ -122,13 +256,16 @@
 
   function Workflow(props) {
     var steps = (((props.snapshot || {}).workflow || {}).steps || []);
-    return h("div", {className: "mc-workflow"}, steps.map(function (step) {
-      return h("div", {className: "mc-flow-step", key: step.id},
-        h("div", {className: "mc-flow-label"}, step.label),
-        h("div", {className: "mc-flow-count"}, step.count || 0),
-        h(MiniRows, {items: step.detail, limit: 5})
-      );
-    }));
+    return h("div", {className: "mc-workflow-view"},
+      h(SystemMap, {snapshot: props.snapshot}),
+      h("div", {className: "mc-workflow"}, steps.map(function (step) {
+        return h("div", {className: "mc-flow-step", key: step.id},
+          h("div", {className: "mc-flow-label"}, step.label),
+          h("div", {className: "mc-flow-count"}, step.count || 0),
+          h(MiniRows, {items: step.detail, limit: 5})
+        );
+      }))
+    );
   }
 
   function PrioritySelect(props) {
@@ -143,7 +280,11 @@
 
   function ProjectCard(props) {
     var card = props.card;
-    return h("div", {className: "mc-board-card"},
+    return h("form", {className: "mc-board-card", onSubmit: function (event) {
+        event.preventDefault();
+        var data = new FormData(event.currentTarget);
+        props.onPriority(card.project_id, data.get("priority"), data.get("focus_note"));
+      }},
       h("div", {className: "mc-card-top"},
         h("span", {className: priorityTone(card.priority)}, card.priority),
         card.pending_gate_count ? h("span", {className: "mc-pill danger"}, card.pending_gate_count + " gate") : null
@@ -155,10 +296,18 @@
         h("span", null, "Cashflow"), h("strong", null, money(card.cashflow_actual_usd || 0)),
         h("span", null, "Burn"), h("strong", null, card.executor_burn_ratio === null ? "n/a" : pct(card.executor_burn_ratio))
       ),
+      h("label", {className: "mc-field"},
+        h("span", null, "Priority"),
+        h("select", {name: "priority", className: "mc-select", defaultValue: card.priority || "P3_BACKGROUND"},
+          priorities.map(function (priority) { return h("option", {key: priority, value: priority}, priority); })
+        )
+      ),
+      h("label", {className: "mc-field"},
+        h("span", null, "Focus note"),
+        h("textarea", {name: "focus_note", defaultValue: card.focus_note || "", placeholder: "Why this matters now"})
+      ),
       h("div", {className: "mc-control-row"},
-        h(PrioritySelect, {value: card.priority, onChange: function (priority) {
-          props.onPriority(card.project_id, priority);
-        }})
+        h(Button, {type: "submit", variant: "secondary"}, "Set focus")
       )
     );
   }
@@ -179,7 +328,7 @@
 
   function TaskCard(props) {
     var task = props.task;
-    return h("div", {className: "mc-task"},
+    return h("div", {className: "mc-work-card"},
       h("div", {className: "mc-card-top"},
         h(Badge, null, task.source),
         h("span", {className: priorityTone(task.priority)}, task.priority)
@@ -201,8 +350,25 @@
     );
   }
 
+  function WorkItemCard(props) {
+    var item = props.item || {};
+    return h("div", {className: "mc-work-card"},
+      h("div", {className: "mc-card-top"},
+        h(Badge, null, item.source || item.kind || "Task"),
+        item.priority ? h("span", {className: priorityTone(item.priority)}, item.priority) : null
+      ),
+      h("h4", null, item.title || item.kind || "Untitled"),
+      h("p", null, item.details || "No detail."),
+      h("div", {className: "mc-meta-grid"},
+        h("span", null, "Status"), h("strong", null, statusLabel(item.status || item.lane || "pending")),
+        item.expires_at ? [h("span", {key: "expires-label"}, "Expires"), h("strong", {key: "expires-value"}, SDK.utils.isoTimeAgo(item.expires_at))] : null,
+        item.confidence !== undefined && item.confidence !== null ? [h("span", {key: "confidence-label"}, "Confidence"), h("strong", {key: "confidence-value"}, pct(item.confidence))] : null
+      )
+    );
+  }
+
   function Tasks(props) {
-    var lanes = (((props.snapshot || {}).tasks || {}).lanes || []);
+    var boards = (((props.snapshot || {}).tasks || {}).workflow_boards || []);
     return h("div", {className: "mc-task-layout"},
       h("form", {className: "mc-task-form", onSubmit: props.onCreateManualTask},
         h("h3", null, "Add Operator Task"),
@@ -215,25 +381,57 @@
           h(Button, {type: "submit"}, "Add task")
         )
       ),
-      h("div", {className: "mc-task-lanes"}, lanes.map(function (lane) {
-        return h("section", {className: "mc-lane", key: lane.id},
-          h("h3", null, h("span", null, lane.label), h("small", null, lane.count)),
-          h("div", {className: "mc-card-stack"}, (lane.cards || []).length ? lane.cards.map(function (task) {
-            return h(TaskCard, {
-              key: task.kind + ":" + task.id,
-              task: task,
-              onPriority: props.onTaskPriority,
-              onManualStatus: props.onManualStatus
-            });
-          }) : h("div", {className: "mc-empty"}, "No tasks"))
+      h("div", {className: "mc-task-workflows"}, boards.map(function (board) {
+        return h("section", {className: "mc-task-board", key: board.id},
+          h("div", {className: "mc-card-top"},
+            h("div", null,
+              h("h3", null, board.label),
+              h("p", null, board.purpose)
+            ),
+            h("span", {className: "mc-pill"}, board.count)
+          ),
+          h("div", {className: "mc-task-lanes"}, (board.lanes || []).map(function (lane) {
+            return h("section", {className: "mc-lane", key: board.id + lane.id},
+              h("h3", null, h("span", null, lane.label), h("small", null, lane.count)),
+              h("div", {className: "mc-card-stack"}, (lane.cards || []).length ? lane.cards.map(function (task) {
+                return h(TaskCard, {
+                  key: task.kind + ":" + task.id,
+                  task: task,
+                  onPriority: props.onTaskPriority,
+                  onManualStatus: props.onManualStatus
+                });
+              }) : h("div", {className: "mc-empty"}, "No tasks"))
+            );
+          }))
         );
       }))
     );
   }
 
+  function Work(props) {
+    return h("div", {className: "mc-work-layout"},
+      h(ShellCard, {title: "Active Projects", aside: "focus and gates", className: "mc-span"},
+        h(Board, {
+          snapshot: props.snapshot,
+          onProjectPriority: props.onProjectPriority
+        })
+      ),
+      h(ShellCard, {title: "Task Boards", aside: "by workflow", className: "mc-span"},
+        h(Tasks, {
+          snapshot: props.snapshot,
+          onCreateManualTask: props.onCreateManualTask,
+          onTaskPriority: props.onTaskPriority,
+          onManualStatus: props.onManualStatus
+        })
+      )
+    );
+  }
+
   function Council(props) {
     var council = (props.snapshot || {}).council || {};
+    var decisions = (props.snapshot || {}).decisions || {};
     var summary = council.summary || {};
+    var architecture = council.architecture || {};
     return h("div", {className: "mc-two-column"},
       h(ShellCard, {title: "Council Signal", aside: "bounded"},
         h(MetricGrid, {items: [
@@ -248,9 +446,61 @@
       h(ShellCard, {title: "Decision Mix"},
         h(MiniRows, {items: council.by_decision_type || {}})
       ),
+      h(ShellCard, {title: "Current Council Architecture", aside: architecture.trigger || "tiered deliberation", className: "mc-span"},
+        h("div", {className: "mc-council-architecture"},
+          h("section", null,
+            h("h3", null, "Tier 1 isolated roles"),
+            h("div", {className: "mc-council-role-grid"}, (architecture.tier1 || []).map(function (role) {
+              var model = role.model || {};
+              return h("div", {className: "mc-council-role", key: role.id},
+                h("div", {className: "mc-card-top"}, h("strong", null, role.label), h(Badge, null, role.mode)),
+                h("p", null, role.detail),
+                h("small", null, (model.model || "unassigned") + " · " + (model.route || "route") + " · " + fmt(model.count || 0) + " runs")
+              );
+            }))
+          ),
+          h("section", null,
+            h("h3", null, "Tier 2 multi-model escalation"),
+            h("div", {className: "mc-council-role-grid"}, (architecture.tier2 || []).map(function (role) {
+              var model = role.model || {};
+              return h("div", {className: "mc-council-role", key: role.id},
+                h("div", {className: "mc-card-top"}, h("strong", null, role.label), h(Badge, null, role.mode)),
+                h("p", null, role.detail),
+                h("small", null, (model.model || "unassigned") + " · " + (model.route || "route") + " · " + fmt(model.count || 0) + " runs")
+              );
+            }))
+          )
+        )
+      ),
+      h(ShellCard, {title: "Council Deliberation Backlog", aside: String((council.decision_backlog || []).length), className: "mc-span"},
+        h("div", {className: "mc-work-grid"}, (council.decision_backlog || []).length ? council.decision_backlog.map(function (item) {
+          return h(WorkItemCard, {key: item.kind + ":" + item.id, item: item});
+        }) : h("div", {className: "mc-empty"}, "No pending council decisions"))
+      ),
+      h(ShellCard, {title: "Finished Deliberations Waiting On You", aside: String((council.operator_pending_verdicts || []).length), className: "mc-span"},
+        h("div", {className: "mc-work-grid"}, (council.operator_pending_verdicts || []).length ? council.operator_pending_verdicts.map(function (item) {
+          return h(WorkItemCard, {key: item.id, item: item});
+        }) : h("div", {className: "mc-empty"}, "No completed verdicts waiting on an operator decision"))
+      ),
+      h(ShellCard, {title: "Decision Queues", className: "mc-span"},
+        h("div", {className: "mc-decision-grid"},
+          decisionList("Pending Gates", decisions.pending_gates || [], function (item) {
+            return [item.gate_type, item.trigger_description, item.project_name || item.project_id || "No project"];
+          }),
+          decisionList("G3 Spend Requests", decisions.pending_g3_requests || [], function (item) {
+            return [item.request_id || item.approval_id || "G3", item.justification || item.reason || "Approval required", "Read-only until dashboard gate validation"];
+          }),
+          decisionList("Quarantines", decisions.pending_quarantines || [], function (item) {
+            return [item.quarantine_id || "Quarantine", item.reason || item.source_breaker || "Pending review", "Read-only until dashboard gate validation"];
+          }),
+          decisionList("Runtime Halts", decisions.runtime_halts || [], function (item) {
+            return [item.halt_id || item.event_id || "Runtime halt", item.halt_reason || item.reason || "Active halt", item.status || "ACTIVE"];
+          })
+        )
+      ),
       h(ShellCard, {title: "Recent Verdicts", className: "mc-span"},
         h("div", {className: "mc-card-stack"}, (council.recent_verdicts || []).length ? council.recent_verdicts.map(function (item) {
-          return h("div", {className: "mc-feed-item", key: item.verdict_id},
+          return h("div", {className: "mc-work-card", key: item.verdict_id},
             h("div", {className: "mc-card-top"}, h("strong", null, item.decision_type), h(Badge, null, item.recommendation)),
             h("p", null, item.reasoning_summary),
             h("small", null, "tier " + item.tier_used + " · confidence " + pct(item.confidence))
@@ -263,7 +513,30 @@
   function Research(props) {
     var research = (props.snapshot || {}).research || {};
     var summary = research.summary || {};
-    return h("div", {className: "mc-two-column"},
+    var lifecycle = research.model_lifecycle || {};
+    var conversion = research.conversion_flow || {};
+    return h("div", {className: "mc-research-layout"},
+      h("form", {className: "mc-research-form", onSubmit: props.onCreateResearchTask},
+        h("h3", null, "New Research Task"),
+        h("label", {className: "mc-field"},
+          h("span", null, "Type"),
+          h("select", {name: "workflow_id", className: "mc-select", defaultValue: "operator_prompts"},
+            researchWorkflows.map(function (workflow) { return h("option", {key: workflow[0], value: workflow[0]}, workflow[1]); })
+          )
+        ),
+        h(Input, {name: "title", placeholder: "Research question or task", required: true}),
+        h("textarea", {name: "brief", placeholder: "What should the researcher answer, and what would count as useful output?"}),
+        h("div", {className: "mc-control-row"},
+          h("select", {name: "priority", className: "mc-select", defaultValue: "P2_NORMAL"},
+            priorities.map(function (priority) { return h("option", {key: priority, value: priority}, priority); })
+          ),
+          h("select", {name: "depth", className: "mc-select", defaultValue: "QUICK"},
+            h("option", {value: "QUICK"}, "QUICK"),
+            h("option", {value: "FULL"}, "FULL")
+          )
+        ),
+        h(Button, {type: "submit"}, "Create research task")
+      ),
       h(ShellCard, {title: "Research Load"},
         h(MetricGrid, {items: [
           ["Briefs", summary.briefs_total || 0],
@@ -274,15 +547,78 @@
           ["Standing", summary.active_standing_briefs || 0]
         ]})
       ),
-      h(ShellCard, {title: "Task Status"},
-        h(MiniRows, {items: summary.tasks_by_status || {}})
+      h(ShellCard, {title: "Research to Opportunity Flow", className: "mc-span"},
+        h("div", {className: "mc-conversion-flow"}, (conversion.stages || []).map(function (stage, index) {
+          return h("div", {className: "mc-conversion-wrap", key: stage.id},
+            h("div", {className: "mc-conversion-stage"},
+              h("span", null, stage.label),
+              h("strong", null, fmt(stage.count || 0)),
+              h("small", null, stage.detail)
+            ),
+            index < (conversion.stages || []).length - 1 ? h("span", {className: "mc-map-arrow"}, "->") : null
+          );
+        })),
+        h("div", {className: "mc-card-stack"}, (conversion.actionable_briefs || []).length ? conversion.actionable_briefs.map(function (brief) {
+          return h("div", {className: "mc-feed-item", key: brief.brief_id},
+            h("div", {className: "mc-card-top"},
+              h("strong", null, brief.title),
+              h(Badge, null, brief.actionability)
+            ),
+            h("p", null, brief.summary),
+            h("small", null, ((research.domain_labels || {})[String(brief.domain)] || ("Domain " + brief.domain)) + " · " + brief.action_type + " · " + pct(brief.confidence))
+          );
+        }) : h("div", {className: "mc-empty"}, "No actionable research findings yet"))
       ),
-      h(ShellCard, {title: "Recent Briefs", className: "mc-span"},
+      h(ShellCard, {title: "Research Workflow Lanes", className: "mc-span"},
+        h("div", {className: "mc-research-workflows"}, (research.workflows || []).map(function (workflow) {
+          return h("section", {className: "mc-research-workflow", key: workflow.id},
+            h("div", {className: "mc-card-top"},
+              h("h3", null, workflow.label),
+              workflow.p0_p1 ? h("span", {className: "mc-pill danger"}, workflow.p0_p1 + " high") : h("span", {className: "mc-pill"}, workflow.active + " active")
+            ),
+            h("p", null, workflow.purpose),
+            h(MiniRows, {items: [
+              ["Total", workflow.total || 0],
+              ["Active", workflow.active || 0],
+              ["Blocked", workflow.blocked || 0]
+            ], limit: 3}),
+            h("div", {className: "mc-research-task-list"}, (workflow.tasks || []).length ? workflow.tasks.map(function (task) {
+              return h("div", {className: "mc-research-task", key: task.task_id},
+                h("div", {className: "mc-card-top"},
+                  h("strong", null, task.title),
+                  h("span", {className: priorityTone(task.priority)}, task.priority)
+                ),
+                h("small", null, task.domain_label + " · " + task.source + " · " + task.status)
+              );
+            }) : h("div", {className: "mc-empty"}, "No work in this lane"))
+          );
+        }))
+      ),
+      h(ShellCard, {title: "Domain & Source Split"},
+        h("div", {className: "mc-card-stack"},
+          h("div", null,
+            h("strong", null, "Task Status"),
+            h(MiniRows, {items: summary.tasks_by_status || {}})
+          ),
+          h("div", null,
+            h("strong", null, "Task Source"),
+            h(MiniRows, {items: summary.tasks_by_source || {}})
+          )
+        )
+      ),
+      h(ShellCard, {title: "Model Lifecycle"},
+        h(MiniRows, {items: [
+          ["Scouted", lifecycle.scouted || 0],
+          ["Assessed", lifecycle.assessed || 0],
+          ["Shadow trials", lifecycle.shadow_trials || 0]
+        ]})
+      ),
+      h(ShellCard, {title: "Useful Findings", className: "mc-span"},
         h("div", {className: "mc-card-stack"}, (research.recent_briefs || []).length ? research.recent_briefs.map(function (brief) {
           return h("div", {className: "mc-feed-item", key: brief.brief_id},
             h("div", {className: "mc-card-top"}, h("strong", null, brief.title), h(Badge, null, brief.actionability)),
             h("p", null, brief.summary),
-            h("small", null, "domain " + brief.domain + " · " + brief.urgency + " · " + pct(brief.confidence))
+            h("small", null, ((research.domain_labels || {})[String(brief.domain)] || ("Domain " + brief.domain)) + " · " + brief.urgency + " · " + pct(brief.confidence))
           );
         }) : h("div", {className: "mc-empty"}, "No briefs"))
       )
@@ -292,6 +628,9 @@
   function Finance(props) {
     var finance = (props.snapshot || {}).finance || {};
     var summary = finance.summary || {};
+    var usage = (props.snapshot || {}).usage || {};
+    var tokens = usage.tokens || {};
+    var traces = usage.traces || {};
     return h("div", {className: "mc-two-column"},
       h(ShellCard, {title: "Financial Posture", aside: "$0 autonomous spend"},
         h(MetricGrid, {items: [
@@ -318,22 +657,48 @@
             h(MiniRows, {items: [["Revenue", money(item.revenue_to_date)], ["Direct cost", money(item.direct_cost)]]})
           );
         }) : h("div", {className: "mc-empty"}, "No active project P&L"))
+      ),
+      h(ResourcePressure, {snapshot: props.snapshot}),
+      h(ShellCard, {title: "Token Accounting", aside: tokens.tracked ? "trace payloads" : "not attached"},
+        h(MetricGrid, {items: [
+          ["Total", tokens.tracked ? fmt(tokens.total || 0) : "n/a"],
+          ["Input", tokens.tracked ? fmt(tokens.tokens_in || 0) : "n/a"],
+          ["Output", tokens.tracked ? fmt(tokens.tokens_out || 0) : "n/a"],
+          ["Records", tokens.records || 0]
+        ]}),
+        h("p", {className: "mc-usage-note"}, tokens.note || "No token accounting note.")
+      ),
+      h(ShellCard, {title: "Trace Usage", className: "mc-span"},
+        h(MetricGrid, {items: [
+          ["Traces", traces.count || 0],
+          ["Trace cost", money(traces.cost_usd || 0)],
+          ["Runtime", fmt(Math.round((traces.duration_ms || 0) / 1000)) + "s"]
+        ]})
+      ),
+      h(ShellCard, {title: "Route Usage", className: "mc-span"},
+        h("div", {className: "mc-card-stack"}, (usage.routes || []).length ? usage.routes.map(function (route) {
+          return h("div", {className: "mc-mini-row", key: route.route},
+            h("span", null, route.route),
+            h("strong", null, route.count + " · " + money(route.cost_usd))
+          );
+        }) : h("div", {className: "mc-empty"}, "No routing usage yet"))
       )
     );
   }
 
-  function Replay(props) {
+  function Improve(props) {
     var replay = (props.snapshot || {}).replay || {};
     var readiness = replay.readiness || {};
     var reliability = replay.reliability || {};
     return h("div", {className: "mc-two-column"},
-      h(ShellCard, {title: "Replay Readiness", aside: statusLabel(readiness)},
+      h(ShellCard, {title: "Hermes Harness Readiness", aside: statusLabel(readiness)},
         h(MetricGrid, {items: [
           ["Eligible", (readiness.eligible_source_traces || 0) + "/" + (readiness.minimum_eligible_traces || 500)],
           ["Known bad", (readiness.known_bad_source_traces || 0) + "/" + (readiness.minimum_known_bad_traces || 25)],
           ["Skills", (readiness.distinct_skill_count || 0) + "/" + (readiness.minimum_distinct_skills || 3)],
           ["Ack below threshold", readiness.operator_ack_required_below_threshold ? "Yes" : "No"]
-        ]})
+        ]}),
+        h("p", {className: "mc-usage-note"}, "This is the self-improvement harness: Hermes traces work, judges outcomes, builds replay coverage, and eventually uses that evidence to propose safer skill or prompt variants.")
       ),
       h(ShellCard, {title: "Reliability Watch"},
         h("div", {className: "mc-card-stack"},
@@ -345,7 +710,7 @@
           }) : h("div", {className: "mc-empty"}, "No critical reliability rows")
         )
       ),
-      h(ShellCard, {title: "Recent Traces", className: "mc-span"},
+      h(ShellCard, {title: "Trace Feed", className: "mc-span"},
         h("div", {className: "mc-card-stack"}, (replay.recent_traces || []).length ? replay.recent_traces.map(function (trace) {
           return h("div", {className: "mc-feed-item", key: trace.trace_id},
             h("div", {className: "mc-card-top"}, h("strong", null, trace.skill_name), h(Badge, null, trace.judge_verdict)),
@@ -359,6 +724,7 @@
 
   function System(props) {
     var system = (props.snapshot || {}).system || {};
+    var alerts = (props.snapshot || {}).alerts || [];
     var runtime = system.runtime_control || {};
     var breaker = system.circuit_breakers || {};
     return h("div", {className: "mc-two-column"},
@@ -383,6 +749,18 @@
       ),
       h(ShellCard, {title: "Database Contracts", className: "mc-span"},
         h(MiniRows, {items: system.db_status || {}})
+      ),
+      h(ShellCard, {title: "System Alerts", aside: String(alerts.length), className: "mc-span"},
+        h("div", {className: "mc-card-stack"}, alerts.length ? alerts.map(function (alert) {
+          return h("div", {className: "mc-alert", key: alert.alert_id || alert.created_at},
+            h("strong", null, alert.alert_type || alert.type || "Alert"),
+            h("p", null, alert.content || alert.message || alert.trigger_description || "No message"),
+            alert.acknowledged ? null : h(Button, {
+              variant: "secondary",
+              onClick: function () { props.onAckAlert(alert.alert_id); }
+            }, "Acknowledge")
+          );
+        }) : h("div", {className: "mc-empty"}, "No active system alerts"))
       )
     );
   }
@@ -405,6 +783,39 @@
     );
   }
 
+  function Usage(props) {
+    var usage = (props.snapshot || {}).usage || {};
+    var tokens = usage.tokens || {};
+    var traces = usage.traces || {};
+    return h("div", {className: "mc-two-column"},
+      h(ResourcePressure, {snapshot: props.snapshot}),
+      h(ShellCard, {title: "Token Accounting", aside: tokens.tracked ? "trace payloads" : "not attached"},
+        h(MetricGrid, {items: [
+          ["Total", tokens.tracked ? fmt(tokens.total || 0) : "n/a"],
+          ["Input", tokens.tracked ? fmt(tokens.tokens_in || 0) : "n/a"],
+          ["Output", tokens.tracked ? fmt(tokens.tokens_out || 0) : "n/a"],
+          ["Records", tokens.records || 0]
+        ]}),
+        h("p", {className: "mc-usage-note"}, tokens.note || "No token accounting note.")
+      ),
+      h(ShellCard, {title: "Trace Usage", className: "mc-span"},
+        h(MetricGrid, {items: [
+          ["Traces", traces.count || 0],
+          ["Trace cost", money(traces.cost_usd || 0)],
+          ["Runtime", fmt(Math.round((traces.duration_ms || 0) / 1000)) + "s"]
+        ]})
+      ),
+      h(ShellCard, {title: "Route Usage", className: "mc-span"},
+        h("div", {className: "mc-card-stack"}, (usage.routes || []).length ? usage.routes.map(function (route) {
+          return h("div", {className: "mc-mini-row", key: route.route},
+            h("span", null, route.route),
+            h("strong", null, route.count + " · " + money(route.cost_usd))
+          );
+        }) : h("div", {className: "mc-empty"}, "No routing usage yet"))
+      )
+    );
+  }
+
   function decisionList(title, items, mapper) {
     return h(ShellCard, {title: title, aside: String(items.length)},
       h("div", {className: "mc-card-stack"}, items.length ? items.map(function (item, index) {
@@ -418,45 +829,82 @@
     );
   }
 
+  function FlowModelList(props) {
+    var models = props.models || [];
+    return h("div", {className: "mc-flow-models"},
+      h("small", null, "Model selection"),
+      models.length ? models.map(function (model, index) {
+        return h("div", {className: "mc-flow-model", key: (model.role || "role") + index},
+          h("span", null, model.role || "Role"),
+          h("strong", null, model.model || "unassigned"),
+          h("em", null, (model.route || "route") + " · " + fmt(model.count || 0) + " runs")
+        );
+      }) : h("span", {className: "mc-muted"}, "No route telemetry yet")
+    );
+  }
+
+  function FlowStage(props) {
+    var stage = props.stage || {};
+    return h("section", {className: "mc-flow-card " + (stage.status || "quiet")},
+      h("div", {className: "mc-card-top"},
+        h("div", {className: "mc-area-title"},
+          h("span", {className: "mc-status-light " + (stage.status === "attention" ? "yellow" : (stage.status === "blocked" ? "red" : "green"))}),
+          h("strong", null, stage.label)
+        ),
+        h("span", {className: "mc-pill"}, statusLabel(stage.status || "quiet"))
+      ),
+      h("div", {className: "mc-flow-count-row"},
+        h("strong", null, fmt(stage.count || 0)),
+        h("span", null, stage.detail)
+      ),
+      h(MiniRows, {items: [
+        ["Pending", stage.pending || 0],
+        ["Blocked", stage.blocked || 0]
+      ], limit: 2}),
+      h(FlowModelList, {models: stage.models || []})
+    );
+  }
+
+  function OverviewFlow(props) {
+    var flow = (props.snapshot || {}).overview_flow || {};
+    var summary = flow.summary || {};
+    var status = flow.status || "unknown";
+    var statusText = status === "operator_needed" ? "Operator decision needed" : (status === "blocked" ? "System blocked" : "System flowing");
+    return h("div", {className: "mc-overview-flow"},
+      h("div", {className: "mc-status-strip mc-flow-strip"},
+        h("div", {className: "mc-status-main"},
+          h("span", {className: "mc-status-light " + (status === "operator_needed" ? "yellow" : (status === "blocked" ? "red" : "green"))}),
+          h("strong", null, statusText),
+          h("small", null, fmt(summary.pending_decisions || 0) + " decisions · " + fmt(summary.follow_up_research || 0) + " research follow-ups")
+        ),
+        h("div", {className: "mc-status-meters"},
+          h("span", null, "Research ", h("strong", null, fmt(summary.active_research || 0))),
+          h("span", null, "Findings ", h("strong", null, fmt(summary.actionable_findings || 0))),
+          h("span", null, "Opportunities ", h("strong", null, fmt(summary.opportunity_candidates || 0))),
+          h("span", null, "Backlog ", h("strong", null, fmt(summary.backlog_items || 0)))
+        )
+      ),
+      h(ShellCard, {title: "System Flow", aside: "research -> findings -> opportunity"},
+        h("div", {className: "mc-flow-main"}, (flow.main_stages || []).map(function (stage, index) {
+          return h("div", {className: "mc-flow-main-wrap", key: stage.id},
+            h(FlowStage, {stage: stage}),
+            index < (flow.main_stages || []).length - 1 ? h("span", {className: "mc-map-arrow"}, "->") : null
+          );
+        }))
+      ),
+      h(ShellCard, {title: "Where Work Goes Next", aside: "council, backlog, or more research"},
+        h("div", {className: "mc-flow-branches"}, (flow.branch_stages || []).map(function (stage) {
+          return h(FlowStage, {key: stage.id, stage: stage});
+        }))
+      )
+    );
+  }
+
   function Overview(props) {
     var snapshot = props.snapshot || {};
-    var alerts = snapshot.alerts || [];
-    var digest = snapshot.latest_digest;
-    var posture = snapshot.runtime_posture || {};
     return h("div", {className: "mc-overview-grid"},
-      h(ShellCard, {title: "System Pulse", aside: snapshot.generated_at ? SDK.utils.isoTimeAgo(snapshot.generated_at) : "Live"},
-        h(MetricGrid, {items: [
-          ["Runtime", ((snapshot.overview || {}).runtime_status || {}).lifecycle_state || "UNKNOWN"],
-          ["Gates", (snapshot.overview || {}).pending_gates || 0],
-          ["Harvests", (snapshot.overview || {}).pending_harvests || 0],
-          ["Replay", statusLabel((snapshot.overview || {}).replay_readiness)],
-          ["Milestones", statusLabel((snapshot.overview || {}).milestone_health)],
-          ["Load", fmt((snapshot.overview || {}).operator_load_hours || 0) + "h"]
-        ]})
-      ),
-      h(ShellCard, {title: "Runtime Posture", aside: posture.substrate || "Hermes"},
-        h(MiniRows, {items: [
-          ["Mode", posture.mode || "prebuilt"],
-          ["Gate writes", posture.gate_actions_enabled ? "enabled" : "read-only"],
-          ["Poll interval", (posture.poll_interval_seconds || 15) + "s"],
-          ["Heavy services", (posture.heavy_services || []).length]
-        ]})
-      ),
-      h(ShellCard, {title: "Latest Digest"},
-        digest ? h("pre", {className: "mc-digest"}, JSON.stringify(digest, null, 2)) : h("div", {className: "mc-empty"}, "No digest yet")
-      ),
-      h(ShellCard, {title: "Alerts", aside: String(alerts.length)},
-        h("div", {className: "mc-card-stack"}, alerts.length ? alerts.map(function (alert) {
-          return h("div", {className: "mc-alert", key: alert.alert_id || alert.created_at},
-            h("strong", null, alert.alert_type || alert.type || "Alert"),
-            h("p", null, alert.content || alert.message || alert.trigger_description || "No message"),
-            alert.acknowledged ? null : h(Button, {
-              variant: "secondary",
-              onClick: function () { props.onAckAlert(alert.alert_id); }
-            }, "Acknowledge")
-          );
-        }) : h("div", {className: "mc-empty"}, "No active alerts"))
-      )
+      h(OverviewFlow, {snapshot: snapshot}),
+      h(FocusQueue, {snapshot: snapshot})
     );
   }
 
@@ -496,15 +944,16 @@
 
     function body() {
       if (!snapshot) return h("div", {className: "mc-loading"}, "Loading Mission Control...");
-      if (activeTab === "workflow") return h(Workflow, {snapshot: snapshot});
-      if (activeTab === "projects") return h(Board, {
+      if (activeTab === "work") return h(Work, {
         snapshot: snapshot,
-        onProjectPriority: function (projectId, priority) {
-          return run(function () { return post("/projects/" + encodeURIComponent(projectId) + "/priority", {priority: priority}); });
-        }
-      });
-      if (activeTab === "tasks") return h(Tasks, {
-        snapshot: snapshot,
+        onProjectPriority: function (projectId, priority, focusNote) {
+          return run(function () {
+            return post("/projects/" + encodeURIComponent(projectId) + "/priority", {
+              priority: priority,
+              focus_note: focusNote || ""
+            });
+          });
+        },
         onCreateManualTask: function (event) {
           event.preventDefault();
           var form = event.currentTarget;
@@ -528,11 +977,26 @@
         }
       });
       if (activeTab === "council") return h(Council, {snapshot: snapshot});
-      if (activeTab === "research") return h(Research, {snapshot: snapshot});
+      if (activeTab === "research") return h(Research, {
+        snapshot: snapshot,
+        onCreateResearchTask: function (event) {
+          event.preventDefault();
+          var form = event.currentTarget;
+          var data = new FormData(form);
+          return run(function () {
+            return post("/research-tasks", {
+              workflow_id: data.get("workflow_id"),
+              title: data.get("title"),
+              brief: data.get("brief"),
+              priority: data.get("priority"),
+              depth: data.get("depth"),
+              source: "operator"
+            });
+          }).then(function () { form.reset(); });
+        }
+      });
       if (activeTab === "finance") return h(Finance, {snapshot: snapshot});
-      if (activeTab === "replay") return h(Replay, {snapshot: snapshot});
-      if (activeTab === "system") return h(System, {snapshot: snapshot});
-      if (activeTab === "decisions") return h(Decisions, {snapshot: snapshot});
+      if (activeTab === "improve") return h(Improve, {snapshot: snapshot});
       return h(Overview, {
         snapshot: snapshot,
         onAckAlert: function (alertId) {
@@ -547,10 +1011,10 @@
         h("div", null,
           h("p", {className: "mc-eyebrow"}, "Hybrid Autonomous AI"),
           h("h1", null, "Mission Control"),
-          h("p", {className: "mc-subtitle"}, "Hermes-native operator cockpit for strategy, projects, research, finance, replay, and system pressure.")
+          h("p", {className: "mc-subtitle"}, "A lean operator cockpit for seeing what needs attention, where work is flowing, and which models are carrying each step.")
         ),
         h("div", {className: "mc-hero-note"},
-          h("strong", null, "Final plugin shape"),
+          h("strong", null, "Pre-live Hermes contract"),
           h("span", null, "No bundled React, no Node bridge, no live stream server. Gate and quarantine decisions remain read-only.")
         )
       ),
