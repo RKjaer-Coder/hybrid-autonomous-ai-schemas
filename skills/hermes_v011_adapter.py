@@ -30,8 +30,34 @@ class PreToolCallDecision:
     check_path: tuple[str, ...]
 
 
-class HermesV011PreToolCallAdapter:
-    """Blocking Hermes v0.11 pre_tool_call adapter for repo policy checks."""
+@dataclass(frozen=True)
+class ApprovalRequest:
+    session_id: str
+    approval_type: str
+    payload: dict[str, Any] = field(default_factory=dict)
+    jwt_claims: dict[str, Any] = field(default_factory=dict)
+    estimated_cost_usd: float = 0.0
+    project_budget_cap_usd: float | None = None
+    project_spend_usd: float = 0.0
+
+
+@dataclass(frozen=True)
+class ApprovalResponse:
+    session_id: str
+    approval_type: str
+    decision: str
+    payload: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ApprovalDecision:
+    allow: bool
+    reason: str
+    check_path: tuple[str, ...]
+
+
+class HermesV012ApprovalHookAdapter:
+    """Blocking Hermes v0.12 approval-hook adapter for repo policy checks."""
 
     def __init__(
         self,
@@ -77,6 +103,38 @@ class HermesV011PreToolCallAdapter:
         except Exception as exc:  # noqa: BLE001
             return PreToolCallDecision(False, f"adapter_error_fail_closed:{type(exc).__name__}", ("fail_closed",))
 
+    def pre_approval_request(self, request: ApprovalRequest) -> ApprovalDecision:
+        try:
+            if request.approval_type == "g3_paid_spend":
+                decision = self._g3_decision(
+                    PreToolCallRequest(
+                        session_id=request.session_id,
+                        skill_name="financial_router",
+                        tool_name=str(request.payload.get("tool_name") or "paid_model_call"),
+                        arguments={
+                            **request.payload,
+                            "billing_tier": request.payload.get("billing_tier") or "paid_cloud",
+                        },
+                        jwt_claims=request.jwt_claims,
+                        estimated_cost_usd=request.estimated_cost_usd,
+                        project_budget_cap_usd=request.project_budget_cap_usd,
+                        project_spend_usd=request.project_spend_usd,
+                    )
+                )
+                if decision is not None:
+                    return ApprovalDecision(False, decision.reason, ("pre_approval_request", *decision.check_path))
+            return ApprovalDecision(True, "approval_request_allowed", ("pre_approval_request",))
+        except Exception as exc:  # noqa: BLE001
+            return ApprovalDecision(False, f"adapter_error_fail_closed:{type(exc).__name__}", ("fail_closed",))
+
+    def post_approval_response(self, response: ApprovalResponse) -> ApprovalDecision:
+        try:
+            if response.approval_type == "g3_paid_spend" and response.decision != "APPROVED":
+                return ApprovalDecision(False, "g3_veto:approval_not_granted", ("post_approval_response", "g3"))
+            return ApprovalDecision(True, "approval_response_allowed", ("post_approval_response",))
+        except Exception as exc:  # noqa: BLE001
+            return ApprovalDecision(False, f"adapter_error_fail_closed:{type(exc).__name__}", ("fail_closed",))
+
     @staticmethod
     def _g3_decision(request: PreToolCallRequest) -> PreToolCallDecision | None:
         billing_tier = str(request.arguments.get("billing_tier") or request.arguments.get("route_selected") or "")
@@ -99,3 +157,6 @@ class HermesV011PreToolCallAdapter:
         if request.project_spend_usd + request.estimated_cost_usd > request.project_budget_cap_usd:
             return PreToolCallDecision(False, "g3_veto:project_cap_exceeded", ("sheriff", "g3"))
         return None
+
+
+HermesV011PreToolCallAdapter = HermesV012ApprovalHookAdapter

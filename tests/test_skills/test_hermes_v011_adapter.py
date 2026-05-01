@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from immune.types import AlertSeverity, BlockReason, CheckType, ImmuneConfig, ImmuneVerdict, Outcome, Tier, generate_uuid_v7
-from skills.hermes_v011_adapter import HermesV011PreToolCallAdapter, PreToolCallRequest
+from skills.hermes_v011_adapter import ApprovalRequest, ApprovalResponse, HermesV011PreToolCallAdapter, PreToolCallRequest
 
 
 def test_pre_tool_adapter_vetoes_paid_call_without_g3_budget_before_dispatch():
@@ -79,3 +79,36 @@ def test_pre_tool_adapter_blocks_sheriff_verdicts():
 
     assert decision.allow is False
     assert decision.reason == "sheriff_block:POLICY_VIOLATION"
+
+
+def test_v012_pre_approval_request_fails_closed_for_g3_without_budget():
+    adapter = HermesV011PreToolCallAdapter()
+
+    decision = adapter.pre_approval_request(
+        ApprovalRequest(
+            session_id=generate_uuid_v7(),
+            approval_type="g3_paid_spend",
+            payload={"tool_name": "paid_model_call"},
+            jwt_claims={"max_api_spend_usd": 0.0},
+            estimated_cost_usd=0.02,
+        )
+    )
+
+    assert decision.allow is False
+    assert decision.reason == "g3_veto:no_session_budget"
+    assert decision.check_path[:2] == ("pre_approval_request", "sheriff")
+
+
+def test_v012_post_approval_response_blocks_unapproved_g3_dispatch():
+    adapter = HermesV011PreToolCallAdapter()
+
+    decision = adapter.post_approval_response(
+        ApprovalResponse(
+            session_id=generate_uuid_v7(),
+            approval_type="g3_paid_spend",
+            decision="DENIED",
+        )
+    )
+
+    assert decision.allow is False
+    assert decision.reason == "g3_veto:approval_not_granted"

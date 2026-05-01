@@ -73,12 +73,28 @@ EXPECTED_SEED_TOOLS = (
     "web_fetch",
     "shell_command",
 )
+EXPECTED_DASHBOARD_SURFACES = (
+    "Models",
+    "Chat",
+    "Plugins",
+    "Mission Control",
+)
+EXPECTED_V012_HOOKS = (
+    "pre_tool_call",
+    "pre_approval_request",
+    "post_approval_response",
+)
+EXPECTED_PINNED_SKILLS = (
+    "immune_system",
+    "financial_router",
+    "operator_interface",
+)
 LEGACY_SPLIT_DATABASES = ("opportunity.db", "project.db", "treasury.db")
-MANIFEST_HERMES_VERSION_FLOOR = (0, 11, 0)
-CHECKLIST_HERMES_VERSION_FLOOR = (0, 11, 0)
+MANIFEST_HERMES_VERSION_FLOOR = (0, 12, 0)
+CHECKLIST_HERMES_VERSION_FLOOR = (0, 12, 0)
 VERSION_DRIFT_NOTE = (
-    "spec drift: repo runtime now targets Hermes v0.11.0+ and treats "
-    "config.yaml as the primary upstream surface. Any remaining v0.8/v0.9 "
+    "spec drift: repo runtime now targets Hermes v0.12.0+ and treats "
+    "config.yaml as the primary upstream surface. Any remaining v0.8/v0.9/v0.11 "
     "language should be considered stale."
 )
 PROFILE_DRIFT_NOTE = (
@@ -186,6 +202,10 @@ class HermesReadinessResult:
     cli_smoke_step_outcomes_delta: int
     cli_smoke_log_trace: bool
     cli_smoke_output: str | None
+    one_shot_smoke_attempted: bool
+    one_shot_smoke_ok: bool
+    one_shot_smoke_output: str | None
+    deferred_items: list[str]
     checkpoint_backup_path: str | None
     blocking_items: list[str]
     drift_items: list[str]
@@ -254,6 +274,7 @@ class HermesContractHarnessResult:
     blocked_dispatch_reason: str | None
     restart_result: dict[str, Any] | None
     final_runtime_status: dict[str, Any] | None
+    v012_contract_checks: dict[str, bool]
     trace_id: str | None
     issues: list[str]
 
@@ -340,6 +361,23 @@ class EvidenceBatchResult:
     replay_report: dict[str, Any]
     progress_projection: dict[str, Any]
     report_path: str
+
+
+@dataclass(frozen=True)
+class FlywheelDrillResult:
+    ok: bool
+    config: IntegrationConfig
+    bootstrap: RuntimeBootstrapResult
+    doctor: RuntimeDoctorResult
+    workflow: OperatorWorkflowResult
+    before_replay_report: dict[str, Any]
+    replay_report: dict[str, Any]
+    generated_trace_count: int
+    generated_activation_trace_count: int
+    generated_known_bad_trace_count: int
+    trace_id: str | None
+    artifact_path: str
+    issues: list[str]
 
 
 @dataclass(frozen=True)
@@ -722,6 +760,7 @@ def _runtime_launcher_paths(config: IntegrationConfig) -> dict[str, Path]:
         "contract_harness": bin_dir / "contract_harness_runtime.sh",
         "task_loop_proof": bin_dir / "task_loop_proof.sh",
         "research_cron_proof": bin_dir / "research_cron_proof.sh",
+        "flywheel_drill": bin_dir / "flywheel_drill.sh",
         "evidence_factory": bin_dir / "evidence_factory.sh",
         "replay_readiness_report": bin_dir / "replay_readiness_report.sh",
         "export_replay_corpus": bin_dir / "export_replay_corpus.sh",
@@ -795,8 +834,20 @@ def _runtime_workspace_manifest_path(config: IntegrationConfig) -> Path:
     return runtime_support_artifact_paths(config)["workspace_manifest"]
 
 
+def _runtime_local_provider_doctor_path(config: IntegrationConfig) -> Path:
+    return runtime_support_artifact_paths(config)["local_provider_doctor"]
+
+
+def _runtime_curator_readiness_path(config: IntegrationConfig) -> Path:
+    return runtime_support_artifact_paths(config)["curator_readiness"]
+
+
 def _runtime_evidence_factory_manifest_path(config: IntegrationConfig) -> Path:
     return runtime_support_artifact_paths(config)["evidence_factory_manifest"]
+
+
+def _runtime_flywheel_drill_report_path(config: IntegrationConfig) -> Path:
+    return runtime_support_artifact_paths(config)["flywheel_drill_report"]
 
 
 def _runtime_replay_readiness_report_path(config: IntegrationConfig) -> Path:
@@ -1180,6 +1231,45 @@ def _read_json_yaml(path: Path) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def _v012_offline_contract_checks(config: IntegrationConfig, repo_root: Path) -> dict[str, bool]:
+    profile_doc = _read_json_yaml(_runtime_profile_config_path(config)) or {}
+    workspace_doc = _read_json_yaml(_runtime_workspace_manifest_path(config)) or {}
+    local_provider_doc = _read_json_yaml(_runtime_local_provider_doctor_path(config)) or {}
+    curator_doc = _read_json_yaml(_runtime_curator_readiness_path(config)) or {}
+    plugin_manifest = _read_json_yaml(_runtime_dashboard_plugin_dir(config) / "dashboard" / "manifest.json") or {}
+    checklist_path = _runtime_operator_validation_checklist_path(config)
+    checklist_text = checklist_path.read_text(encoding="utf-8") if checklist_path.is_file() else ""
+    profile_config = (
+        profile_doc.get("skills", {})
+        .get("config", {})
+        .get("hybrid_autonomous_ai", {})
+    )
+    curator_profile = profile_config.get("curator", {})
+    plugin_hooks = profile_config.get("plugin_hooks", {})
+    local_provider_profile = profile_config.get("local_provider", {})
+    return {
+        "hermes_floor_v012": MANIFEST_HERMES_VERSION_FLOOR >= (0, 12, 0)
+        and CHECKLIST_HERMES_VERSION_FLOOR >= (0, 12, 0),
+        "one_shot_contract_declared": "hermes -z" in checklist_text
+        and "Hermes v0.12.0+" in checklist_text,
+        "lm_studio_doctor_deferred": local_provider_doc.get("provider") == "lm_studio"
+        and local_provider_doc.get("status") == "DEFERRED_UNTIL_LIVE_HERMES"
+        and local_provider_profile.get("defer_without_hermes") is True,
+        "curator_report_first": curator_doc.get("mode") == "report_first"
+        and curator_doc.get("status_required") is True
+        and curator_doc.get("report_required") is True
+        and curator_profile.get("pinned_skills_mutable") is False,
+        "pinned_skills_before_curator": curator_profile.get("enabled") is False
+        and set(EXPECTED_PINNED_SKILLS).issubset(set(curator_profile.get("pinned_skills") or [])),
+        "approval_hooks_declared": set(EXPECTED_V012_HOOKS).issubset(set(plugin_hooks.get("required_hooks") or [])),
+        "dashboard_surfaces_declared": set(EXPECTED_DASHBOARD_SURFACES).issubset(set(workspace_doc.get("dashboard_surfaces") or []))
+        and plugin_manifest.get("name") == MISSION_CONTROL_DASHBOARD_PLUGIN
+        and plugin_manifest.get("tab", {}).get("path") == "/mission-control",
+        "dashboard_offline_mockable": workspace_doc.get("offline_mockable") is True,
+        "repo_root_available": repo_root.is_dir(),
+    }
 
 
 def _validate_profile_artifacts(config: IntegrationConfig, repo_root: Path) -> HermesProfileValidationResult:
@@ -1589,10 +1679,31 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
         "milestone_status_command": _command_string(config, "--milestone-status", repo_root),
         "optimizer_snapshot_command": _command_string(config, "--optimizer-snapshot", repo_root),
         "harness_candidate_command": _command_string(config, "--analyze-harness-candidates", repo_root),
+        "dashboard_surfaces": list(EXPECTED_DASHBOARD_SURFACES),
+        "offline_mockable": True,
+    }
+    local_provider_doc = {
+        **contract.local_provider_mapping(),
+        "status": "DEFERRED_UNTIL_LIVE_HERMES",
+        "doctor_command": "hermes doctor providers --provider lm_studio",
+        "readiness_contract": "LM Studio/local-provider doctor must pass before live attachment.",
+        "defer_reason": "Hermes CLI and target hardware are gated during pre-live repo work.",
+    }
+    curator_doc = {
+        **contract.curator_mapping(),
+        "status": "DISABLED_UNTIL_PINNING_VALIDATED",
+        "report_path": str(_runtime_curator_readiness_path(config)),
+        "validation": {
+            "status_present": True,
+            "report_present": True,
+            "pinned_skill_mutation_allowed": False,
+            "pinned_skills_before_enable": list(EXPECTED_PINNED_SKILLS),
+        },
     }
     evidence_doc = {
         "generated_at": _utc_now(),
         "command": _command_string(config, "--evidence-factory", repo_root),
+        "flywheel_drill_command": _command_string(config, "--flywheel-drill", repo_root),
         "until_replay_ready_command": (
             _command_string(config, "--evidence-factory", repo_root)
             + " --until-replay-ready"
@@ -1614,14 +1725,26 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
         "4. Confirm the repo-local contract harness and proxy self-test pass.",
         "5. Run the evidence factory and inspect the replay readiness report.",
         "6. Confirm the task-loop and research-cron proofs pass.",
-        "7. If Hermes is installed, run readiness and verify the live profile/config surface.",
-        "8. Open the Hermes Workspace and confirm gates, traces, quarantine review, replay readiness, runtime halt state, and milestone health are visible.",
+        "7. If Hermes is installed, run readiness and verify Hermes v0.12.0+, `hermes -z`, LM Studio/local-provider doctor, approval hooks, Curator report-first state, and live profile/config surface.",
+        "8. Open the Hermes dashboard and confirm Models, Chat, Plugins, Mission Control, gates, traces, quarantine review, replay readiness, runtime halt state, and milestone health are visible.",
     ]
     _write_json_yaml(_runtime_network_controls_path(config), network_doc)
     _write_json_yaml(_runtime_proxy_allowlist_path(config), proxy_doc)
     _write_json_yaml(_runtime_gateway_manifest_path(config), gateway_doc)
     _write_json_yaml(_runtime_workspace_manifest_path(config), workspace_doc)
+    _write_json_yaml(_runtime_local_provider_doctor_path(config), local_provider_doc)
+    _write_json_yaml(_runtime_curator_readiness_path(config), curator_doc)
     _write_json_yaml(_runtime_evidence_factory_manifest_path(config), evidence_doc)
+    _write_json_yaml(
+        _runtime_flywheel_drill_report_path(config),
+        {
+            "available": False,
+            "status": "NOT_RUN",
+            "command": _command_string(config, "--flywheel-drill", repo_root),
+            "goal": "Research -> Opportunity -> Council -> Project phase gate -> replay trace",
+            "dashboard_dependency": False,
+        },
+    )
     _write_replay_readiness_report_artifact(
         config,
         {
@@ -1803,7 +1926,10 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
         "proxy_audit_log_path": str(_runtime_proxy_audit_log_path(resolved)),
         "gateway_manifest_path": str(_runtime_gateway_manifest_path(resolved)),
         "workspace_manifest_path": str(_runtime_workspace_manifest_path(resolved)),
+        "local_provider_doctor_path": str(_runtime_local_provider_doctor_path(resolved)),
+        "curator_readiness_path": str(_runtime_curator_readiness_path(resolved)),
         "operator_validation_checklist_path": str(_runtime_operator_validation_checklist_path(resolved)),
+        "flywheel_drill_report_path": str(_runtime_flywheel_drill_report_path(resolved)),
         "evidence_factory_manifest_path": str(_runtime_evidence_factory_manifest_path(resolved)),
         "replay_readiness_report_path": str(_runtime_replay_readiness_report_path(resolved)),
         "replay_corpus_export_path": str(_runtime_replay_corpus_export_path(resolved)),
@@ -1817,6 +1943,7 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
                 "route": "/mission-control",
                 "api_base": f"/api/plugins/{MISSION_CONTROL_DASHBOARD_PLUGIN}",
                 "gate_actions_enabled": False,
+                "page_scoped_slots": ["models", "chat", "plugins"],
             }
         },
         "data_dir": resolved.data_dir,
@@ -1836,6 +1963,7 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
             "contract_harness": _command_string(resolved, "--contract-harness", root),
             "task_loop_proof": _command_string(resolved, "--task-loop-proof", root),
             "research_cron_proof": _command_string(resolved, "--research-cron-proof", root),
+            "flywheel_drill": _command_string(resolved, "--flywheel-drill", root),
             "evidence_factory": _command_string(resolved, "--evidence-factory", root),
             "replay_readiness_report": _command_string(resolved, "--replay-readiness-report", root),
             "export_replay_corpus": _command_string(resolved, "--export-replay-corpus", root),
@@ -1869,6 +1997,7 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
     _write_launcher(launcher_paths["contract_harness"], resolved, root, "--contract-harness")
     _write_launcher(launcher_paths["task_loop_proof"], resolved, root, "--task-loop-proof")
     _write_launcher(launcher_paths["research_cron_proof"], resolved, root, "--research-cron-proof")
+    _write_launcher(launcher_paths["flywheel_drill"], resolved, root, "--flywheel-drill")
     _write_launcher(launcher_paths["evidence_factory"], resolved, root, "--evidence-factory")
     _write_launcher(launcher_paths["replay_readiness_report"], resolved, root, "--replay-readiness-report")
     _write_launcher(launcher_paths["export_replay_corpus"], resolved, root, "--export-replay-corpus")
@@ -2046,7 +2175,10 @@ def doctor_runtime(
         "mission_control_dashboard_plugin": (
             _runtime_dashboard_plugin_dir(resolved) / "dashboard" / "manifest.json"
         ).is_file(),
+        "local_provider_doctor": _runtime_local_provider_doctor_path(resolved).is_file(),
+        "curator_readiness": _runtime_curator_readiness_path(resolved).is_file(),
         "operator_validation_checklist": _runtime_operator_validation_checklist_path(resolved).is_file(),
+        "flywheel_drill_report": _runtime_flywheel_drill_report_path(resolved).is_file(),
         "evidence_factory_manifest": _runtime_evidence_factory_manifest_path(resolved).is_file(),
         "replay_readiness_report": _runtime_replay_readiness_report_path(resolved).is_file(),
         "mac_studio_day_one_handoff": _runtime_mac_studio_day_one_handoff_path(resolved).is_file(),
@@ -2060,6 +2192,7 @@ def doctor_runtime(
         "contract_harness_launcher": launcher_paths["contract_harness"].is_file(),
         "task_loop_proof_launcher": launcher_paths["task_loop_proof"].is_file(),
         "research_cron_proof_launcher": launcher_paths["research_cron_proof"].is_file(),
+        "flywheel_drill_launcher": launcher_paths["flywheel_drill"].is_file(),
         "evidence_factory_launcher": launcher_paths["evidence_factory"].is_file(),
         "replay_readiness_report_launcher": launcher_paths["replay_readiness_report"].is_file(),
         "mac_studio_day_one_launcher": launcher_paths["mac_studio_day_one"].is_file(),
@@ -2162,6 +2295,7 @@ def exercise_hermes_contract(
         )
         doctor = doctor_runtime(registry, config=resolved, bootstrap_if_needed=False)
         contract_checks = _validate_profile_artifacts(resolved, root).checks
+        v012_contract_checks = _v012_offline_contract_checks(resolved, root)
         if not bootstrap.ok:
             issues.append("bootstrap failed")
         if not doctor.ok:
@@ -2169,6 +2303,9 @@ def exercise_hermes_contract(
         failed_contract_checks = [name for name, ok in contract_checks.items() if not ok]
         if failed_contract_checks:
             issues.append(f"profile contract failed: {', '.join(failed_contract_checks)}")
+        failed_v012_contract_checks = [name for name, ok in v012_contract_checks.items() if not ok]
+        if failed_v012_contract_checks:
+            issues.append(f"Hermes v0.12 contract failed: {', '.join(failed_v012_contract_checks)}")
 
         session_id = bootstrap.session_context.session_id
         correlation_id = f"contract-route-{generate_uuid_v7()}"
@@ -2476,6 +2613,7 @@ def exercise_hermes_contract(
             blocked_dispatch_reason=blocked_dispatch_reason,
             restart_result=restart_result,
             final_runtime_status=final_runtime_status,
+            v012_contract_checks=v012_contract_checks,
             trace_id=trace_id,
             issues=issues,
         )
@@ -3941,11 +4079,11 @@ def _readiness_actions(
     if replay_report.get("status") != "READY_FOR_BROADER_REPLAY":
         actions.append(f"Grow the replay corpus before live promotion: `{bounded_evidence_command}`")
     if not hermes_installed:
-        actions.append(f"Install Hermes Agent v0.11.0+ and rerun live readiness: `{readiness_command}`")
+        actions.append(f"Install Hermes Agent v0.12.0+ and rerun live readiness: `{readiness_command}`")
     elif not profile_listed or missing_seed_tools or failed_config_checks:
         actions.append("Repair the Hermes profile/tool/config surface, then rerun the readiness check.")
     if cli_smoke_attempted and not cli_smoke_ok:
-        actions.append("Restore CLI smoke evidence so both STEP_OUTCOME rows and runtime log traces appear.")
+        actions.append("Restore `hermes -z` smoke evidence so both STEP_OUTCOME rows and runtime log traces appear.")
     if not actions:
         actions.append("Proceed to Mac Studio Day 1: run live readiness, then execute milestone validation M1 through M5.")
     return actions
@@ -4109,6 +4247,110 @@ def run_evidence_factory(
     return result
 
 
+def run_flywheel_drill(
+    *,
+    config: IntegrationConfig | None = None,
+    repo_root: str | None = None,
+    tool_registry: HermesToolRegistry | None = None,
+    report_limit: int = DEFAULT_REPLAY_REPORT_LIMIT,
+) -> FlywheelDrillResult:
+    """Run one bounded CLI-first flywheel proof without requiring Mission Control."""
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    root = Path(repo_root).expanduser().resolve() if repo_root else _repo_root()
+    registry = tool_registry or MockHermesRuntime(data_dir=resolved.data_dir)
+    install_runtime_profile(resolved, repo_root=str(root))
+    bootstrap = bootstrap_runtime(registry, config=resolved, model_name="flywheel-drill")
+    manager = HarnessVariantManager(str(Path(resolved.data_dir) / "telemetry.db"))
+    before_summary = manager.execution_trace_summary()
+    before_report = manager.replay_readiness_report(limit=report_limit)
+
+    drill_task_id = f"flywheel-drill-{generate_uuid_v7()}"
+    workflow = run_operator_workflow(
+        registry,
+        config=resolved,
+        model_name="flywheel-drill",
+        task_id=drill_task_id,
+        title="Flywheel drill",
+        summary=(
+            "Run the pre-live flywheel substrate from research signal to opportunity, "
+            "council verdict, project phase gate, and replay-eligible trace."
+        ),
+    )
+    doctor = doctor_runtime(registry, config=resolved, bootstrap_if_needed=False)
+    after_summary = manager.execution_trace_summary()
+    after_report = replay_readiness_report(config=resolved, repo_root=str(root), limit=report_limit)
+    generated_trace_count = int(after_summary["total_count"]) - int(before_summary["total_count"])
+    generated_activation_trace_count = int(after_report["activation_source_trace_count"]) - int(before_report["activation_source_trace_count"])
+    generated_known_bad_trace_count = int(after_report["known_bad_source_traces"]) - int(before_report["known_bad_source_traces"])
+
+    issues: list[str] = []
+    if not bootstrap.ok:
+        issues.append("bootstrap failed")
+    if not doctor.ok:
+        issues.append("doctor failed")
+    if not workflow.ok:
+        issues.append(workflow.error or "operator workflow failed")
+    if workflow.opportunity_id is None:
+        issues.append("workflow did not create an opportunity")
+    if not workflow.council_verdict_ids:
+        issues.append("workflow did not create council verdicts")
+    if workflow.project_id is None or workflow.phase_gate_id is None:
+        issues.append("workflow did not reach the project phase gate")
+    if workflow.trace_id is None or generated_activation_trace_count <= 0:
+        issues.append("workflow did not generate a replay-eligible activation trace")
+
+    artifact_path = _runtime_flywheel_drill_report_path(resolved)
+    payload = {
+        "available": True,
+        "status": "PASS" if not issues else "FAIL",
+        "generated_at": _utc_now(),
+        "dashboard_dependency": False,
+        "command": _command_string(resolved, "--flywheel-drill", root),
+        "goal": "Research -> Opportunity -> Council -> Project phase gate -> replay trace",
+        "trace_id": workflow.trace_id,
+        "opportunity_id": workflow.opportunity_id,
+        "project_id": workflow.project_id,
+        "phase_gate_id": workflow.phase_gate_id,
+        "phase_gate_verdict": workflow.phase_gate_verdict,
+        "council_verdict_ids": workflow.council_verdict_ids,
+        "harvest_id": workflow.harvest_id,
+        "digest_id": workflow.digest_id,
+        "generated_trace_count": generated_trace_count,
+        "generated_activation_trace_count": generated_activation_trace_count,
+        "generated_known_bad_trace_count": generated_known_bad_trace_count,
+        "before_replay": {
+            "status": before_report.get("status"),
+            "eligible_source_traces": before_report.get("eligible_source_traces"),
+            "known_bad_source_traces": before_report.get("known_bad_source_traces"),
+            "distinct_skill_count": before_report.get("distinct_skill_count"),
+        },
+        "after_replay": {
+            "status": after_report.get("status"),
+            "eligible_source_traces": after_report.get("eligible_source_traces"),
+            "known_bad_source_traces": after_report.get("known_bad_source_traces"),
+            "distinct_skill_count": after_report.get("distinct_skill_count"),
+            "blockers": after_report.get("blockers"),
+        },
+        "issues": issues,
+    }
+    _write_json_yaml(artifact_path, payload)
+    return FlywheelDrillResult(
+        ok=not issues,
+        config=resolved,
+        bootstrap=bootstrap,
+        doctor=doctor,
+        workflow=workflow,
+        before_replay_report=before_report,
+        replay_report=after_report,
+        generated_trace_count=generated_trace_count,
+        generated_activation_trace_count=generated_activation_trace_count,
+        generated_known_bad_trace_count=generated_known_bad_trace_count,
+        trace_id=workflow.trace_id,
+        artifact_path=str(artifact_path),
+        issues=issues,
+    )
+
+
 def build_mac_studio_day_one_handoff(
     *,
     config: IntegrationConfig | None = None,
@@ -4253,11 +4495,18 @@ def assess_hermes_readiness(
     cli_smoke_step_outcomes_delta = 0
     cli_smoke_log_trace = False
     cli_smoke_output: str | None = None
+    one_shot_smoke_attempted = False
+    one_shot_smoke_ok = False
+    one_shot_smoke_output: str | None = None
+    deferred_items: list[str] = []
+    local_provider_doctor_ok = False
 
     if not hermes_installed:
         blocking_items.append(
             f"Hermes CLI '{hermes_binary}' not found in PATH; install Hermes Agent before live readiness can pass."
         )
+        deferred_items.append("lm_studio_local_provider_doctor")
+        deferred_items.append("hermes_z_one_shot_smoke")
     else:
         version_result = runner((hermes_binary, "--version"))
         if not version_result.ok:
@@ -4276,7 +4525,7 @@ def assess_hermes_readiness(
                     blocking_items.append(
                         f"Hermes {hermes_version} is below the manifest floor "
                         f"{'.'.join(str(part) for part in MANIFEST_HERMES_VERSION_FLOOR)}; "
-                        "older v0.8/v0.9 assumptions are now stale."
+                        "older v0.8/v0.9/v0.11 assumptions are now stale."
                     )
                 elif parsed_version < CHECKLIST_HERMES_VERSION_FLOOR:
                     blocking_items.append(
@@ -4343,8 +4592,25 @@ def assess_hermes_readiness(
             f"{', '.join(failed_config_checks)}"
         )
 
+    if hermes_installed:
+        provider_doctor_result = _run_command_candidates(
+            runner,
+            [
+                (hermes_binary, "doctor", "providers", "--provider", "lm_studio"),
+                (hermes_binary, "doctor", "provider", "lm_studio"),
+                (hermes_binary, "doctor"),
+            ],
+        )
+        local_provider_doctor_ok = provider_doctor_result.ok
+        if not local_provider_doctor_ok:
+            blocking_items.append(
+                "LM Studio/local-provider doctor failed: "
+                f"{_format_probe_failure(provider_doctor_result)}"
+            )
+
     if run_cli_smoke and hermes_installed:
         cli_smoke_attempted = True
+        one_shot_smoke_attempted = True
         cli_smoke_marker = f"hermes-readiness-{generate_uuid_v7()}"
         query = smoke_query or _default_cli_smoke_query(cli_smoke_marker)
         step_count_before = _step_outcome_count(resolved)
@@ -4352,15 +4618,16 @@ def assess_hermes_readiness(
         smoke_result = _run_command_candidates(
             runner,
             [
-                (hermes_binary, "--profile", resolved.profile_name, "chat", "-q", query),
-                (hermes_binary, "-p", resolved.profile_name, "chat", "-q", query),
-                (hermes_binary, "chat", "-q", query),
+                (hermes_binary, "--profile", resolved.profile_name, "-z", query),
+                (hermes_binary, "-p", resolved.profile_name, "-z", query),
+                (hermes_binary, "-z", query),
             ],
         )
         cli_smoke_output = smoke_result.stdout or smoke_result.stderr or smoke_result.error
+        one_shot_smoke_output = cli_smoke_output
         if not smoke_result.ok:
             blocking_items.append(
-                f"CLI smoke command failed: {_format_probe_failure(smoke_result)}"
+                f"`hermes -z` one-shot smoke command failed: {_format_probe_failure(smoke_result)}"
             )
         else:
             time.sleep(0.05)
@@ -4375,9 +4642,10 @@ def assess_hermes_readiness(
             cli_smoke_ok = not missing_cli_evidence
             if missing_cli_evidence:
                 blocking_items.append(
-                    "CLI smoke did not produce "
+                    "`hermes -z` smoke did not produce "
                     f"{' and '.join(missing_cli_evidence)}."
                 )
+            one_shot_smoke_ok = cli_smoke_ok
 
     recommended_actions = _readiness_actions(
         config=resolved,
@@ -4414,6 +4682,10 @@ def assess_hermes_readiness(
         cli_smoke_step_outcomes_delta=cli_smoke_step_outcomes_delta,
         cli_smoke_log_trace=cli_smoke_log_trace,
         cli_smoke_output=cli_smoke_output,
+        one_shot_smoke_attempted=one_shot_smoke_attempted,
+        one_shot_smoke_ok=one_shot_smoke_ok,
+        one_shot_smoke_output=one_shot_smoke_output,
+        deferred_items=deferred_items,
         checkpoint_backup_path=checkpoint_backup_path,
         blocking_items=blocking_items,
         drift_items=drift_items,
@@ -5092,6 +5364,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--contract-harness", action="store_true", help="Run the repo-local Hermes contract harness without requiring live Hermes")
     parser.add_argument("--task-loop-proof", action="store_true", help="Run the deterministic research task-loop proof")
     parser.add_argument("--research-cron-proof", action="store_true", help="Run the standing-brief cron proof")
+    parser.add_argument("--flywheel-drill", action="store_true", help="Run one CLI-first research-to-project phase-gate flywheel proof")
     parser.add_argument("--evidence-factory", action="store_true", help="Run the production evidence batch across positive and known-bad scenarios")
     parser.add_argument("--replay-readiness-report", action="store_true", help="Print the detailed replay-readiness coverage report")
     parser.add_argument("--export-replay-corpus", action="store_true", help="Export activation-relevant source traces for offline harness search")
@@ -5112,7 +5385,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--alerts-dir", default="~/.hermes/alerts/")
     parser.add_argument("--profile-name", default="hybrid-autonomous-ai")
     parser.add_argument("--hermes-bin", default="hermes", help="Override the Hermes CLI binary used for readiness checks")
-    parser.add_argument("--skip-cli-smoke", action="store_true", help="Skip the live Hermes chat smoke test inside --readiness")
+    parser.add_argument("--skip-cli-smoke", action="store_true", help="Skip the live Hermes -z smoke test inside --readiness")
     parser.add_argument("--smoke-query", default=None, help="Override the readiness chat prompt used by --readiness")
     parser.add_argument("--model-name", default="local-default")
     parser.add_argument("--repo-root", default=None, help="Override the repository root used for profile installation")
@@ -5214,6 +5487,7 @@ def _main_impl(
         print(f"seed_tools_missing={','.join(missing_seed_tools) if missing_seed_tools else 'none'}")
         print(f"config_failed={','.join(failed_config_checks) if failed_config_checks else 'none'}")
         print(f"cli_smoke={'ok' if result.cli_smoke_ok else ('skipped' if not result.cli_smoke_attempted else 'failed')}")
+        print(f"one_shot_smoke={'ok' if result.one_shot_smoke_ok else ('deferred' if 'hermes_z_one_shot_smoke' in result.deferred_items else ('skipped' if not result.one_shot_smoke_attempted else 'failed'))}")
         print(f"cli_step_outcomes_delta={result.cli_smoke_step_outcomes_delta}")
         print(f"cli_log_trace={'yes' if result.cli_smoke_log_trace else 'no'}")
         print(f"checkpoint_backup={result.checkpoint_backup_path or 'none'}")
@@ -5233,6 +5507,7 @@ def _main_impl(
         )
         print(f"next_actions={' | '.join(result.recommended_actions) if result.recommended_actions else 'none'}")
         print(f"blocking={'; '.join(result.blocking_items) if result.blocking_items else 'none'}")
+        print(f"deferred={','.join(result.deferred_items) if result.deferred_items else 'none'}")
         print(f"drift={'; '.join(result.drift_items) if result.drift_items else 'none'}")
         print(f"tools={','.join(result.live_tools) if result.live_tools else 'none'}")
         return 0 if result.ok else 1
@@ -5284,6 +5559,34 @@ def _main_impl(
         print(f"scheduled_job_id={result.scheduled_job_id or 'none'}")
         print(f"queued_task_id={result.queued_task_id or 'none'}")
         print(f"trace_id={result.trace_id or 'none'}")
+        print(f"issues={'; '.join(result.issues) if result.issues else 'none'}")
+        return 0 if result.ok else 1
+
+    if args.flywheel_drill:
+        result = run_flywheel_drill(
+            config=config,
+            repo_root=args.repo_root,
+            tool_registry=runtime,
+            report_limit=args.report_limit,
+        )
+        print("flywheel drill ok" if result.ok else "flywheel drill failed")
+        print(f"trace_id={result.trace_id or 'none'}")
+        print(f"opportunity_id={result.workflow.opportunity_id or 'none'}")
+        print(f"project_id={result.workflow.project_id or 'none'}")
+        print(f"phase_gate_id={result.workflow.phase_gate_id or 'none'}")
+        print(f"phase_gate_verdict={result.workflow.phase_gate_verdict or 'none'}")
+        print(f"generated_traces={result.generated_trace_count}")
+        print(f"generated_activation_traces={result.generated_activation_trace_count}")
+        print(
+            "replay="
+            f"{result.replay_report['eligible_source_traces']}/"
+            f"{result.replay_report['minimum_eligible_traces']} eligible,"
+            f"{result.replay_report['known_bad_source_traces']}/"
+            f"{result.replay_report['minimum_known_bad_traces']} known_bad,"
+            f"{result.replay_report['distinct_skill_count']}/"
+            f"{result.replay_report['minimum_distinct_skills']} skills"
+        )
+        print(f"report_path={result.artifact_path}")
         print(f"issues={'; '.join(result.issues) if result.issues else 'none'}")
         return 0 if result.ok else 1
 
