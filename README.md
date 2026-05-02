@@ -13,11 +13,9 @@ current blockers, and latest verification, use `../CURRENT_STATE.md`.
 - Treat this README as a repo runbook, not a rolling project-status document.
 - Treat `../spec/*.md` as the architecture source of truth and this repo as
   implemented behavior.
-- Read `docs/V31_MODULE_MIGRATION_MAP.md` before extending foundation-kernel
-  implementation.
 - The current code is a useful legacy substrate plus the first v3.1 kernel
-  slice. Do not assume the legacy five-database schemas or broad runtime harness
-  are v3.1 authority.
+  slice. Do not assume the legacy five-database schemas or broad proof/evidence
+  harnesses are v3.1 authority.
 
 ## v3.1 Kernel Posture
 
@@ -30,18 +28,16 @@ The first deterministic foundation-kernel slice lives in `kernel/` and
 - `convert-to-projection`: keep as derived state fed by kernel events
 - `retire`: remove only after replacement or compatibility evidence
 
-The canonical repo-side map is
-`docs/V31_MODULE_MIGRATION_MAP.md`.
-
 The highest-level posture is:
 
-- extend kernel authority in `kernel/` and `schemas/kernel.sql` rather than
-  mutating legacy domain schemas first
+- extend kernel authority in `kernel/` and `schemas/kernel.sql`
+- keep `skills/runtime.py` as a thin CLI/import compatibility entrypoint for
+  `kernel.runtime_compat`
 - adapt `immune/`, `financial_router/`, `skills/local_forward_proxy.py`,
   `council/`, `eval/`, `harness_variants.py`, `migrate.py`, and
   `runtime_control.py`
-- wrap `skills/runtime.py`, Hermes dispatch/adapters, generated profile
-  artifacts, and provider/session integration
+- wrap Hermes dispatch/adapters, generated profile artifacts, and
+  provider/session integration
 - convert strategic memory, research domain, opportunity pipeline, operator
   interface, observability, Mission Control, and current `schemas/*.sql` into
   projections
@@ -62,7 +58,6 @@ The highest-level posture is:
 ## Repository Layout
 
 ```text
-docs/                v3.1 migration map and repo planning notes
 schemas/             Legacy SQLite contracts; v3.1 projection references
 migrate.py           Applies schemas and verifies structural drift
 financial_router/    Budget/routing helper to adapt under kernel authority

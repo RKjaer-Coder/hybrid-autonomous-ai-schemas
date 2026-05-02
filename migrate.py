@@ -28,6 +28,23 @@ EXPECTED_OBJECTS = {
         "tables": {
             "commands",
             "events",
+            "research_requests",
+            "source_plans",
+            "source_acquisition_checks",
+            "decisions",
+            "quality_gate_events",
+            "evidence_bundles",
+            "commercial_decision_packets",
+            "model_task_classes",
+            "model_candidates",
+            "model_holdout_policies",
+            "local_offload_eval_sets",
+            "model_holdout_use_records",
+            "model_eval_runs",
+            "model_route_decisions",
+            "model_promotion_decision_packets",
+            "model_demotion_records",
+            "model_routing_state",
             "capability_grants",
             "budgets",
             "budget_reservations",
@@ -40,6 +57,32 @@ EXPECTED_OBJECTS = {
             "idx_commands_idempotency_key",
             "idx_events_entity",
             "idx_events_command",
+            "idx_research_requests_profile_status",
+            "idx_research_requests_decision_target",
+            "idx_source_plans_request",
+            "idx_source_acquisition_checks_plan",
+            "idx_quality_gate_events_request",
+            "idx_decisions_type_status",
+            "idx_decisions_authority",
+            "idx_evidence_bundles_request",
+            "idx_evidence_bundles_quality",
+            "idx_commercial_decision_packets_target",
+            "idx_commercial_decision_packets_bundle",
+            "idx_model_task_classes_status",
+            "idx_model_candidates_state",
+            "idx_model_holdout_policies_task",
+            "idx_local_offload_eval_sets_task",
+            "idx_model_holdout_use_records_eval",
+            "idx_model_eval_runs_model_task",
+            "idx_model_eval_runs_verdict",
+            "idx_model_route_decisions_task",
+            "idx_model_route_decisions_model",
+            "idx_model_promotion_packets_task",
+            "idx_model_promotion_packets_model",
+            "idx_model_demotion_records_model",
+            "idx_model_demotion_records_task",
+            "idx_model_routing_state_role",
+            "idx_model_routing_state_model",
             "idx_capability_grants_subject",
             "idx_budgets_owner",
             "idx_budget_reservations_budget_status",
@@ -166,6 +209,9 @@ def _ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, 
 
 
 def _preflight_schema_compat(conn: sqlite3.Connection, schema_name: str) -> None:
+    if schema_name == "kernel.sql":
+        _rebuild_kernel_events_for_research_entities(conn)
+        return
     if schema_name == "strategic_memory.sql":
         _ensure_column(
             conn,
@@ -278,6 +324,60 @@ def _rebuild_operator_heartbeat_for_dashboard_channel(conn: sqlite3.Connection) 
         """
     )
     conn.execute("DROP TABLE operator_heartbeat__old")
+
+
+def _rebuild_kernel_events_for_research_entities(conn: sqlite3.Connection) -> None:
+    """Rebuild old kernel events CHECK constraints that predate newer research entities."""
+    existing_sql = _object_sql(conn, "table", "events")
+    if not existing_sql or ("evidence_bundle" in existing_sql and "source_plan" in existing_sql):
+        return
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.execute("ALTER TABLE events RENAME TO events__old")
+        conn.execute(
+            """
+            CREATE TABLE events (
+              event_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+              event_id TEXT NOT NULL UNIQUE,
+              event_schema_version INTEGER NOT NULL,
+              event_type TEXT NOT NULL,
+              entity_type TEXT NOT NULL CHECK (entity_type IN ('task','research_request','source_plan','evidence_bundle','decision','project','model','budget','gate','capability','side_effect','policy','artifact')),
+              entity_id TEXT NOT NULL,
+              transaction_id TEXT NOT NULL,
+              command_id TEXT REFERENCES commands(command_id),
+              correlation_id TEXT,
+              causation_event_id TEXT,
+              actor_type TEXT NOT NULL CHECK (actor_type IN ('kernel','operator','agent','tool','model','scheduler')),
+              actor_id TEXT NOT NULL,
+              timestamp TEXT NOT NULL,
+              policy_version TEXT NOT NULL,
+              data_class TEXT NOT NULL CHECK (data_class IN ('public','internal','sensitive','secret_ref','regulated','client_confidential')),
+              payload_hash TEXT NOT NULL,
+              payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+              prev_event_hash TEXT,
+              event_hash TEXT NOT NULL
+            ) STRICT
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO events (
+              event_seq, event_id, event_schema_version, event_type, entity_type,
+              entity_id, transaction_id, command_id, correlation_id, causation_event_id,
+              actor_type, actor_id, timestamp, policy_version, data_class,
+              payload_hash, payload_json, prev_event_hash, event_hash
+            )
+            SELECT
+              event_seq, event_id, event_schema_version, event_type, entity_type,
+              entity_id, transaction_id, command_id, correlation_id, causation_event_id,
+              actor_type, actor_id, timestamp, policy_version, data_class,
+              payload_hash, payload_json, prev_event_hash, event_hash
+            FROM events__old
+            """
+        )
+        conn.execute("DROP TABLE events__old")
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
 
 
 def _db_name_for_schema(schema_name: str) -> str | None:

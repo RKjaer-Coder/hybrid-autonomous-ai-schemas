@@ -498,6 +498,102 @@ class SchemaMetaCompatibilityTests(unittest.TestCase):
 
 
 class SchemaMigrationDriftTests(unittest.TestCase):
+    def test_kernel_events_constraint_rebuild_preserves_rows_and_allows_evidence_bundles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "kernel.db"
+            old_schema = (ROOT / "schemas/kernel.sql").read_text(encoding="utf-8").replace(
+                "'task','research_request','source_plan','evidence_bundle','decision','project','model','budget','gate','capability','side_effect','policy','artifact'",
+                "'task','research_request','decision','project','model','budget','gate','capability','side_effect','policy','artifact'",
+            )
+            with sqlite3.connect(db_path) as conn:
+                conn.executescript(old_schema)
+                conn.execute(
+                    """
+                    INSERT INTO events (
+                      event_id, event_schema_version, event_type, entity_type, entity_id,
+                      transaction_id, actor_type, actor_id, timestamp, policy_version,
+                      data_class, payload_hash, payload_json, event_hash
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "event-old",
+                        1,
+                        "research_request_created",
+                        "research_request",
+                        "request-old",
+                        "tx-old",
+                        "kernel",
+                        "kernel",
+                        ts(),
+                        "v3.1-foundation",
+                        "internal",
+                        "hash-old",
+                        "{}",
+                        "event-hash-old",
+                    ),
+                )
+                conn.commit()
+
+            migrate.apply_schema(db_path, ROOT / "schemas/kernel.sql")
+            ok, errors = migrate.verify_database(db_path, "kernel", ROOT / "schemas/kernel.sql")
+            self.assertTrue(ok, errors)
+
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO events (
+                      event_id, event_schema_version, event_type, entity_type, entity_id,
+                      transaction_id, actor_type, actor_id, timestamp, policy_version,
+                      data_class, payload_hash, payload_json, event_hash
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "event-bundle",
+                        1,
+                        "evidence_bundle_committed",
+                        "evidence_bundle",
+                        "bundle-1",
+                        "tx-bundle",
+                        "kernel",
+                        "kernel",
+                        ts(),
+                        "v3.1-foundation",
+                        "internal",
+                        "hash-bundle",
+                        "{}",
+                        "event-hash-bundle",
+                    ),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO events (
+                      event_id, event_schema_version, event_type, entity_type, entity_id,
+                      transaction_id, actor_type, actor_id, timestamp, policy_version,
+                      data_class, payload_hash, payload_json, event_hash
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "event-plan",
+                        1,
+                        "source_plan_created",
+                        "source_plan",
+                        "plan-1",
+                        "tx-plan",
+                        "kernel",
+                        "kernel",
+                        ts(),
+                        "v3.1-foundation",
+                        "internal",
+                        "hash-plan",
+                        "{}",
+                        "event-hash-plan",
+                    ),
+                )
+                count = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+                meta = conn.execute("SELECT schema_hash FROM _schema_meta WHERE schema_name='kernel.sql'").fetchone()
+            self.assertEqual(count, 3)
+            self.assertIsNotNone(meta)
+
     def test_operator_heartbeat_constraint_rebuild_preserves_rows_and_allows_dashboard(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "operator_digest.db"
