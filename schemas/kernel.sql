@@ -157,6 +157,28 @@ CREATE TABLE IF NOT EXISTS commercial_decision_packets (
   created_at TEXT NOT NULL
 ) STRICT;
 
+CREATE TABLE IF NOT EXISTS commercial_decision_recommendations (
+  record_id TEXT PRIMARY KEY,
+  packet_id TEXT NOT NULL UNIQUE REFERENCES commercial_decision_packets(packet_id),
+  decision_id TEXT NOT NULL REFERENCES decisions(decision_id),
+  request_id TEXT NOT NULL REFERENCES research_requests(request_id),
+  evidence_bundle_id TEXT NOT NULL REFERENCES evidence_bundles(bundle_id),
+  recommendation_authority TEXT NOT NULL CHECK (recommendation_authority IN ('single_agent','council')),
+  recommendation TEXT NOT NULL CHECK (recommendation IN ('pursue','pause','reject','insufficient_evidence')),
+  confidence REAL NOT NULL CHECK (confidence >= 0.0 AND confidence <= 1.0),
+  decisive_factors_json TEXT NOT NULL CHECK (json_valid(decisive_factors_json)),
+  decisive_uncertainty TEXT NOT NULL,
+  evidence_used_json TEXT NOT NULL CHECK (json_valid(evidence_used_json)),
+  evidence_refs_json TEXT NOT NULL CHECK (json_valid(evidence_refs_json)),
+  quality_gate_context_json TEXT NOT NULL CHECK (json_valid(quality_gate_context_json)),
+  risk_flags_json TEXT NOT NULL CHECK (json_valid(risk_flags_json)),
+  operator_gate_defaults_json TEXT NOT NULL CHECK (json_valid(operator_gate_defaults_json)),
+  rationale TEXT NOT NULL,
+  model_routes_used_json TEXT NOT NULL CHECK (json_valid(model_routes_used_json)),
+  degraded INTEGER NOT NULL CHECK (degraded IN (0, 1)),
+  created_at TEXT NOT NULL
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS projects (
   project_id TEXT PRIMARY KEY,
   opportunity_id TEXT,
@@ -221,13 +243,15 @@ CREATE TABLE IF NOT EXISTS project_outcomes (
   project_id TEXT NOT NULL REFERENCES projects(project_id),
   task_id TEXT REFERENCES project_tasks(task_id),
   phase_name TEXT,
-  outcome_type TEXT NOT NULL CHECK (outcome_type IN ('validation','build_artifact','shipped_artifact','feedback','project_close')),
+  outcome_type TEXT NOT NULL CHECK (outcome_type IN ('validation','build_artifact','shipped_artifact','feedback','project_close','operate_followup')),
   summary TEXT NOT NULL,
   artifact_refs_json TEXT NOT NULL CHECK (json_valid(artifact_refs_json)),
   metrics_json TEXT NOT NULL CHECK (json_valid(metrics_json)),
   feedback_json TEXT NOT NULL CHECK (json_valid(feedback_json)),
   revenue_impact_json TEXT NOT NULL CHECK (json_valid(revenue_impact_json)),
   operator_load_actual TEXT,
+  side_effect_intent_id TEXT REFERENCES side_effect_intents(intent_id),
+  side_effect_receipt_id TEXT REFERENCES side_effect_receipts(receipt_id),
   status TEXT NOT NULL CHECK (status IN ('recorded','accepted','needs_followup')),
   created_at TEXT NOT NULL
 ) STRICT;
@@ -269,6 +293,7 @@ CREATE TABLE IF NOT EXISTS project_revenue_attributions (
   project_id TEXT NOT NULL REFERENCES projects(project_id),
   task_id TEXT REFERENCES project_tasks(task_id),
   outcome_id TEXT REFERENCES project_outcomes(outcome_id),
+  artifact_receipt_id TEXT REFERENCES project_artifact_receipts(receipt_id),
   amount_usd TEXT NOT NULL,
   source TEXT NOT NULL CHECK (source IN ('operator_reported','invoice','stripe','app_store','marketplace','platform','other')),
   attribution_period TEXT NOT NULL,
@@ -285,10 +310,30 @@ CREATE TABLE IF NOT EXISTS project_operator_load (
   project_id TEXT NOT NULL REFERENCES projects(project_id),
   task_id TEXT REFERENCES project_tasks(task_id),
   outcome_id TEXT REFERENCES project_outcomes(outcome_id),
+  artifact_receipt_id TEXT REFERENCES project_artifact_receipts(receipt_id),
   minutes INTEGER NOT NULL CHECK (minutes >= 0),
   load_type TEXT NOT NULL CHECK (load_type IN ('gate_review','client_sales','build_review','maintenance','reconciliation','other')),
   source TEXT NOT NULL,
   notes TEXT,
+  created_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS project_commercial_rollups (
+  rollup_id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(project_id),
+  revenue_reconciled_usd TEXT NOT NULL,
+  revenue_unreconciled_usd TEXT NOT NULL,
+  retained_customer_count INTEGER NOT NULL CHECK (retained_customer_count >= 0),
+  at_risk_customer_count INTEGER NOT NULL CHECK (at_risk_customer_count >= 0),
+  churned_customer_count INTEGER NOT NULL CHECK (churned_customer_count >= 0),
+  support_resolved_count INTEGER NOT NULL CHECK (support_resolved_count >= 0),
+  support_open_count INTEGER NOT NULL CHECK (support_open_count >= 0),
+  maintenance_resolved_count INTEGER NOT NULL CHECK (maintenance_resolved_count >= 0),
+  maintenance_open_count INTEGER NOT NULL CHECK (maintenance_open_count >= 0),
+  external_commitment_count INTEGER NOT NULL CHECK (external_commitment_count >= 0),
+  receiptless_side_effect_count INTEGER NOT NULL CHECK (receiptless_side_effect_count >= 0),
+  evidence_refs_json TEXT NOT NULL CHECK (json_valid(evidence_refs_json)),
+  risk_flags_json TEXT NOT NULL CHECK (json_valid(risk_flags_json)),
   created_at TEXT NOT NULL
 ) STRICT;
 
@@ -307,6 +352,8 @@ CREATE TABLE IF NOT EXISTS project_status_rollups (
   close_recommendation TEXT NOT NULL CHECK (close_recommendation IN ('continue','complete','kill','pause')),
   rationale TEXT NOT NULL,
   risk_flags_json TEXT NOT NULL CHECK (json_valid(risk_flags_json)),
+  commercial_rollup_id TEXT REFERENCES project_commercial_rollups(rollup_id),
+  commercial_rollup_json TEXT NOT NULL CHECK (json_valid(commercial_rollup_json)),
   created_at TEXT NOT NULL
 ) STRICT;
 
@@ -319,6 +366,7 @@ CREATE TABLE IF NOT EXISTS project_close_decision_packets (
   required_authority TEXT NOT NULL CHECK (required_authority IN ('rule','single_agent','council','operator_gate')),
   rationale TEXT NOT NULL,
   risk_flags_json TEXT NOT NULL CHECK (json_valid(risk_flags_json)),
+  evidence_refs_json TEXT NOT NULL CHECK (json_valid(evidence_refs_json)),
   default_on_timeout TEXT NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('gated','decided','cancelled')),
   created_at TEXT NOT NULL
@@ -335,6 +383,163 @@ CREATE TABLE IF NOT EXISTS project_replay_projection_comparisons (
   projection_revenue_attributed_usd TEXT NOT NULL,
   replay_operator_load_minutes INTEGER NOT NULL CHECK (replay_operator_load_minutes >= 0),
   projection_operator_load_minutes INTEGER NOT NULL CHECK (projection_operator_load_minutes >= 0),
+  replay_commercial_rollup_json TEXT NOT NULL CHECK (json_valid(replay_commercial_rollup_json)),
+  projection_commercial_rollup_json TEXT NOT NULL CHECK (json_valid(projection_commercial_rollup_json)),
+  matches INTEGER NOT NULL CHECK (matches IN (0, 1)),
+  mismatches_json TEXT NOT NULL CHECK (json_valid(mismatches_json)),
+  created_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS project_portfolio_decision_packets (
+  packet_id TEXT PRIMARY KEY,
+  decision_id TEXT NOT NULL UNIQUE REFERENCES decisions(decision_id),
+  scope TEXT NOT NULL,
+  project_ids_json TEXT NOT NULL CHECK (json_valid(project_ids_json)),
+  rollup_ids_json TEXT NOT NULL CHECK (json_valid(rollup_ids_json)),
+  recommendation TEXT NOT NULL CHECK (recommendation IN ('prioritize','balance','defer','pause')),
+  required_authority TEXT NOT NULL CHECK (required_authority = 'operator_gate'),
+  packet_json TEXT NOT NULL CHECK (json_valid(packet_json)),
+  tradeoffs_json TEXT NOT NULL CHECK (json_valid(tradeoffs_json)),
+  evidence_refs_json TEXT NOT NULL CHECK (json_valid(evidence_refs_json)),
+  risk_flags_json TEXT NOT NULL CHECK (json_valid(risk_flags_json)),
+  default_on_timeout TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('gated','decided','cancelled')),
+  verdict TEXT,
+  created_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS project_portfolio_replay_projection_comparisons (
+  comparison_id TEXT PRIMARY KEY,
+  packet_id TEXT NOT NULL REFERENCES project_portfolio_decision_packets(packet_id),
+  replay_packet_json TEXT NOT NULL CHECK (json_valid(replay_packet_json)),
+  projection_packet_json TEXT NOT NULL CHECK (json_valid(projection_packet_json)),
+  matches INTEGER NOT NULL CHECK (matches IN (0, 1)),
+  mismatches_json TEXT NOT NULL CHECK (json_valid(mismatches_json)),
+  created_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS project_scheduling_intents (
+  intent_id TEXT PRIMARY KEY,
+  portfolio_packet_id TEXT NOT NULL REFERENCES project_portfolio_decision_packets(packet_id),
+  source_decision_id TEXT NOT NULL REFERENCES decisions(decision_id),
+  scope TEXT NOT NULL,
+  project_ids_json TEXT NOT NULL CHECK (json_valid(project_ids_json)),
+  scheduling_window TEXT NOT NULL,
+  intent_json TEXT NOT NULL CHECK (json_valid(intent_json)),
+  queue_adjustments_json TEXT NOT NULL CHECK (json_valid(queue_adjustments_json)),
+  evidence_refs_json TEXT NOT NULL CHECK (json_valid(evidence_refs_json)),
+  risk_flags_json TEXT NOT NULL CHECK (json_valid(risk_flags_json)),
+  required_authority TEXT NOT NULL CHECK (required_authority = 'rule'),
+  authority_effect TEXT NOT NULL CHECK (authority_effect = 'internal_scheduling_recommendations_only'),
+  status TEXT NOT NULL CHECK (status IN ('recorded','superseded','cancelled')),
+  created_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS project_scheduling_priority_change_packets (
+  packet_id TEXT PRIMARY KEY,
+  intent_id TEXT NOT NULL REFERENCES project_scheduling_intents(intent_id),
+  portfolio_packet_id TEXT NOT NULL REFERENCES project_portfolio_decision_packets(packet_id),
+  source_decision_id TEXT NOT NULL REFERENCES decisions(decision_id),
+  decision_id TEXT NOT NULL UNIQUE REFERENCES decisions(decision_id),
+  scope TEXT NOT NULL,
+  project_ids_json TEXT NOT NULL CHECK (json_valid(project_ids_json)),
+  scheduling_window TEXT NOT NULL,
+  proposed_changes_json TEXT NOT NULL CHECK (json_valid(proposed_changes_json)),
+  evidence_refs_json TEXT NOT NULL CHECK (json_valid(evidence_refs_json)),
+  risk_flags_json TEXT NOT NULL CHECK (json_valid(risk_flags_json)),
+  required_authority TEXT NOT NULL CHECK (required_authority = 'operator_gate'),
+  default_on_timeout TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('gated','decided','cancelled')),
+  verdict TEXT,
+  applied_changes_json TEXT NOT NULL CHECK (json_valid(applied_changes_json)),
+  created_at TEXT NOT NULL,
+  decided_by TEXT,
+  decided_at TEXT
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS project_scheduling_priority_replay_projection_comparisons (
+  comparison_id TEXT PRIMARY KEY,
+  packet_id TEXT NOT NULL REFERENCES project_scheduling_priority_change_packets(packet_id),
+  replay_packet_json TEXT NOT NULL CHECK (json_valid(replay_packet_json)),
+  projection_packet_json TEXT NOT NULL CHECK (json_valid(projection_packet_json)),
+  matches INTEGER NOT NULL CHECK (matches IN (0, 1)),
+  mismatches_json TEXT NOT NULL CHECK (json_valid(mismatches_json)),
+  created_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS project_scheduling_replay_projection_comparisons (
+  comparison_id TEXT PRIMARY KEY,
+  intent_id TEXT NOT NULL REFERENCES project_scheduling_intents(intent_id),
+  replay_intent_json TEXT NOT NULL CHECK (json_valid(replay_intent_json)),
+  projection_intent_json TEXT NOT NULL CHECK (json_valid(projection_intent_json)),
+  matches INTEGER NOT NULL CHECK (matches IN (0, 1)),
+  mismatches_json TEXT NOT NULL CHECK (json_valid(mismatches_json)),
+  created_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS project_customer_visible_packets (
+  packet_id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(project_id),
+  outcome_id TEXT NOT NULL REFERENCES project_outcomes(outcome_id),
+  decision_id TEXT NOT NULL UNIQUE REFERENCES decisions(decision_id),
+  packet_type TEXT NOT NULL CHECK (packet_type IN ('customer_message','customer_delivery')),
+  customer_ref TEXT NOT NULL,
+  channel TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  payload_ref TEXT NOT NULL,
+  side_effect_intent_id TEXT NOT NULL REFERENCES side_effect_intents(intent_id),
+  evidence_refs_json TEXT NOT NULL CHECK (json_valid(evidence_refs_json)),
+  risk_flags_json TEXT NOT NULL CHECK (json_valid(risk_flags_json)),
+  required_authority TEXT NOT NULL CHECK (required_authority = 'operator_gate'),
+  default_on_timeout TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('gated','decided','cancelled')),
+  verdict TEXT,
+  created_at TEXT NOT NULL,
+  decided_by TEXT,
+  decided_at TEXT
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS project_customer_commitments (
+  commitment_id TEXT PRIMARY KEY,
+  packet_id TEXT NOT NULL REFERENCES project_customer_visible_packets(packet_id),
+  project_id TEXT NOT NULL REFERENCES projects(project_id),
+  outcome_id TEXT NOT NULL REFERENCES project_outcomes(outcome_id),
+  side_effect_intent_id TEXT NOT NULL REFERENCES side_effect_intents(intent_id),
+  side_effect_receipt_id TEXT NOT NULL REFERENCES side_effect_receipts(receipt_id),
+  customer_ref TEXT NOT NULL,
+  channel TEXT NOT NULL,
+  commitment_type TEXT NOT NULL CHECK (commitment_type IN ('message_sent','delivery_made')),
+  payload_ref TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  evidence_refs_json TEXT NOT NULL CHECK (json_valid(evidence_refs_json)),
+  created_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS project_customer_commitment_receipts (
+  receipt_id TEXT PRIMARY KEY,
+  commitment_id TEXT NOT NULL REFERENCES project_customer_commitments(commitment_id),
+  project_id TEXT NOT NULL REFERENCES projects(project_id),
+  receipt_type TEXT NOT NULL CHECK (receipt_type IN ('customer_response','delivery_failure','timeout','compensation_needed')),
+  source_type TEXT NOT NULL CHECK (source_type IN ('operator','customer','platform','internal_signal')),
+  customer_ref TEXT,
+  summary TEXT NOT NULL,
+  evidence_refs_json TEXT NOT NULL CHECK (json_valid(evidence_refs_json)),
+  action_required INTEGER NOT NULL CHECK (action_required IN (0, 1)),
+  status TEXT NOT NULL CHECK (status IN ('recorded','accepted','needs_followup')),
+  followup_task_id TEXT REFERENCES project_tasks(task_id),
+  created_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS project_customer_visible_replay_projection_comparisons (
+  comparison_id TEXT PRIMARY KEY,
+  packet_id TEXT NOT NULL REFERENCES project_customer_visible_packets(packet_id),
+  replay_packet_json TEXT NOT NULL CHECK (json_valid(replay_packet_json)),
+  projection_packet_json TEXT NOT NULL CHECK (json_valid(projection_packet_json)),
+  replay_commitments_json TEXT NOT NULL CHECK (json_valid(replay_commitments_json)),
+  projection_commitments_json TEXT NOT NULL CHECK (json_valid(projection_commitments_json)),
+  replay_commitment_receipts_json TEXT NOT NULL CHECK (json_valid(replay_commitment_receipts_json)),
+  projection_commitment_receipts_json TEXT NOT NULL CHECK (json_valid(projection_commitment_receipts_json)),
   matches INTEGER NOT NULL CHECK (matches IN (0, 1)),
   mismatches_json TEXT NOT NULL CHECK (json_valid(mismatches_json)),
   created_at TEXT NOT NULL
@@ -618,6 +823,8 @@ CREATE INDEX IF NOT EXISTS idx_evidence_bundles_request ON evidence_bundles(requ
 CREATE INDEX IF NOT EXISTS idx_evidence_bundles_quality ON evidence_bundles(quality_gate_result, confidence);
 CREATE INDEX IF NOT EXISTS idx_commercial_decision_packets_target ON commercial_decision_packets(decision_target, status, created_at);
 CREATE INDEX IF NOT EXISTS idx_commercial_decision_packets_bundle ON commercial_decision_packets(evidence_bundle_id);
+CREATE INDEX IF NOT EXISTS idx_commercial_decision_recommendations_packet ON commercial_decision_recommendations(packet_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_commercial_decision_recommendations_authority ON commercial_decision_recommendations(recommendation_authority, created_at);
 CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_projects_packet ON projects(decision_packet_id);
 CREATE INDEX IF NOT EXISTS idx_project_tasks_project_status ON project_tasks(project_id, status, created_at);
@@ -634,9 +841,25 @@ CREATE INDEX IF NOT EXISTS idx_project_revenue_attributions_project ON project_r
 CREATE INDEX IF NOT EXISTS idx_project_revenue_attributions_status ON project_revenue_attributions(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_project_operator_load_project ON project_operator_load(project_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_project_operator_load_type ON project_operator_load(load_type, created_at);
+CREATE INDEX IF NOT EXISTS idx_project_commercial_rollups_project ON project_commercial_rollups(project_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_project_status_rollups_project ON project_status_rollups(project_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_project_close_decision_packets_project ON project_close_decision_packets(project_id, status, created_at);
 CREATE INDEX IF NOT EXISTS idx_project_replay_projection_comparisons_project ON project_replay_projection_comparisons(project_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_project_portfolio_decision_packets_status ON project_portfolio_decision_packets(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_project_portfolio_replay_projection_packet ON project_portfolio_replay_projection_comparisons(packet_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_project_scheduling_intents_packet ON project_scheduling_intents(portfolio_packet_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_project_scheduling_intents_status ON project_scheduling_intents(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_project_scheduling_priority_packets_intent ON project_scheduling_priority_change_packets(intent_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_project_scheduling_priority_packets_status ON project_scheduling_priority_change_packets(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_project_scheduling_priority_replay_projection_packet ON project_scheduling_priority_replay_projection_comparisons(packet_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_project_scheduling_replay_projection_intent ON project_scheduling_replay_projection_comparisons(intent_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_project_customer_visible_packets_project ON project_customer_visible_packets(project_id, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_project_customer_visible_packets_outcome ON project_customer_visible_packets(outcome_id, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_project_customer_commitments_project ON project_customer_commitments(project_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_project_customer_commitments_packet ON project_customer_commitments(packet_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_project_customer_commitment_receipts_project ON project_customer_commitment_receipts(project_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_project_customer_commitment_receipts_commitment ON project_customer_commitment_receipts(commitment_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_project_customer_visible_replay_projection_packet ON project_customer_visible_replay_projection_comparisons(packet_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_model_task_classes_status ON model_task_classes(status, task_class);
 CREATE INDEX IF NOT EXISTS idx_model_candidates_state ON model_candidates(promotion_state, provider, hardware_fit);
 CREATE INDEX IF NOT EXISTS idx_model_holdout_policies_task ON model_holdout_policies(task_class, dataset_version);

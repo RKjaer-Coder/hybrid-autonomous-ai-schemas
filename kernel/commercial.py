@@ -4,18 +4,29 @@ from typing import Any
 
 from .records import (
     Command,
+    CommercialDecisionRecommendationRecord,
     Decision,
     OpportunityProjectDecisionPacket,
     Project,
     ProjectArtifactReceipt,
     ProjectCloseDecisionPacket,
+    ProjectCustomerCommitmentReceipt,
     ProjectCustomerFeedback,
+    ProjectCustomerVisiblePacket,
+    ProjectCustomerVisibleReplayProjectionComparison,
     ProjectOperatorLoadRecord,
     ProjectOutcome,
+    ProjectPortfolioDecisionPacket,
+    ProjectPortfolioReplayProjectionComparison,
     ProjectReplayProjectionComparison,
     ProjectRevenueAttribution,
+    ProjectSchedulingIntent,
+    ProjectSchedulingPriorityChangePacket,
+    ProjectSchedulingPriorityReplayProjectionComparison,
+    ProjectSchedulingReplayProjectionComparison,
     ProjectStatusRollup,
     ProjectTask,
+    ProjectTaskAssignment,
     new_id,
 )
 from .store import KERNEL_POLICY_VERSION, KernelStore
@@ -144,6 +155,8 @@ class KernelCommercialResearchWorkflow:
             "rollback_or_compensation": "No external commitments are authorized by this packet; keep project proposed.",
             "authority_policy_version": KERNEL_POLICY_VERSION,
             "freshness_summary": row["freshness_summary"],
+            "quality_gate_result": row["quality_gate_result"],
+            "unsupported_claims": unsupported_claims,
         }
         decision_id = new_id()
         decision = Decision(
@@ -187,11 +200,73 @@ class KernelCommercialResearchWorkflow:
             default_on_timeout="pause",
             status="gated",
         )
+        deliberation_record = _commercial_deliberation_record(
+            packet=packet,
+            confidence=float(row["confidence"]),
+            uncertainty=row["uncertainty"],
+            quality_gate_context=_quality_gate_context(self.store, row["bundle_id"]),
+            source_refs=source_refs,
+        )
         self.store.execute_command(
             command,
-            lambda tx: (tx.create_decision(decision), tx.create_commercial_decision_packet(packet))[1],
+            lambda tx: (
+                tx.create_decision(decision),
+                tx.create_commercial_decision_packet(packet),
+                tx.create_commercial_decision_recommendation(deliberation_record),
+            )[1],
         )
         return packet
+
+    def create_deliberation_recommendation(
+        self,
+        command: Command,
+        packet_id: str,
+    ) -> CommercialDecisionRecommendationRecord:
+        with self.store.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                  p.packet_id, p.decision_id, p.request_id, p.evidence_bundle_id,
+                  p.recommendation, p.gate_packet_json, p.evidence_used_json,
+                  p.risk_flags_json, p.default_on_timeout, d.confidence,
+                  d.decisive_uncertainty, e.sources_json
+                FROM commercial_decision_packets p
+                JOIN decisions d ON d.decision_id = p.decision_id
+                JOIN evidence_bundles e ON e.bundle_id = p.evidence_bundle_id
+                WHERE p.packet_id=?
+                """,
+                (packet_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError("commercial decision packet not found")
+        gate_packet = _loads(row["gate_packet_json"])
+        sources = _loads(row["sources_json"])
+        packet = OpportunityProjectDecisionPacket(
+            packet_id=row["packet_id"],
+            decision_id=row["decision_id"],
+            request_id=row["request_id"],
+            evidence_bundle_id=row["evidence_bundle_id"],
+            decision_target=gate_packet.get("decision_target", "existing-packet"),
+            question=gate_packet["question"],
+            recommendation=row["recommendation"],
+            required_authority="operator_gate",
+            opportunity={},
+            project={},
+            gate_packet=gate_packet,
+            evidence_used=_loads(row["evidence_used_json"]),
+            risk_flags=_loads(row["risk_flags_json"]),
+            default_on_timeout=row["default_on_timeout"],
+            status="gated",
+        )
+        record = _commercial_deliberation_record(
+            packet=packet,
+            confidence=float(row["confidence"] or 0.0),
+            uncertainty=row["decisive_uncertainty"] or gate_packet.get("uncertainty", ""),
+            quality_gate_context=_quality_gate_context(self.store, row["evidence_bundle_id"]),
+            source_refs=[source["url_or_ref"] for source in sources],
+        )
+        self.store.create_commercial_decision_recommendation(command, record)
+        return record
 
     def approve_g1_validation_project(
         self,
@@ -293,11 +368,107 @@ class KernelCommercialResearchWorkflow:
     def record_project_customer_feedback(self, command: Command, feedback: ProjectCustomerFeedback) -> str:
         return self.store.record_project_customer_feedback(command, feedback)
 
+    def record_project_customer_commitment_receipt(
+        self,
+        command: Command,
+        receipt: ProjectCustomerCommitmentReceipt,
+    ) -> dict[str, str | None]:
+        if command.requested_by in {"agent", "model", "tool"}:
+            raise PermissionError("workers cannot record customer commitment receipts")
+        return self.store.record_project_customer_commitment_receipt(command, receipt)
+
     def record_project_revenue_attribution(self, command: Command, attribution: ProjectRevenueAttribution) -> str:
         return self.store.record_project_revenue_attribution(command, attribution)
 
     def record_project_operator_load(self, command: Command, load: ProjectOperatorLoadRecord) -> str:
         return self.store.record_project_operator_load(command, load)
+
+    def record_project_post_ship_evidence(
+        self,
+        command: Command,
+        artifact_receipt_id: str,
+        *,
+        feedback: ProjectCustomerFeedback,
+        revenue: ProjectRevenueAttribution,
+        operator_load: ProjectOperatorLoadRecord,
+    ) -> dict[str, str]:
+        return self.store.record_project_post_ship_evidence(
+            command,
+            artifact_receipt_id,
+            feedback=feedback,
+            revenue=revenue,
+            operator_load=operator_load,
+        )
+
+    def record_project_followup_delivery(
+        self,
+        command: Command,
+        task_id: str,
+        *,
+        artifact_ref: str,
+        summary: str,
+        data_class: str = "internal",
+        delivery_channel: str = "local_workspace",
+        side_effect_intent_id: str | None = None,
+        side_effect_receipt_id: str | None = None,
+        customer_visible: bool = False,
+        metrics: dict[str, Any] | None = None,
+        feedback: dict[str, Any] | None = None,
+        revenue_impact: dict[str, Any] | None = None,
+        operator_load_actual: str | None = None,
+        next_recommendation: str | None = None,
+    ) -> dict[str, Any]:
+        return self.store.record_project_followup_delivery(
+            command,
+            task_id,
+            artifact_ref=artifact_ref,
+            summary=summary,
+            data_class=data_class,
+            delivery_channel=delivery_channel,
+            side_effect_intent_id=side_effect_intent_id,
+            side_effect_receipt_id=side_effect_receipt_id,
+            customer_visible=customer_visible,
+            metrics=metrics,
+            feedback=feedback,
+            revenue_impact=revenue_impact,
+            operator_load_actual=operator_load_actual,
+            next_recommendation=next_recommendation,
+        )
+
+    def record_project_operate_followup_outcome(
+        self,
+        command: Command,
+        task_id: str,
+        *,
+        summary: str,
+        internal_result_ref: str,
+        operator_load_minutes: int,
+        operator_load_source: str,
+        operate_followup_type: str | None = None,
+        metrics: dict[str, Any] | None = None,
+        result: dict[str, Any] | None = None,
+        revenue_impact: dict[str, Any] | None = None,
+        side_effect_intent_id: str | None = None,
+        side_effect_receipt_id: str | None = None,
+        external_commitment_change: bool = False,
+        operator_load_notes: str | None = None,
+    ) -> dict[str, Any]:
+        return self.store.record_project_operate_followup_outcome(
+            command,
+            task_id,
+            summary=summary,
+            internal_result_ref=internal_result_ref,
+            operator_load_minutes=operator_load_minutes,
+            operator_load_source=operator_load_source,
+            operate_followup_type=operate_followup_type,
+            metrics=metrics,
+            result=result,
+            revenue_impact=revenue_impact,
+            side_effect_intent_id=side_effect_intent_id,
+            side_effect_receipt_id=side_effect_receipt_id,
+            external_commitment_change=external_commitment_change,
+            operator_load_notes=operator_load_notes,
+        )
 
     def derive_project_status_rollup(self, command: Command, project_id: str) -> ProjectStatusRollup:
         return self.store.derive_project_status_rollup(command, project_id)
@@ -311,12 +482,316 @@ class KernelCommercialResearchWorkflow:
     ) -> ProjectCloseDecisionPacket:
         return self.store.create_project_close_decision(command, project_id, rollup_id=rollup_id)
 
+    def resolve_project_close_decision(
+        self,
+        command: Command,
+        packet_id: str,
+        *,
+        verdict: str,
+        operator_id: str = "operator",
+        notes: str | None = None,
+        confidence: float | None = None,
+    ) -> dict[str, Any]:
+        return self.store.resolve_project_close_decision(
+            command,
+            packet_id,
+            verdict=verdict,
+            decided_by=operator_id,
+            notes=notes,
+            confidence=confidence,
+        )
+
     def compare_project_replay_to_projection(
         self,
         command: Command,
         project_id: str,
     ) -> ProjectReplayProjectionComparison:
         return self.store.compare_project_replay_to_projection(command, project_id)
+
+    def create_project_portfolio_decision_packet(
+        self,
+        command: Command,
+        project_ids: list[str],
+        *,
+        scope: str = "active_commercial_projects",
+        constraints: dict[str, Any] | None = None,
+    ) -> ProjectPortfolioDecisionPacket:
+        return self.store.create_project_portfolio_decision_packet(
+            command,
+            project_ids,
+            scope=scope,
+            constraints=constraints,
+        )
+
+    def resolve_project_portfolio_decision(
+        self,
+        command: Command,
+        packet_id: str,
+        *,
+        verdict: str,
+        operator_id: str = "operator",
+        notes: str | None = None,
+        confidence: float | None = None,
+    ) -> dict[str, Any]:
+        return self.store.resolve_project_portfolio_decision(
+            command,
+            packet_id,
+            verdict=verdict,
+            decided_by=operator_id,
+            notes=notes,
+            confidence=confidence,
+        )
+
+    def compare_project_portfolio_replay_to_projection(
+        self,
+        command: Command,
+        packet_id: str,
+    ) -> ProjectPortfolioReplayProjectionComparison:
+        return self.store.compare_project_portfolio_replay_to_projection(command, packet_id)
+
+    def create_project_scheduling_intent(
+        self,
+        command: Command,
+        packet_id: str,
+        *,
+        scheduling_window: str = "next_internal_cycle",
+    ) -> ProjectSchedulingIntent:
+        return self.store.create_project_scheduling_intent(
+            command,
+            packet_id,
+            scheduling_window=scheduling_window,
+        )
+
+    def compare_project_scheduling_replay_to_projection(
+        self,
+        command: Command,
+        intent_id: str,
+    ) -> ProjectSchedulingReplayProjectionComparison:
+        return self.store.compare_project_scheduling_replay_to_projection(command, intent_id)
+
+    def create_project_scheduling_priority_change_packet(
+        self,
+        command: Command,
+        intent_id: str,
+    ) -> ProjectSchedulingPriorityChangePacket:
+        return self.store.create_project_scheduling_priority_change_packet(command, intent_id)
+
+    def resolve_project_scheduling_priority_change_packet(
+        self,
+        command: Command,
+        packet_id: str,
+        *,
+        verdict: str,
+        operator_id: str = "operator",
+        notes: str | None = None,
+        confidence: float | None = None,
+    ) -> dict[str, Any]:
+        return self.store.resolve_project_scheduling_priority_change_packet(
+            command,
+            packet_id,
+            verdict=verdict,
+            decided_by=operator_id,
+            notes=notes,
+            confidence=confidence,
+        )
+
+    def compare_project_scheduling_priority_replay_to_projection(
+        self,
+        command: Command,
+        packet_id: str,
+    ) -> ProjectSchedulingPriorityReplayProjectionComparison:
+        return self.store.compare_project_scheduling_priority_replay_to_projection(command, packet_id)
+
+    def create_project_customer_visible_packet(
+        self,
+        command: Command,
+        outcome_id: str,
+        *,
+        packet_type: str,
+        customer_ref: str,
+        channel: str,
+        subject: str,
+        summary: str,
+        payload_ref: str,
+        side_effect_intent_id: str,
+    ) -> ProjectCustomerVisiblePacket:
+        if command.requested_by in {"agent", "model", "tool"}:
+            raise PermissionError("autonomous/customer-visible packet preparation is blocked")
+        if command.requested_authority != "operator_gate":
+            raise PermissionError("customer-visible packets require operator-gate authority")
+        return self.store.create_project_customer_visible_packet(
+            command,
+            outcome_id,
+            packet_type=packet_type,
+            customer_ref=customer_ref,
+            channel=channel,
+            subject=subject,
+            summary=summary,
+            payload_ref=payload_ref,
+            side_effect_intent_id=side_effect_intent_id,
+        )
+
+    def resolve_project_customer_visible_packet(
+        self,
+        command: Command,
+        packet_id: str,
+        *,
+        verdict: str,
+        side_effect_receipt_id: str | None = None,
+        operator_id: str = "operator",
+        notes: str | None = None,
+        confidence: float | None = None,
+    ) -> dict[str, Any]:
+        if command.requested_by != "operator" or command.requested_authority != "operator_gate":
+            raise PermissionError("customer-visible packet resolution requires operator-gate authority")
+        return self.store.resolve_project_customer_visible_packet(
+            command,
+            packet_id,
+            verdict=verdict,
+            side_effect_receipt_id=side_effect_receipt_id,
+            decided_by=operator_id,
+            notes=notes,
+            confidence=confidence,
+        )
+
+    def compare_project_customer_visible_replay_to_projection(
+        self,
+        command: Command,
+        packet_id: str,
+    ) -> ProjectCustomerVisibleReplayProjectionComparison:
+        return self.store.compare_project_customer_visible_replay_to_projection(command, packet_id)
+
+    def create_project_scheduling_worker_assignment_packet(
+        self,
+        command: Command,
+        task_id: str,
+        *,
+        worker_id: str,
+        grant_ids: list[str],
+        worker_type: str = "agent",
+        route_decision_id: str | None = None,
+        notes: str | None = None,
+    ) -> str:
+        if command.requested_by in {"agent", "model"}:
+            raise PermissionError("workers cannot self-assign scheduling-created tasks")
+        if command.requested_authority != "rule":
+            raise PermissionError("scheduling worker assignment packets require rule authority")
+        blocked = {
+            "autonomous_assignment",
+            "autonomous_queue_mutation",
+            "customer_commitment_requested",
+            "external_side_effect_requested",
+        }
+        if any(command.payload.get(flag) for flag in blocked):
+            raise PermissionError("scheduling assignment packets cannot authorize autonomous assignment or customer side effects")
+        with self.store.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT project_id, inputs_json
+                FROM project_tasks
+                WHERE task_id=?
+                """,
+                (task_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError("scheduling worker assignment requires an existing task")
+        inputs = _loads(row["inputs_json"])
+        if not inputs.get("scheduling_priority_packet_id"):
+            raise ValueError("scheduling worker assignment packets are only for scheduling priority-created tasks")
+        if inputs.get("customer_commitments_allowed") or inputs.get("customer_visible") or inputs.get("external_side_effects_authorized"):
+            raise PermissionError("scheduling worker assignment packets cannot authorize customer commitments or side effects")
+        assignment = ProjectTaskAssignment(
+            task_id=task_id,
+            project_id=row["project_id"],
+            worker_type=worker_type,  # type: ignore[arg-type]
+            worker_id=worker_id,
+            route_decision_id=route_decision_id,
+            grant_ids=grant_ids,
+            accepted_capabilities=[],
+            status="assigned",
+            notes=notes or "scheduler prepared governed assignment packet; worker acceptance still required",
+        )
+        return self.store.assign_project_task(command, assignment)
+
+    def resolve_project_scheduling_worker_assignment(
+        self,
+        command: Command,
+        assignment_id: str,
+        *,
+        verdict: str,
+        worker_id: str,
+        accepted_capabilities: list[dict[str, Any]] | None = None,
+        notes: str | None = None,
+    ) -> str:
+        if verdict not in {"accept", "reject"}:
+            raise ValueError("scheduling worker assignment verdict must be accept or reject")
+        if command.requested_by != "agent":
+            raise PermissionError("scheduling worker assignment resolution requires worker acceptance evidence")
+        if command.payload.get("customer_commitment_requested") or command.payload.get("external_side_effect_requested"):
+            raise PermissionError("scheduling worker assignment resolution cannot authorize customer commitments or side effects")
+        with self.store.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT assignment_id, task_id, project_id, worker_type, worker_id,
+                       route_decision_id, grant_ids_json
+                FROM project_task_assignments
+                WHERE assignment_id=?
+                """,
+                (assignment_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError("scheduling worker assignment packet not found")
+        if row["worker_id"] != worker_id:
+            raise PermissionError("worker acceptance evidence does not match assignment packet")
+        assignment = ProjectTaskAssignment(
+            assignment_id=assignment_id,
+            task_id=row["task_id"],
+            project_id=row["project_id"],
+            worker_type=row["worker_type"],
+            worker_id=row["worker_id"],
+            route_decision_id=row["route_decision_id"],
+            grant_ids=_loads(row["grant_ids_json"]),
+            accepted_capabilities=accepted_capabilities or [],
+            status="accepted" if verdict == "accept" else "rejected",
+            notes=notes or f"worker {verdict}ed scheduling-created task",
+        )
+        return self.store.assign_project_task(command, assignment)
+
+    def record_project_scheduling_task_outcome(
+        self,
+        command: Command,
+        task_id: str,
+        *,
+        summary: str,
+        internal_result_ref: str,
+        result: dict[str, Any] | None = None,
+        metrics: dict[str, Any] | None = None,
+        revenue_impact: dict[str, Any] | None = None,
+        side_effect_intent_id: str | None = None,
+        side_effect_receipt_id: str | None = None,
+        external_commitment_change: bool = False,
+    ) -> dict[str, Any]:
+        if command.requested_by in {"agent", "model"} and (
+            command.payload.get("customer_commitment_requested")
+            or command.payload.get("customer_visible")
+            or command.payload.get("external_side_effect_requested")
+            or external_commitment_change
+            or side_effect_intent_id
+            or side_effect_receipt_id
+        ):
+            raise PermissionError("autonomous scheduling outcomes cannot create customer commitments or side effects")
+        return self.store.record_project_scheduling_task_outcome(
+            command,
+            task_id,
+            summary=summary,
+            internal_result_ref=internal_result_ref,
+            result=result,
+            metrics=metrics,
+            revenue_impact=revenue_impact,
+            side_effect_intent_id=side_effect_intent_id,
+            side_effect_receipt_id=side_effect_receipt_id,
+            external_commitment_change=external_commitment_change,
+        )
 
 
 def commercial_decision_packet_command(
@@ -335,6 +810,25 @@ def commercial_decision_packet_command(
         requested_authority="operator_gate",
         idempotency_key=key or f"commercial-decision-packet:{evidence_bundle_id}:{new_id()}",
         payload=payload or {"evidence_bundle_id": evidence_bundle_id},
+    )
+
+
+def commercial_deliberation_recommendation_command(
+    *,
+    packet_id: str,
+    key: str | None = None,
+    payload: dict[str, Any] | None = None,
+    requester_id: str = "kernel",
+) -> Command:
+    return Command(
+        command_type="commercial.deliberation_recommendation",
+        requested_by="kernel",
+        requester_id=requester_id,
+        target_entity_type="decision",
+        target_entity_id=packet_id,
+        requested_authority=None,
+        idempotency_key=key or f"commercial-deliberation-recommendation:{packet_id}:{new_id()}",
+        payload=payload or {"packet_id": packet_id},
     )
 
 
@@ -468,6 +962,69 @@ def project_operator_load_command(
     )
 
 
+def project_post_ship_evidence_command(
+    *,
+    project_id: str,
+    artifact_receipt_id: str,
+    key: str | None = None,
+    payload: dict[str, Any] | None = None,
+    requester_id: str = "operator",
+) -> Command:
+    return Command(
+        command_type="commercial.project_post_ship_evidence",
+        requested_by="operator",
+        requester_id=requester_id,
+        target_entity_type="artifact",
+        target_entity_id=artifact_receipt_id,
+        idempotency_key=key or f"commercial-project-post-ship:{project_id}:{artifact_receipt_id}:{new_id()}",
+        payload=payload or {"project_id": project_id, "artifact_receipt_id": artifact_receipt_id},
+    )
+
+
+def project_followup_delivery_command(
+    *,
+    project_id: str,
+    task_id: str,
+    key: str | None = None,
+    payload: dict[str, Any] | None = None,
+    requester_id: str = "kernel",
+    requested_by: str = "kernel",
+    requested_authority: str | None = None,
+) -> Command:
+    return Command(
+        command_type="commercial.project_followup_delivery",
+        requested_by=requested_by,  # type: ignore[arg-type]
+        requester_id=requester_id,
+        target_entity_type="artifact",
+        target_entity_id=task_id,
+        requested_authority=requested_authority,  # type: ignore[arg-type]
+        idempotency_key=key or f"commercial-project-followup-delivery:{project_id}:{task_id}:{new_id()}",
+        payload=payload or {"project_id": project_id, "task_id": task_id},
+    )
+
+
+def project_operate_followup_outcome_command(
+    *,
+    project_id: str,
+    task_id: str,
+    key: str | None = None,
+    payload: dict[str, Any] | None = None,
+    requester_id: str = "kernel",
+    requested_by: str = "kernel",
+    requested_authority: str | None = None,
+) -> Command:
+    return Command(
+        command_type="commercial.project_operate_followup_outcome",
+        requested_by=requested_by,  # type: ignore[arg-type]
+        requester_id=requester_id,
+        target_entity_type="project",
+        target_entity_id=task_id,
+        requested_authority=requested_authority,  # type: ignore[arg-type]
+        idempotency_key=key or f"commercial-project-operate-followup-outcome:{project_id}:{task_id}:{new_id()}",
+        payload=payload or {"project_id": project_id, "task_id": task_id},
+    )
+
+
 def project_status_rollup_command(
     *,
     project_id: str,
@@ -505,6 +1062,26 @@ def project_close_decision_command(
     )
 
 
+def project_close_resolution_command(
+    *,
+    packet_id: str,
+    verdict: str,
+    key: str | None = None,
+    payload: dict[str, Any] | None = None,
+    requester_id: str = "operator",
+) -> Command:
+    return Command(
+        command_type="commercial.project_close_resolution",
+        requested_by="operator",
+        requester_id=requester_id,
+        target_entity_type="decision",
+        target_entity_id=packet_id,
+        requested_authority="operator_gate",
+        idempotency_key=key or f"commercial-project-close-resolution:{packet_id}:{verdict}:{new_id()}",
+        payload=payload or {"packet_id": packet_id, "verdict": verdict},
+    )
+
+
 def project_replay_comparison_command(
     *,
     project_id: str,
@@ -523,6 +1100,306 @@ def project_replay_comparison_command(
     )
 
 
+def project_portfolio_packet_command(
+    *,
+    project_ids: list[str],
+    key: str | None = None,
+    payload: dict[str, Any] | None = None,
+    requester_id: str = "kernel",
+    requested_by: str = "kernel",
+    requested_authority: str = "operator_gate",
+) -> Command:
+    return Command(
+        command_type="commercial.project_portfolio_packet",
+        requested_by=requested_by,  # type: ignore[arg-type]
+        requester_id=requester_id,
+        target_entity_type="decision",
+        target_entity_id="portfolio",
+        requested_authority=requested_authority,  # type: ignore[arg-type]
+        idempotency_key=key or f"commercial-project-portfolio:{new_id()}",
+        payload=payload or {"project_ids": project_ids},
+    )
+
+
+def project_portfolio_resolution_command(
+    *,
+    packet_id: str,
+    verdict: str,
+    key: str | None = None,
+    payload: dict[str, Any] | None = None,
+    requester_id: str = "operator",
+) -> Command:
+    return Command(
+        command_type="commercial.project_portfolio_resolution",
+        requested_by="operator",
+        requester_id=requester_id,
+        target_entity_type="decision",
+        target_entity_id=packet_id,
+        requested_authority="operator_gate",
+        idempotency_key=key or f"commercial-project-portfolio-resolution:{packet_id}:{verdict}:{new_id()}",
+        payload=payload or {"packet_id": packet_id, "verdict": verdict},
+    )
+
+
+def project_portfolio_replay_comparison_command(
+    *,
+    packet_id: str,
+    key: str | None = None,
+    payload: dict[str, Any] | None = None,
+    requester_id: str = "kernel",
+) -> Command:
+    return Command(
+        command_type="commercial.project_portfolio_replay_comparison",
+        requested_by="kernel",
+        requester_id=requester_id,
+        target_entity_type="project",
+        target_entity_id=packet_id,
+        idempotency_key=key or f"commercial-project-portfolio-compare:{packet_id}:{new_id()}",
+        payload=payload or {"packet_id": packet_id},
+    )
+
+
+def project_scheduling_intent_command(
+    *,
+    packet_id: str,
+    key: str | None = None,
+    payload: dict[str, Any] | None = None,
+    requester_id: str = "scheduler",
+    requested_by: str = "scheduler",
+    requested_authority: str = "rule",
+) -> Command:
+    return Command(
+        command_type="commercial.project_scheduling_intent",
+        requested_by=requested_by,  # type: ignore[arg-type]
+        requester_id=requester_id,
+        target_entity_type="task",
+        target_entity_id=packet_id,
+        requested_authority=requested_authority,  # type: ignore[arg-type]
+        idempotency_key=key or f"commercial-project-scheduling:{packet_id}:{new_id()}",
+        payload=payload or {"packet_id": packet_id},
+    )
+
+
+def project_scheduling_replay_comparison_command(
+    *,
+    intent_id: str,
+    key: str | None = None,
+    payload: dict[str, Any] | None = None,
+    requester_id: str = "kernel",
+) -> Command:
+    return Command(
+        command_type="commercial.project_scheduling_replay_comparison",
+        requested_by="kernel",
+        requester_id=requester_id,
+        target_entity_type="task",
+        target_entity_id=intent_id,
+        idempotency_key=key or f"commercial-project-scheduling-compare:{intent_id}:{new_id()}",
+        payload=payload or {"intent_id": intent_id},
+    )
+
+
+def project_scheduling_priority_packet_command(
+    *,
+    intent_id: str,
+    key: str | None = None,
+    payload: dict[str, Any] | None = None,
+    requester_id: str = "scheduler",
+    requested_by: str = "scheduler",
+    requested_authority: str = "operator_gate",
+) -> Command:
+    return Command(
+        command_type="commercial.project_scheduling_priority_packet",
+        requested_by=requested_by,  # type: ignore[arg-type]
+        requester_id=requester_id,
+        target_entity_type="decision",
+        target_entity_id=intent_id,
+        requested_authority=requested_authority,  # type: ignore[arg-type]
+        idempotency_key=key or f"commercial-project-scheduling-priority-packet:{intent_id}:{new_id()}",
+        payload=payload or {"intent_id": intent_id},
+    )
+
+
+def project_scheduling_priority_resolution_command(
+    *,
+    packet_id: str,
+    verdict: str,
+    key: str | None = None,
+    payload: dict[str, Any] | None = None,
+    requester_id: str = "operator",
+) -> Command:
+    return Command(
+        command_type="commercial.project_scheduling_priority_resolution",
+        requested_by="operator",
+        requester_id=requester_id,
+        target_entity_type="decision",
+        target_entity_id=packet_id,
+        requested_authority="operator_gate",
+        idempotency_key=key or f"commercial-project-scheduling-priority-resolution:{packet_id}:{verdict}:{new_id()}",
+        payload=payload or {"packet_id": packet_id, "verdict": verdict},
+    )
+
+
+def project_scheduling_priority_replay_comparison_command(
+    *,
+    packet_id: str,
+    key: str | None = None,
+    payload: dict[str, Any] | None = None,
+    requester_id: str = "kernel",
+) -> Command:
+    return Command(
+        command_type="commercial.project_scheduling_priority_replay_comparison",
+        requested_by="kernel",
+        requester_id=requester_id,
+        target_entity_type="task",
+        target_entity_id=packet_id,
+        idempotency_key=key or f"commercial-project-scheduling-priority-compare:{packet_id}:{new_id()}",
+        payload=payload or {"packet_id": packet_id},
+    )
+
+
+def project_customer_visible_packet_command(
+    *,
+    outcome_id: str,
+    key: str | None = None,
+    payload: dict[str, Any] | None = None,
+    requester_id: str = "kernel",
+    requested_by: str = "kernel",
+    requested_authority: str = "operator_gate",
+) -> Command:
+    return Command(
+        command_type="commercial.project_customer_visible_packet",
+        requested_by=requested_by,  # type: ignore[arg-type]
+        requester_id=requester_id,
+        target_entity_type="decision",
+        target_entity_id=outcome_id,
+        requested_authority=requested_authority,  # type: ignore[arg-type]
+        idempotency_key=key or f"commercial-project-customer-visible-packet:{outcome_id}:{new_id()}",
+        payload=payload or {"outcome_id": outcome_id},
+    )
+
+
+def project_customer_visible_resolution_command(
+    *,
+    packet_id: str,
+    verdict: str,
+    key: str | None = None,
+    payload: dict[str, Any] | None = None,
+    requester_id: str = "operator",
+    requested_by: str = "operator",
+    requested_authority: str = "operator_gate",
+) -> Command:
+    return Command(
+        command_type="commercial.project_customer_visible_resolution",
+        requested_by=requested_by,  # type: ignore[arg-type]
+        requester_id=requester_id,
+        target_entity_type="decision",
+        target_entity_id=packet_id,
+        requested_authority=requested_authority,  # type: ignore[arg-type]
+        idempotency_key=key or f"commercial-project-customer-visible-resolution:{packet_id}:{verdict}:{new_id()}",
+        payload=payload or {"packet_id": packet_id, "verdict": verdict},
+    )
+
+
+def project_customer_visible_replay_comparison_command(
+    *,
+    packet_id: str,
+    key: str | None = None,
+    payload: dict[str, Any] | None = None,
+    requester_id: str = "kernel",
+) -> Command:
+    return Command(
+        command_type="commercial.project_customer_visible_replay_comparison",
+        requested_by="kernel",
+        requester_id=requester_id,
+        target_entity_type="project",
+        target_entity_id=packet_id,
+        idempotency_key=key or f"commercial-project-customer-visible-compare:{packet_id}:{new_id()}",
+        payload=payload or {"packet_id": packet_id},
+    )
+
+
+def project_customer_commitment_receipt_command(
+    *,
+    commitment_id: str,
+    key: str | None = None,
+    payload: dict[str, Any] | None = None,
+    requester_id: str = "operator",
+    requested_by: str = "operator",
+) -> Command:
+    return Command(
+        command_type="commercial.project_customer_commitment_receipt",
+        requested_by=requested_by,  # type: ignore[arg-type]
+        requester_id=requester_id,
+        target_entity_type="project",
+        target_entity_id=commitment_id,
+        idempotency_key=key or f"commercial-project-customer-commitment-receipt:{commitment_id}:{new_id()}",
+        payload=payload or {"commitment_id": commitment_id},
+    )
+
+
+def project_scheduling_assignment_packet_command(
+    *,
+    task_id: str,
+    key: str | None = None,
+    payload: dict[str, Any] | None = None,
+    requester_id: str = "scheduler",
+    requested_by: str = "scheduler",
+    requested_authority: str = "rule",
+) -> Command:
+    return Command(
+        command_type="commercial.project_scheduling_assignment_packet",
+        requested_by=requested_by,  # type: ignore[arg-type]
+        requester_id=requester_id,
+        target_entity_type="task",
+        target_entity_id=task_id,
+        requested_authority=requested_authority,  # type: ignore[arg-type]
+        idempotency_key=key or f"commercial-project-scheduling-assignment:{task_id}:{new_id()}",
+        payload=payload or {"task_id": task_id},
+    )
+
+
+def project_scheduling_assignment_resolution_command(
+    *,
+    assignment_id: str,
+    verdict: str,
+    key: str | None = None,
+    payload: dict[str, Any] | None = None,
+    requester_id: str = "worker",
+) -> Command:
+    return Command(
+        command_type="commercial.project_scheduling_assignment_resolution",
+        requested_by="agent",
+        requester_id=requester_id,
+        target_entity_type="task",
+        target_entity_id=assignment_id,
+        requested_authority="rule",
+        idempotency_key=key or f"commercial-project-scheduling-assignment-resolution:{assignment_id}:{verdict}:{new_id()}",
+        payload=payload or {"assignment_id": assignment_id, "verdict": verdict},
+    )
+
+
+def project_scheduling_task_outcome_command(
+    *,
+    project_id: str,
+    task_id: str,
+    key: str | None = None,
+    payload: dict[str, Any] | None = None,
+    requested_by: str = "agent",
+    requester_id: str = "worker",
+    requested_authority: str = "rule",
+) -> Command:
+    return Command(
+        command_type="commercial.project_scheduling_task_outcome",
+        requested_by=requested_by,  # type: ignore[arg-type]
+        requester_id=requester_id,
+        target_entity_type="project",
+        target_entity_id=project_id,
+        requested_authority=requested_authority,  # type: ignore[arg-type]
+        idempotency_key=key or f"commercial-project-scheduling-task-outcome:{task_id}:{new_id()}",
+        payload=payload or {"project_id": project_id, "task_id": task_id},
+    )
+
+
 def _loads(value: str) -> Any:
     import json
 
@@ -536,7 +1413,7 @@ def _recommendation(
     contradictions: list[dict[str, Any]],
     unsupported_claims: list[str],
 ) -> str:
-    if quality_gate_result == "degraded" or len(unsupported_claims) >= 2:
+    if quality_gate_result in {"degraded", "fail"} or len(unsupported_claims) >= 2:
         return "insufficient_evidence"
     if contradictions:
         return "pause"
@@ -557,6 +1434,8 @@ def _risk_flags(
     claims: list[dict[str, Any]],
 ) -> list[str]:
     flags: list[str] = []
+    if quality_gate_result == "fail":
+        flags.append("quality_gate_failed")
     if quality_gate_result == "degraded":
         flags.append("quality_gate_degraded")
     if confidence < 0.65:
@@ -659,17 +1538,117 @@ def _validation_cost_estimate(claims: list[dict[str, Any]]) -> dict[str, Any]:
     return {"amount": 0, "currency": "USD", "basis": cost_claim or "default zero-spend validation"}
 
 
+def _quality_gate_context(store: KernelStore, bundle_id: str) -> dict[str, Any]:
+    with store.connect() as conn:
+        row = conn.execute(
+            """
+            SELECT gate_event_id, request_id, bundle_id, source_plan_id, profile,
+                   result, confidence, checks_json, created_at
+            FROM quality_gate_events
+            WHERE bundle_id=?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (bundle_id,),
+        ).fetchone()
+    if row is None:
+        raise ValueError("quality gate context not found for commercial packet")
+    return {
+        "gate_event_id": row["gate_event_id"],
+        "request_id": row["request_id"],
+        "bundle_id": row["bundle_id"],
+        "source_plan_id": row["source_plan_id"],
+        "profile": row["profile"],
+        "result": row["result"],
+        "confidence": float(row["confidence"]),
+        "checks": _loads(row["checks_json"]),
+        "created_at": row["created_at"],
+    }
+
+
+def _commercial_deliberation_record(
+    *,
+    packet: OpportunityProjectDecisionPacket,
+    confidence: float,
+    uncertainty: str,
+    quality_gate_context: dict[str, Any],
+    source_refs: list[str],
+) -> CommercialDecisionRecommendationRecord:
+    result = quality_gate_context["result"]
+    high_uncertainty = confidence < 0.70 or bool(packet.gate_packet.get("counter_thesis"))
+    contradictory = "contradictory_evidence" in packet.risk_flags
+    if result == "fail":
+        authority = "single_agent"
+        rationale = "Quality gate failed; deterministic policy records an insufficient-evidence single-agent recommendation for operator review."
+    elif result == "degraded" or contradictory or high_uncertainty:
+        authority = "council"
+        rationale = "Commercial packet has material uncertainty or degraded evidence; deterministic policy routes it to a Council recommendation record."
+    else:
+        authority = "single_agent"
+        rationale = "Commercial packet is routine enough for a single-agent recommendation record while preserving the operator gate."
+
+    evidence_refs = [f"kernel:evidence_bundles/{packet.evidence_bundle_id}"]
+    evidence_refs.extend(f"kernel:claims/{claim_id}" for claim_id in packet.evidence_used)
+    evidence_refs.extend(source_refs)
+    evidence_refs.append(f"kernel:quality_gate_events/{quality_gate_context['gate_event_id']}")
+    return CommercialDecisionRecommendationRecord(
+        packet_id=packet.packet_id,
+        decision_id=packet.decision_id,
+        request_id=packet.request_id,
+        evidence_bundle_id=packet.evidence_bundle_id,
+        recommendation_authority=authority,  # type: ignore[arg-type]
+        recommendation=packet.recommendation,
+        confidence=confidence,
+        decisive_factors=packet.evidence_used,
+        decisive_uncertainty=uncertainty,
+        evidence_used=packet.evidence_used,
+        evidence_refs=evidence_refs,
+        quality_gate_context=quality_gate_context,
+        risk_flags=packet.risk_flags,
+        operator_gate_defaults={
+            "required_authority": "operator_gate",
+            "decision_default_on_timeout": packet.default_on_timeout,
+            "default_on_timeout": packet.default_on_timeout,
+            "status": packet.status,
+            "side_effects_authorized": packet.gate_packet.get("side_effects_authorized", []),
+        },
+        rationale=rationale,
+        model_routes_used=[],
+        degraded=result != "pass",
+    )
+
+
 __all__ = [
     "KernelCommercialResearchWorkflow",
     "commercial_decision_packet_command",
+    "commercial_deliberation_recommendation_command",
     "g1_project_approval_command",
     "project_artifact_receipt_command",
+    "project_customer_commitment_receipt_command",
+    "project_customer_visible_packet_command",
+    "project_customer_visible_replay_comparison_command",
+    "project_customer_visible_resolution_command",
     "project_feedback_command",
+    "project_followup_delivery_command",
+    "project_operate_followup_outcome_command",
     "project_operator_load_command",
     "project_outcome_command",
+    "project_portfolio_packet_command",
+    "project_portfolio_replay_comparison_command",
+    "project_portfolio_resolution_command",
+    "project_post_ship_evidence_command",
     "project_close_decision_command",
+    "project_close_resolution_command",
     "project_replay_comparison_command",
     "project_revenue_attribution_command",
+    "project_scheduling_assignment_packet_command",
+    "project_scheduling_assignment_resolution_command",
+    "project_scheduling_intent_command",
+    "project_scheduling_priority_packet_command",
+    "project_scheduling_priority_replay_comparison_command",
+    "project_scheduling_priority_resolution_command",
+    "project_scheduling_replay_comparison_command",
+    "project_scheduling_task_outcome_command",
     "project_status_rollup_command",
     "project_task_command",
 ]
