@@ -49,7 +49,14 @@ RecoveryPolicy = Literal[
     "ask_operator",
     "fail_closed",
 ]
-ProjectOutcomeType = Literal["validation", "build_artifact", "shipped_artifact", "feedback", "project_close"]
+ProjectOutcomeType = Literal[
+    "validation",
+    "build_artifact",
+    "shipped_artifact",
+    "feedback",
+    "project_close",
+    "operate_followup",
+]
 ProjectOutcomeStatus = Literal["recorded", "accepted", "needs_followup"]
 ProjectArtifactKind = Literal["validation_artifact", "build_artifact", "shipped_artifact"]
 ProjectArtifactStatus = Literal["recorded", "accepted", "quarantined"]
@@ -480,6 +487,8 @@ class ProjectOutcome:
     task_id: str | None = None
     phase_name: str | None = None
     operator_load_actual: str | None = None
+    side_effect_intent_id: str | None = None
+    side_effect_receipt_id: str | None = None
     status: ProjectOutcomeStatus = "recorded"
     created_at: str = field(default_factory=now_iso)
 
@@ -528,6 +537,7 @@ class ProjectRevenueAttribution:
     attribution_id: str = field(default_factory=new_id)
     task_id: str | None = None
     outcome_id: str | None = None
+    artifact_receipt_id: str | None = None
     external_ref: str | None = None
     evidence_refs: list[str] = field(default_factory=list)
     reconciliation_task_id: str | None = None
@@ -544,6 +554,7 @@ class ProjectOperatorLoadRecord:
     load_id: str = field(default_factory=new_id)
     task_id: str | None = None
     outcome_id: str | None = None
+    artifact_receipt_id: str | None = None
     notes: str | None = None
     created_at: str = field(default_factory=now_iso)
 
@@ -562,6 +573,26 @@ class ProjectPhaseRollup:
 
 
 @dataclass(frozen=True)
+class ProjectCommercialRollup:
+    project_id: str
+    revenue_reconciled_usd: Decimal
+    revenue_unreconciled_usd: Decimal
+    retained_customer_count: int
+    at_risk_customer_count: int
+    churned_customer_count: int
+    support_resolved_count: int
+    support_open_count: int
+    maintenance_resolved_count: int
+    maintenance_open_count: int
+    external_commitment_count: int
+    receiptless_side_effect_count: int
+    evidence_refs: list[str]
+    risk_flags: list[str]
+    rollup_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
 class ProjectStatusRollup:
     project_id: str
     project_status: ProjectStatus
@@ -576,6 +607,8 @@ class ProjectStatusRollup:
     close_recommendation: ProjectCloseRecommendation
     rationale: str
     risk_flags: list[str]
+    commercial_rollup_id: str | None = None
+    commercial_rollup: JsonObject = field(default_factory=dict)
     rollup_id: str = field(default_factory=new_id)
     created_at: str = field(default_factory=now_iso)
 
@@ -589,6 +622,7 @@ class ProjectCloseDecisionPacket:
     required_authority: Authority
     rationale: str
     risk_flags: list[str]
+    evidence_refs: list[str]
     default_on_timeout: str
     status: Literal["gated", "decided", "cancelled"] = "gated"
     packet_id: str = field(default_factory=new_id)
@@ -606,6 +640,155 @@ class ProjectReplayProjectionComparison:
     projection_revenue_attributed_usd: Decimal
     replay_operator_load_minutes: int
     projection_operator_load_minutes: int
+    replay_commercial_rollup: JsonObject
+    projection_commercial_rollup: JsonObject
+    matches: bool
+    mismatches: list[str]
+    comparison_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class ProjectPortfolioDecisionPacket:
+    decision_id: str
+    scope: str
+    project_ids: list[str]
+    rollup_ids: list[str]
+    recommendation: str
+    required_authority: Authority
+    packet: JsonObject
+    tradeoffs: JsonObject
+    evidence_refs: list[str]
+    risk_flags: list[str]
+    default_on_timeout: str
+    status: Literal["gated", "decided", "cancelled"] = "gated"
+    packet_id: str = field(default_factory=new_id)
+    verdict: str | None = None
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class ProjectPortfolioReplayProjectionComparison:
+    packet_id: str
+    replay_packet: JsonObject
+    projection_packet: JsonObject
+    matches: bool
+    mismatches: list[str]
+    comparison_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class ProjectSchedulingIntent:
+    portfolio_packet_id: str
+    source_decision_id: str
+    scope: str
+    project_ids: list[str]
+    scheduling_window: str
+    intent: JsonObject
+    queue_adjustments: list[JsonObject]
+    evidence_refs: list[str]
+    risk_flags: list[str]
+    required_authority: Authority
+    authority_effect: str
+    intent_id: str = field(default_factory=new_id)
+    status: Literal["recorded", "superseded", "cancelled"] = "recorded"
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class ProjectSchedulingPriorityChangePacket:
+    intent_id: str
+    portfolio_packet_id: str
+    source_decision_id: str
+    decision_id: str
+    scope: str
+    project_ids: list[str]
+    scheduling_window: str
+    proposed_changes: list[JsonObject]
+    evidence_refs: list[str]
+    risk_flags: list[str]
+    required_authority: Authority
+    default_on_timeout: str
+    packet_id: str = field(default_factory=new_id)
+    status: Literal["gated", "decided", "cancelled"] = "gated"
+    verdict: str | None = None
+    applied_changes: list[JsonObject] = field(default_factory=list)
+    created_at: str = field(default_factory=now_iso)
+    decided_by: str | None = None
+    decided_at: str | None = None
+
+
+@dataclass(frozen=True)
+class ProjectSchedulingPriorityReplayProjectionComparison:
+    packet_id: str
+    replay_packet: JsonObject
+    projection_packet: JsonObject
+    matches: bool
+    mismatches: list[str]
+    comparison_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class ProjectSchedulingReplayProjectionComparison:
+    intent_id: str
+    replay_intent: JsonObject
+    projection_intent: JsonObject
+    matches: bool
+    mismatches: list[str]
+    comparison_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class ProjectCustomerVisiblePacket:
+    project_id: str
+    outcome_id: str
+    decision_id: str
+    packet_type: Literal["customer_message", "customer_delivery"]
+    customer_ref: str
+    channel: str
+    subject: str
+    summary: str
+    payload_ref: str
+    side_effect_intent_id: str
+    evidence_refs: list[str]
+    required_authority: Authority
+    default_on_timeout: str
+    packet_id: str = field(default_factory=new_id)
+    risk_flags: list[str] = field(default_factory=list)
+    status: Literal["gated", "decided", "cancelled"] = "gated"
+    verdict: str | None = None
+    created_at: str = field(default_factory=now_iso)
+    decided_by: str | None = None
+    decided_at: str | None = None
+
+
+@dataclass(frozen=True)
+class ProjectCustomerCommitment:
+    packet_id: str
+    project_id: str
+    outcome_id: str
+    side_effect_intent_id: str
+    side_effect_receipt_id: str
+    customer_ref: str
+    channel: str
+    commitment_type: Literal["message_sent", "delivery_made"]
+    payload_ref: str
+    summary: str
+    evidence_refs: list[str]
+    commitment_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class ProjectCustomerVisibleReplayProjectionComparison:
+    packet_id: str
+    replay_packet: JsonObject
+    projection_packet: JsonObject
+    replay_commitments: list[JsonObject]
+    projection_commitments: list[JsonObject]
     matches: bool
     mismatches: list[str]
     comparison_id: str = field(default_factory=new_id)

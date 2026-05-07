@@ -1,22 +1,26 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
 
 from kernel import (
+    Budget,
     CapabilityGrant,
     ClaimRecord,
     EvidenceBundle,
     KernelCommercialResearchWorkflow,
     KernelResearchEngine,
     KernelStore,
+    Project,
     ProjectArtifactReceipt,
     ProjectCustomerFeedback,
     ProjectOperatorLoadRecord,
     ProjectOutcome,
     ProjectRevenueAttribution,
+    ProjectTask,
     ProjectTaskAssignment,
     ResearchRequest,
     SideEffectIntent,
@@ -39,11 +43,29 @@ from kernel.commercial import (
     g1_project_approval_command,
     project_artifact_receipt_command,
     project_close_decision_command,
+    project_close_resolution_command,
+    project_customer_visible_packet_command,
+    project_customer_visible_replay_comparison_command,
+    project_customer_visible_resolution_command,
     project_feedback_command,
+    project_followup_delivery_command,
+    project_operate_followup_outcome_command,
     project_operator_load_command,
     project_outcome_command,
+    project_portfolio_packet_command,
+    project_portfolio_replay_comparison_command,
+    project_portfolio_resolution_command,
+    project_post_ship_evidence_command,
     project_replay_comparison_command,
     project_revenue_attribution_command,
+    project_scheduling_assignment_packet_command,
+    project_scheduling_assignment_resolution_command,
+    project_scheduling_intent_command,
+    project_scheduling_priority_packet_command,
+    project_scheduling_priority_replay_comparison_command,
+    project_scheduling_priority_resolution_command,
+    project_scheduling_replay_comparison_command,
+    project_scheduling_task_outcome_command,
     project_status_rollup_command,
     project_task_command,
 )
@@ -171,6 +193,2560 @@ class KernelResearchTests(unittest.TestCase):
             data_classes=["public", "internal"],
             retention_policy="retain-90d",
         )
+
+    def active_project_with_shipped_artifact(self, key: str) -> dict[str, str]:
+        project = Project(
+            name=f"Operate Follow-up {key}",
+            objective="Exercise post-ship operate follow-up governance.",
+            revenue_mechanism="software",
+            operator_role="client_owner",
+            external_commitment_policy="operator_only",
+            phases=[
+                {"name": "Validate", "objective": "Validate demand."},
+                {"name": "Build", "objective": "Build artifact."},
+                {"name": "Ship", "objective": "Ship artifact."},
+                {"name": "Operate", "objective": "Operate customer-visible artifact."},
+            ],
+            success_metrics=["accepted customer feedback"],
+            kill_criteria=["negative feedback without revenue"],
+            status="active",
+        )
+        self.store.create_project(project_task_command(project_id=project.project_id, key=f"{key}-project"), project)
+        task = ProjectTask(
+            project_id=project.project_id,
+            phase_name="Ship",
+            task_type="ship",
+            autonomy_class="A2",
+            objective="Deliver a customer-visible artifact under operator gate.",
+            inputs={"project_id": project.project_id},
+            expected_output_schema={"type": "object", "required": ["side_effect_receipt_id"]},
+            risk_level="medium",
+            required_capabilities=[
+                {
+                    "capability_type": "side_effect",
+                    "actions": ["prepare"],
+                    "scope": "project_delivery",
+                    "grant_required_before_run": True,
+                }
+            ],
+            model_requirement={"task_class": "coding_small_patch", "local_allowed_only_if_promoted": True},
+            authority_required="operator_gate",
+            recovery_policy="ask_operator",
+        )
+        self.store.create_project_task(project_task_command(project_id=project.project_id, key=f"{key}-ship-task"), task)
+        grant = CapabilityGrant(
+            task_id=task.task_id,
+            subject_type="adapter",
+            subject_id="side_effect_broker",
+            capability_type="side_effect",
+            actions=["prepare"],
+            resource={"kind": "publish", "artifact_ref": f"artifact://local/{key}/shipped"},
+            scope={"project_id": project.project_id},
+            conditions={"operator_approved": True},
+            expires_at="2999-01-01T00:00:00Z",
+            policy_version=KERNEL_POLICY_VERSION,
+            max_uses=1,
+        )
+        grant_id = self.store.issue_capability_grant(
+            project_task_command(project_id=project.project_id, key=f"{key}-ship-grant"),
+            grant,
+        )
+        self.store.assign_project_task(
+            project_task_command(project_id=project.project_id, key=f"{key}-ship-assignment"),
+            ProjectTaskAssignment(
+                task_id=task.task_id,
+                project_id=project.project_id,
+                worker_type="agent",
+                worker_id="ship-worker",
+                grant_ids=[grant_id],
+                accepted_capabilities=[
+                    {"capability_type": "side_effect", "actions": ["prepare"], "scope": "project_delivery"}
+                ],
+            ),
+        )
+        intent = SideEffectIntent(
+            task_id=task.task_id,
+            side_effect_type="publish",
+            target={"channel": "customer_review"},
+            payload_hash=payload_hash({"artifact_ref": f"artifact://local/{key}/shipped"}),
+            required_authority="operator_gate",
+            grant_id=grant_id,
+            timeout_policy="ask_operator",
+        )
+        intent_id = self.store.prepare_side_effect(
+            project_task_command(
+                project_id=project.project_id,
+                key=f"{key}-side-effect-intent",
+                requested_by="operator",
+                requested_authority="operator_gate",
+            ),
+            intent,
+        )
+        receipt_id = self.store.record_side_effect_receipt(
+            project_task_command(project_id=project.project_id, key=f"{key}-side-effect-receipt"),
+            SideEffectReceipt(
+                intent_id=intent_id,
+                receipt_type="success",
+                receipt_hash=payload_hash({"published": True, "key": key}),
+                details={"channel": "customer_review"},
+            ),
+        )
+        artifact_id = self.commercial.record_project_artifact_receipt(
+            project_artifact_receipt_command(project_id=project.project_id, key=f"{key}-shipped-artifact"),
+            ProjectArtifactReceipt(
+                project_id=project.project_id,
+                task_id=task.task_id,
+                artifact_ref=f"artifact://local/{key}/shipped",
+                artifact_kind="shipped_artifact",
+                summary="Accepted customer-visible shipped artifact.",
+                data_class="internal",
+                delivery_channel="customer_review",
+                side_effect_intent_id=intent_id,
+                side_effect_receipt_id=receipt_id,
+                customer_visible=True,
+                status="accepted",
+            ),
+        )
+        return {
+            "project_id": project.project_id,
+            "task_id": task.task_id,
+            "artifact_receipt_id": artifact_id,
+            "side_effect_receipt_id": receipt_id,
+        }
+
+    def record_post_ship_evidence(
+        self,
+        key: str,
+        shipped: dict[str, str],
+        *,
+        summary: str,
+        sentiment: str = "positive",
+        action_required: bool = True,
+        revenue_amount: Decimal = Decimal("100"),
+        revenue_status: str = "reconciled",
+        revenue_confidence: float = 0.9,
+        load_minutes: int = 5,
+    ) -> dict[str, str]:
+        return self.commercial.record_project_post_ship_evidence(
+            project_post_ship_evidence_command(
+                project_id=shipped["project_id"],
+                artifact_receipt_id=shipped["artifact_receipt_id"],
+                key=f"{key}-post-ship-evidence",
+            ),
+            shipped["artifact_receipt_id"],
+            feedback=ProjectCustomerFeedback(
+                project_id=shipped["project_id"],
+                task_id=shipped["task_id"],
+                source_type="customer",
+                customer_ref=f"customer-{key}",
+                summary=summary,
+                sentiment=sentiment,  # type: ignore[arg-type]
+                action_required=action_required,
+                operator_review_required=False,
+                status="accepted",
+            ),
+            revenue=ProjectRevenueAttribution(
+                project_id=shipped["project_id"],
+                task_id=shipped["task_id"],
+                amount_usd=revenue_amount,
+                source="operator_reported",
+                attribution_period="2026-05",
+                confidence=revenue_confidence,
+                external_ref=f"operator://revenue/{key}" if revenue_status == "reconciled" else None,
+                status=revenue_status,  # type: ignore[arg-type]
+            ),
+            operator_load=ProjectOperatorLoadRecord(
+                project_id=shipped["project_id"],
+                task_id=shipped["task_id"],
+                minutes=load_minutes,
+                load_type="client_sales",
+                source="operator_reported",
+                notes="Post-ship customer evidence review",
+            ),
+        )
+
+    def running_operate_followup_task(self, key: str, *, summary: str) -> dict[str, str]:
+        shipped = self.active_project_with_shipped_artifact(key)
+        self.record_post_ship_evidence(key, shipped, summary=summary)
+        rollup = self.commercial.derive_project_status_rollup(
+            project_status_rollup_command(project_id=shipped["project_id"], key=f"{key}-rollup"),
+            shipped["project_id"],
+        )
+        close_packet = self.commercial.create_project_close_decision(
+            project_close_decision_command(project_id=shipped["project_id"], key=f"{key}-close"),
+            shipped["project_id"],
+            rollup_id=rollup.rollup_id,
+        )
+        resolution = self.commercial.resolve_project_close_decision(
+            project_close_resolution_command(
+                packet_id=close_packet.packet_id,
+                verdict="continue",
+                key=f"{key}-resolution",
+            ),
+            close_packet.packet_id,
+            verdict="continue",
+            operator_id="operator",
+            notes="Continue with governed Operate follow-up.",
+        )
+        task_id = resolution["followup_task_id"]
+        grant = CapabilityGrant(
+            task_id=task_id,
+            subject_type="agent",
+            subject_id="operate-worker",
+            capability_type="memory_write",
+            actions=["record"],
+            resource={"kind": "project_operate_followup"},
+            scope={"project_id": shipped["project_id"]},
+            conditions={"external_side_effects": "blocked_without_operator_gate_and_receipt"},
+            expires_at="2999-01-01T00:00:00Z",
+            policy_version=KERNEL_POLICY_VERSION,
+            max_uses=1,
+        )
+        grant_id = self.store.issue_capability_grant(
+            project_task_command(project_id=shipped["project_id"], key=f"{key}-operate-grant"),
+            grant,
+        )
+        assignment_id = self.store.assign_project_task(
+            project_task_command(project_id=shipped["project_id"], key=f"{key}-operate-assignment"),
+            ProjectTaskAssignment(
+                task_id=task_id,
+                project_id=shipped["project_id"],
+                worker_type="agent",
+                worker_id="operate-worker",
+                grant_ids=[grant_id],
+                accepted_capabilities=[
+                    {"capability_type": "memory_write", "actions": ["record"], "scope": "project_operate_followup"}
+                ],
+                notes="bounded operate worker accepted the follow-up",
+            ),
+        )
+        return {
+            **shipped,
+            "followup_task_id": task_id,
+            "operate_grant_id": grant_id,
+            "operate_assignment_id": assignment_id,
+        }
+
+    def staged_operate_side_effect(self, key: str, project_id: str, task_id: str) -> dict[str, str]:
+        grant = CapabilityGrant(
+            task_id=task_id,
+            subject_type="adapter",
+            subject_id="side_effect_broker",
+            capability_type="side_effect",
+            actions=["prepare"],
+            resource={"kind": "message", "target": f"customer-{key}"},
+            scope={"project_id": project_id},
+            conditions={"operator_approved": True},
+            expires_at="2999-01-01T00:00:00Z",
+            policy_version=KERNEL_POLICY_VERSION,
+            max_uses=1,
+        )
+        grant_id = self.store.issue_capability_grant(
+            project_task_command(project_id=project_id, key=f"{key}-operate-side-effect-grant"),
+            grant,
+        )
+        intent_id = self.store.prepare_side_effect(
+            project_task_command(
+                project_id=project_id,
+                key=f"{key}-operate-side-effect-intent",
+                requested_by="operator",
+                requested_authority="operator_gate",
+            ),
+            SideEffectIntent(
+                task_id=task_id,
+                side_effect_type="message",
+                target={"customer_ref": f"customer-{key}", "channel": "support_desk"},
+                payload_hash=payload_hash({"message_ref": f"artifact://local/{key}/support-response"}),
+                required_authority="operator_gate",
+                grant_id=grant_id,
+                timeout_policy="ask_operator",
+            ),
+        )
+        receipt_id = self.store.record_side_effect_receipt(
+            project_task_command(project_id=project_id, key=f"{key}-operate-side-effect-receipt"),
+            SideEffectReceipt(
+                intent_id=intent_id,
+                receipt_type="success",
+                receipt_hash=payload_hash({"sent": True, "key": key}),
+                details={"message_ref": f"artifact://local/{key}/support-response"},
+            ),
+        )
+        return {"grant_id": grant_id, "intent_id": intent_id, "receipt_id": receipt_id}
+
+    def budgeted_running_operate_task(
+        self,
+        key: str,
+        *,
+        budget_cap: Decimal,
+        reserved_budget: Decimal = Decimal("0"),
+        followup_type: str = "revenue_reconciliation",
+    ) -> dict[str, str]:
+        project_id = new_id()
+        budget = Budget(
+            owner_type="project",
+            owner_id=project_id,
+            approved_by="operator",
+            cap_usd=budget_cap,
+            expires_at="2999-01-01T00:00:00Z",
+        )
+        budget_id = self.store.create_budget(
+            project_task_command(project_id=project_id, key=f"{key}-budget", requested_by="operator"),
+            budget,
+        )
+        if reserved_budget:
+            self.store.reserve_budget(
+                project_task_command(project_id=project_id, key=f"{key}-budget-reserve", requested_by="operator"),
+                budget_id,
+                reserved_budget,
+            )
+        project = Project(
+            project_id=project_id,
+            name=f"Portfolio Project {key}",
+            objective="Exercise portfolio tradeoff scoring.",
+            revenue_mechanism="software",
+            operator_role="client_owner",
+            external_commitment_policy="operator_only",
+            budget_id=budget_id,
+            phases=[{"name": "Operate", "objective": "Operate customer-facing commercial loop."}],
+            success_metrics=["reconciled revenue", "retained customers"],
+            kill_criteria=["operator load exceeds value"],
+            status="active",
+        )
+        self.store.create_project(project_task_command(project_id=project_id, key=f"{key}-project"), project)
+        task = ProjectTask(
+            project_id=project_id,
+            phase_name="Operate",
+            task_type="operate",
+            autonomy_class="A1",
+            objective="Record governed portfolio evidence.",
+            inputs={
+                "operate_followup_type": followup_type,
+                "external_commitment_policy": "draft_or_internal_only_without_side_effect_receipt",
+                "default_operator_load_type": "reconciliation" if followup_type == "revenue_reconciliation" else "client_sales",
+            },
+            expected_output_schema={"type": "object", "required": ["internal_result_ref"]},
+            risk_level="low",
+            required_capabilities=[
+                {
+                    "capability_type": "memory_write",
+                    "actions": ["record"],
+                    "scope": "project_operate_followup",
+                    "grant_required_before_run": True,
+                }
+            ],
+            model_requirement={"task_class": "quick_research_summarization", "local_allowed_only_if_promoted": True},
+            budget_id=budget_id,
+            authority_required="rule",
+            recovery_policy="ask_operator",
+        )
+        self.store.create_project_task(project_task_command(project_id=project_id, key=f"{key}-task"), task)
+        grant_id = self.store.issue_capability_grant(
+            project_task_command(project_id=project_id, key=f"{key}-grant"),
+            CapabilityGrant(
+                task_id=task.task_id,
+                subject_type="agent",
+                subject_id="portfolio-worker",
+                capability_type="memory_write",
+                actions=["record"],
+                resource={"kind": "portfolio_evidence"},
+                scope={"project_id": project_id},
+                conditions={"external_side_effects": "blocked_without_operator_gate_and_receipt"},
+                expires_at="2999-01-01T00:00:00Z",
+                policy_version=KERNEL_POLICY_VERSION,
+                max_uses=1,
+            ),
+        )
+        self.store.assign_project_task(
+            project_task_command(project_id=project_id, key=f"{key}-assignment"),
+            ProjectTaskAssignment(
+                task_id=task.task_id,
+                project_id=project_id,
+                worker_type="agent",
+                worker_id="portfolio-worker",
+                grant_ids=[grant_id],
+                accepted_capabilities=[
+                    {"capability_type": "memory_write", "actions": ["record"], "scope": "project_operate_followup"}
+                ],
+            ),
+        )
+        return {"project_id": project_id, "task_id": task.task_id, "budget_id": budget_id}
+
+    def accepted_priority_created_task(self, key: str, *, budget_cap: Decimal = Decimal("650")) -> dict[str, str]:
+        running = self.budgeted_running_operate_task(key, budget_cap=budget_cap)
+        self.commercial.record_project_operate_followup_outcome(
+            project_operate_followup_outcome_command(
+                project_id=running["project_id"],
+                task_id=running["task_id"],
+                key=f"{key}-priority-outcome",
+            ),
+            running["task_id"],
+            summary="Reconciled revenue evidence should drive a scheduling-created internal queue item.",
+            internal_result_ref=f"artifact://local/{key}/priority-revenue",
+            operator_load_minutes=4,
+            operator_load_source="operator_reported",
+            result={"reconciliation_status": "reconciled"},
+            revenue_impact={"amount_usd": "600", "currency": "USD", "period": "2026-05"},
+        )
+        packet = self.commercial.create_project_portfolio_decision_packet(
+            project_portfolio_packet_command(project_ids=[running["project_id"]], key=f"{key}-priority-portfolio"),
+            [running["project_id"]],
+            constraints={"high_revenue_usd": "500"},
+        )
+        self.commercial.resolve_project_portfolio_decision(
+            project_portfolio_resolution_command(
+                packet_id=packet.packet_id,
+                verdict="accept_prioritization",
+                key=f"{key}-priority-portfolio-accepted",
+            ),
+            packet.packet_id,
+            verdict="accept_prioritization",
+        )
+        intent = self.commercial.create_project_scheduling_intent(
+            project_scheduling_intent_command(packet_id=packet.packet_id, key=f"{key}-priority-intent"),
+            packet.packet_id,
+        )
+        priority_packet = self.commercial.create_project_scheduling_priority_change_packet(
+            project_scheduling_priority_packet_command(intent_id=intent.intent_id, key=f"{key}-priority-packet"),
+            intent.intent_id,
+        )
+        resolution = self.commercial.resolve_project_scheduling_priority_change_packet(
+            project_scheduling_priority_resolution_command(
+                packet_id=priority_packet.packet_id,
+                verdict="accept_priority_changes",
+                key=f"{key}-priority-resolution",
+            ),
+            priority_packet.packet_id,
+            verdict="accept_priority_changes",
+        )
+        created = next(change for change in resolution["applied_changes"] if change["status"] == "queued")
+        return {
+            "project_id": running["project_id"],
+            "source_task_id": running["task_id"],
+            "task_id": created["task_id"],
+            "budget_id": running["budget_id"],
+            "priority_packet_id": priority_packet.packet_id,
+        }
+
+    def accepted_assigned_priority_created_task(self, key: str) -> dict[str, str]:
+        created = self.accepted_priority_created_task(key)
+        worker_id = f"{key}-worker"
+        grant_id = self.store.issue_capability_grant(
+            project_task_command(project_id=created["project_id"], key=f"{key}-worker-grant"),
+            CapabilityGrant(
+                task_id=created["task_id"],
+                subject_type="agent",
+                subject_id=worker_id,
+                capability_type="memory_write",
+                actions=["record"],
+                resource={"kind": "project_internal_scheduling"},
+                scope={"project_id": created["project_id"]},
+                conditions={"external_side_effects": "blocked_without_operator_gate_and_receipt"},
+                expires_at="2999-01-01T00:00:00Z",
+                policy_version=KERNEL_POLICY_VERSION,
+                max_uses=1,
+            ),
+        )
+        assignment_id = self.commercial.create_project_scheduling_worker_assignment_packet(
+            project_scheduling_assignment_packet_command(task_id=created["task_id"], key=f"{key}-assignment-packet"),
+            created["task_id"],
+            worker_id=worker_id,
+            grant_ids=[grant_id],
+        )
+        self.commercial.resolve_project_scheduling_worker_assignment(
+            project_scheduling_assignment_resolution_command(
+                assignment_id=assignment_id,
+                verdict="accept",
+                key=f"{key}-assignment-accept",
+                requester_id=worker_id,
+            ),
+            assignment_id,
+            verdict="accept",
+            worker_id=worker_id,
+            accepted_capabilities=[
+                {"capability_type": "memory_write", "actions": ["record"], "scope": "project_internal_scheduling"}
+            ],
+        )
+        return {**created, "grant_id": grant_id, "assignment_id": assignment_id, "worker_id": worker_id}
+
+    def completed_internal_scheduling_outcome(self, key: str) -> dict[str, str]:
+        created = self.accepted_assigned_priority_created_task(key)
+        outcome = self.commercial.record_project_scheduling_task_outcome(
+            project_scheduling_task_outcome_command(
+                project_id=created["project_id"],
+                task_id=created["task_id"],
+                key=f"{key}-internal-outcome",
+                requester_id=created["worker_id"],
+            ),
+            created["task_id"],
+            summary="Completed internal customer-support response draft with preserved scheduling evidence.",
+            internal_result_ref=f"artifact://local/{key}/customer-response-draft",
+            result={"scheduling_outcome_type": "customer_support", "support_status": "drafted"},
+        )
+        return {**created, "outcome_id": outcome["outcome_id"]}
+
+    def staged_customer_visible_intent(self, key: str, project_id: str, task_id: str) -> dict[str, str]:
+        grant_id = self.store.issue_capability_grant(
+            project_task_command(project_id=project_id, key=f"{key}-customer-visible-grant"),
+            CapabilityGrant(
+                task_id=task_id,
+                subject_type="adapter",
+                subject_id="side_effect_broker",
+                capability_type="side_effect",
+                actions=["prepare"],
+                resource={"kind": "message", "target": f"customer-{key}"},
+                scope={"project_id": project_id},
+                conditions={"operator_approved": True},
+                expires_at="2999-01-01T00:00:00Z",
+                policy_version=KERNEL_POLICY_VERSION,
+                max_uses=1,
+            ),
+        )
+        intent_id = self.store.prepare_side_effect(
+            project_task_command(
+                project_id=project_id,
+                key=f"{key}-customer-visible-intent",
+                requested_by="operator",
+                requested_authority="operator_gate",
+            ),
+            SideEffectIntent(
+                task_id=task_id,
+                side_effect_type="message",
+                target={"customer_ref": f"customer-{key}", "channel": "email"},
+                payload_hash=payload_hash({"payload_ref": f"artifact://local/{key}/customer-response-draft"}),
+                required_authority="operator_gate",
+                grant_id=grant_id,
+                timeout_policy="ask_operator",
+            ),
+        )
+        return {"grant_id": grant_id, "intent_id": intent_id}
+
+    def test_accepted_post_ship_feedback_creates_governed_operate_followup_types(self):
+        cases = [
+            ("revenue", "Please reconcile the invoice payment before we renew.", "revenue_reconciliation"),
+            ("retention", "The team wants renewal and adoption follow-up for the next month.", "retention"),
+            ("maintenance", "A slow error path needs a maintenance fix after launch.", "maintenance"),
+            ("support", "Please help the customer understand the new report workflow.", "customer_support"),
+        ]
+        for key, summary, expected_type in cases:
+            with self.subTest(expected_type=expected_type):
+                shipped = self.active_project_with_shipped_artifact(f"operate-{key}")
+                self.record_post_ship_evidence(f"operate-{key}", shipped, summary=summary)
+                rollup = self.commercial.derive_project_status_rollup(
+                    project_status_rollup_command(project_id=shipped["project_id"], key=f"operate-{key}-rollup"),
+                    shipped["project_id"],
+                )
+                close_packet = self.commercial.create_project_close_decision(
+                    project_close_decision_command(project_id=shipped["project_id"], key=f"operate-{key}-close"),
+                    shipped["project_id"],
+                    rollup_id=rollup.rollup_id,
+                )
+                resolution = self.commercial.resolve_project_close_decision(
+                    project_close_resolution_command(
+                        packet_id=close_packet.packet_id,
+                        verdict="continue",
+                        key=f"operate-{key}-resolution",
+                    ),
+                    close_packet.packet_id,
+                    verdict="continue",
+                    operator_id="operator",
+                    notes="Continue only with internal Operate follow-up.",
+                )
+                comparison = self.commercial.compare_project_replay_to_projection(
+                    project_replay_comparison_command(project_id=shipped["project_id"], key=f"operate-{key}-compare"),
+                    shipped["project_id"],
+                )
+
+                with self.store.connect() as conn:
+                    task = conn.execute(
+                        """
+                        SELECT phase_name, task_type, authority_required, risk_level,
+                               inputs_json, expected_output_schema_json, required_capabilities_json
+                        FROM project_tasks
+                        WHERE task_id=?
+                        """,
+                        (resolution["followup_task_id"],),
+                    ).fetchone()
+                    project = conn.execute(
+                        "SELECT status FROM projects WHERE project_id=?",
+                        (shipped["project_id"],),
+                    ).fetchone()
+                inputs = json.loads(task["inputs_json"])
+                expected_output_schema = json.loads(task["expected_output_schema_json"])
+                capabilities = json.loads(task["required_capabilities_json"])
+
+                self.assertEqual(rollup.close_recommendation, "continue")
+                self.assertEqual(task["phase_name"], "Operate")
+                self.assertEqual(task["task_type"], "operate")
+                self.assertEqual(task["authority_required"], "rule")
+                self.assertEqual(task["risk_level"], "low")
+                self.assertEqual(inputs["operate_followup_type"], expected_type)
+                self.assertEqual(
+                    inputs["external_commitment_policy"],
+                    "draft_or_internal_only_without_side_effect_receipt",
+                )
+                self.assertEqual(expected_output_schema["properties"]["external_commitment_change"]["const"], False)
+                self.assertEqual(capabilities[0]["external_side_effects"], "blocked_without_operator_gate_and_receipt")
+                self.assertEqual(project["status"], "active")
+                self.assertTrue(comparison.matches)
+
+                replay = self.store.replay_critical_state()
+                self.assertEqual(
+                    replay.project_tasks[resolution["followup_task_id"]]["inputs"]["operate_followup_type"],
+                    expected_type,
+                )
+                self.assertTrue(replay.project_replay_projection_comparisons[comparison.comparison_id]["matches"])
+
+    def test_operate_followup_outcome_records_internal_result_and_operator_load(self):
+        running = self.running_operate_followup_task(
+            "operate-outcome-internal",
+            summary="Please reconcile the invoice payment before renewal.",
+        )
+
+        result = self.commercial.record_project_operate_followup_outcome(
+            project_operate_followup_outcome_command(
+                project_id=running["project_id"],
+                task_id=running["followup_task_id"],
+                key="operate-outcome-internal-record",
+            ),
+            running["followup_task_id"],
+            summary="Reconciled the invoice internally and prepared the renewal note for operator review.",
+            internal_result_ref="artifact://local/operate-outcome-internal/reconciliation-note",
+            operator_load_minutes=12,
+            operator_load_source="operator_reported",
+            metrics={"invoice_status": "matched", "open_items": 0},
+            result={"next_internal_action": "operator_review"},
+            revenue_impact={"amount": "100", "currency": "USD", "period": "2026-05", "status": "reconciled"},
+        )
+        comparison = self.commercial.compare_project_replay_to_projection(
+            project_replay_comparison_command(project_id=running["project_id"], key="operate-outcome-internal-compare"),
+            running["project_id"],
+        )
+
+        with self.store.connect() as conn:
+            outcome = conn.execute(
+                """
+                SELECT outcome_type, phase_name, feedback_json, operator_load_actual,
+                       side_effect_intent_id, side_effect_receipt_id, status
+                FROM project_outcomes
+                WHERE outcome_id=?
+                """,
+                (result["outcome_id"],),
+            ).fetchone()
+            load = conn.execute(
+                """
+                SELECT task_id, outcome_id, minutes, load_type, source
+                FROM project_operator_load
+                WHERE load_id=?
+                """,
+                (result["operator_load_id"],),
+            ).fetchone()
+            task = conn.execute(
+                "SELECT status FROM project_tasks WHERE task_id=?",
+                (running["followup_task_id"],),
+            ).fetchone()
+        feedback = json.loads(outcome["feedback_json"])
+
+        self.assertEqual(result["operate_followup_type"], "revenue_reconciliation")
+        self.assertEqual(outcome["outcome_type"], "operate_followup")
+        self.assertEqual(outcome["phase_name"], "Operate")
+        self.assertEqual(outcome["operator_load_actual"], "12 minutes")
+        self.assertIsNone(outcome["side_effect_intent_id"])
+        self.assertIsNone(outcome["side_effect_receipt_id"])
+        self.assertEqual(outcome["status"], "accepted")
+        self.assertEqual(feedback["internal_result_ref"], "artifact://local/operate-outcome-internal/reconciliation-note")
+        self.assertFalse(feedback["external_commitment_change"])
+        self.assertEqual(load["task_id"], running["followup_task_id"])
+        self.assertEqual(load["outcome_id"], result["outcome_id"])
+        self.assertEqual(load["minutes"], 12)
+        self.assertEqual(load["load_type"], "reconciliation")
+        self.assertEqual(load["source"], "operator_reported")
+        self.assertEqual(task["status"], "completed")
+        self.assertTrue(comparison.matches)
+
+        replay = self.store.replay_critical_state()
+        self.assertEqual(replay.project_outcomes[result["outcome_id"]]["outcome_type"], "operate_followup")
+        self.assertEqual(replay.project_outcomes[result["outcome_id"]]["feedback"]["external_commitment_change"], False)
+        self.assertEqual(replay.project_operator_load[result["operator_load_id"]]["minutes"], 12)
+
+    def test_operate_followup_side_effects_fail_closed_without_authority_or_receipt(self):
+        missing_receipt = self.running_operate_followup_task(
+            "operate-outcome-deny-receipt",
+            summary="The customer wants renewal follow-up before the next billing cycle.",
+        )
+        with self.assertRaises(PermissionError):
+            self.commercial.record_project_operate_followup_outcome(
+                project_operate_followup_outcome_command(
+                    project_id=missing_receipt["project_id"],
+                    task_id=missing_receipt["followup_task_id"],
+                    key="operate-outcome-deny-missing-receipt",
+                ),
+                missing_receipt["followup_task_id"],
+                summary="Prepared renewal follow-up for the customer.",
+                internal_result_ref="artifact://local/operate-outcome-deny-receipt/renewal-note",
+                operator_load_minutes=8,
+                operator_load_source="operator_reported",
+                external_commitment_change=True,
+            )
+
+        missing_authority = self.running_operate_followup_task(
+            "operate-outcome-deny-authority",
+            summary="Please help the customer understand the new report workflow.",
+        )
+        side_effect = self.staged_operate_side_effect(
+            "operate-outcome-deny-authority",
+            missing_authority["project_id"],
+            missing_authority["followup_task_id"],
+        )
+        with self.assertRaises(PermissionError):
+            self.commercial.record_project_operate_followup_outcome(
+                project_operate_followup_outcome_command(
+                    project_id=missing_authority["project_id"],
+                    task_id=missing_authority["followup_task_id"],
+                    key="operate-outcome-deny-missing-authority",
+                ),
+                missing_authority["followup_task_id"],
+                summary="Prepared a customer support response.",
+                internal_result_ref="artifact://local/operate-outcome-deny-authority/support-response",
+                operator_load_minutes=9,
+                operator_load_source="operator_reported",
+                side_effect_intent_id=side_effect["intent_id"],
+                side_effect_receipt_id=side_effect["receipt_id"],
+                external_commitment_change=True,
+            )
+
+        with self.store.connect() as conn:
+            denied_outcomes = conn.execute(
+                """
+                SELECT COUNT(*) FROM project_outcomes
+                WHERE task_id IN (?, ?)
+                """,
+                (missing_receipt["followup_task_id"], missing_authority["followup_task_id"]),
+            ).fetchone()[0]
+            denied_load = conn.execute(
+                """
+                SELECT COUNT(*) FROM project_operator_load
+                WHERE task_id IN (?, ?)
+                """,
+                (missing_receipt["followup_task_id"], missing_authority["followup_task_id"]),
+            ).fetchone()[0]
+        self.assertEqual(denied_outcomes, 0)
+        self.assertEqual(denied_load, 0)
+
+    def test_authorized_operate_followup_side_effect_is_linked_and_replays_cleanly(self):
+        running = self.running_operate_followup_task(
+            "operate-outcome-authorized",
+            summary="Please help the customer understand the new report workflow.",
+        )
+        side_effect = self.staged_operate_side_effect(
+            "operate-outcome-authorized",
+            running["project_id"],
+            running["followup_task_id"],
+        )
+
+        result = self.commercial.record_project_operate_followup_outcome(
+            project_operate_followup_outcome_command(
+                project_id=running["project_id"],
+                task_id=running["followup_task_id"],
+                key="operate-outcome-authorized-record",
+                requested_by="operator",
+                requested_authority="operator_gate",
+            ),
+            running["followup_task_id"],
+            summary="Sent the operator-approved support response and recorded the internal support result.",
+            internal_result_ref="artifact://local/operate-outcome-authorized/support-response",
+            operator_load_minutes=7,
+            operator_load_source="operator_reported",
+            result={"support_status": "answered"},
+            side_effect_intent_id=side_effect["intent_id"],
+            side_effect_receipt_id=side_effect["receipt_id"],
+            external_commitment_change=True,
+        )
+        comparison = self.commercial.compare_project_replay_to_projection(
+            project_replay_comparison_command(project_id=running["project_id"], key="operate-outcome-authorized-compare"),
+            running["project_id"],
+        )
+
+        with self.store.connect() as conn:
+            outcome = conn.execute(
+                """
+                SELECT outcome_type, feedback_json, side_effect_intent_id, side_effect_receipt_id
+                FROM project_outcomes
+                WHERE outcome_id=?
+                """,
+                (result["outcome_id"],),
+            ).fetchone()
+            load = conn.execute(
+                "SELECT outcome_id, minutes, load_type FROM project_operator_load WHERE load_id=?",
+                (result["operator_load_id"],),
+            ).fetchone()
+        feedback = json.loads(outcome["feedback_json"])
+
+        self.assertEqual(outcome["outcome_type"], "operate_followup")
+        self.assertEqual(outcome["side_effect_intent_id"], side_effect["intent_id"])
+        self.assertEqual(outcome["side_effect_receipt_id"], side_effect["receipt_id"])
+        self.assertTrue(feedback["external_commitment_change"])
+        self.assertEqual(feedback["side_effect_intent_id"], side_effect["intent_id"])
+        self.assertEqual(feedback["side_effect_receipt_id"], side_effect["receipt_id"])
+        self.assertEqual(load["outcome_id"], result["outcome_id"])
+        self.assertEqual(load["minutes"], 7)
+        self.assertEqual(load["load_type"], "other")
+        self.assertTrue(comparison.matches)
+
+        replay = self.store.replay_critical_state()
+        self.assertEqual(replay.side_effects[side_effect["intent_id"]]["receipt"]["receipt_id"], side_effect["receipt_id"])
+        self.assertEqual(
+            replay.project_outcomes[result["outcome_id"]]["side_effect_receipt_id"],
+            side_effect["receipt_id"],
+        )
+        self.assertTrue(replay.project_replay_projection_comparisons[comparison.comparison_id]["matches"])
+
+    def test_reconciled_operate_outcome_updates_commercial_rollup_and_projection_compare(self):
+        running = self.running_operate_followup_task(
+            "operate-commercial-revenue",
+            summary="Please reconcile the paid invoice before renewal.",
+        )
+        result = self.commercial.record_project_operate_followup_outcome(
+            project_operate_followup_outcome_command(
+                project_id=running["project_id"],
+                task_id=running["followup_task_id"],
+                key="operate-commercial-revenue-record",
+            ),
+            running["followup_task_id"],
+            summary="Reconciled the invoice against operator-provided payment evidence.",
+            internal_result_ref="artifact://local/operate-commercial-revenue/reconciliation-note",
+            operator_load_minutes=11,
+            operator_load_source="operator_reported",
+            result={
+                "reconciliation_status": "reconciled",
+                "evidence_refs": ["operator://invoice/operate-commercial-revenue"],
+            },
+            revenue_impact={"amount_usd": "320", "currency": "USD", "period": "2026-05"},
+        )
+        rollup = self.commercial.derive_project_status_rollup(
+            project_status_rollup_command(project_id=running["project_id"], key="operate-commercial-revenue-final-rollup"),
+            running["project_id"],
+        )
+        comparison = self.commercial.compare_project_replay_to_projection(
+            project_replay_comparison_command(project_id=running["project_id"], key="operate-commercial-revenue-compare"),
+            running["project_id"],
+        )
+
+        with self.store.connect() as conn:
+            commercial_rollup = conn.execute(
+                """
+                SELECT revenue_reconciled_usd, revenue_unreconciled_usd,
+                       external_commitment_count, receiptless_side_effect_count,
+                       evidence_refs_json
+                FROM project_commercial_rollups
+                WHERE rollup_id=?
+                """,
+                (rollup.commercial_rollup_id,),
+            ).fetchone()
+            comparison_row = conn.execute(
+                """
+                SELECT matches, replay_commercial_rollup_json, projection_commercial_rollup_json
+                FROM project_replay_projection_comparisons
+                WHERE comparison_id=?
+                """,
+                (comparison.comparison_id,),
+            ).fetchone()
+
+        self.assertEqual(result["operate_followup_type"], "revenue_reconciliation")
+        self.assertEqual(commercial_rollup["revenue_reconciled_usd"], "320")
+        self.assertEqual(commercial_rollup["revenue_unreconciled_usd"], "0")
+        self.assertEqual(commercial_rollup["external_commitment_count"], 0)
+        self.assertEqual(commercial_rollup["receiptless_side_effect_count"], 0)
+        self.assertIn(result["outcome_id"], commercial_rollup["evidence_refs_json"])
+        self.assertEqual(rollup.commercial_rollup["revenue_reconciled_usd"], "320")
+        self.assertTrue(comparison.matches)
+        self.assertEqual(comparison_row["matches"], 1)
+        self.assertEqual(comparison_row["replay_commercial_rollup_json"], comparison_row["projection_commercial_rollup_json"])
+
+    def test_retention_and_support_rollups_feed_close_recommendations(self):
+        cases = [
+            (
+                "retained",
+                "The customer wants renewal and retention follow-up.",
+                {"retention_status": "retained"},
+                "complete",
+                "retained_customer_count",
+                1,
+            ),
+            (
+                "retention-risk",
+                "The customer is at churn risk before renewal.",
+                {"retention_status": "at_risk"},
+                "pause",
+                "at_risk_customer_count",
+                1,
+            ),
+            (
+                "support-open",
+                "Please help the customer understand the new report workflow.",
+                {"support_status": "open"},
+                "continue",
+                "support_open_count",
+                1,
+            ),
+            (
+                "support-resolved",
+                "Please help the customer understand the new report workflow.",
+                {"support_status": "resolved"},
+                "complete",
+                "support_resolved_count",
+                1,
+            ),
+        ]
+        for key, summary, result_payload, expected_recommendation, field, expected_value in cases:
+            with self.subTest(key=key):
+                running = self.running_operate_followup_task(f"operate-commercial-{key}", summary=summary)
+                self.commercial.record_project_operate_followup_outcome(
+                    project_operate_followup_outcome_command(
+                        project_id=running["project_id"],
+                        task_id=running["followup_task_id"],
+                        key=f"operate-commercial-{key}-record",
+                    ),
+                    running["followup_task_id"],
+                    summary="Recorded governed customer-retention or support follow-up evidence.",
+                    internal_result_ref=f"artifact://local/operate-commercial-{key}/result",
+                    operator_load_minutes=6,
+                    operator_load_source="operator_reported",
+                    result=result_payload,
+                )
+                rollup = self.commercial.derive_project_status_rollup(
+                    project_status_rollup_command(project_id=running["project_id"], key=f"operate-commercial-{key}-final-rollup"),
+                    running["project_id"],
+                )
+                close_packet = self.commercial.create_project_close_decision(
+                    project_close_decision_command(project_id=running["project_id"], key=f"operate-commercial-{key}-final-close"),
+                    running["project_id"],
+                    rollup_id=rollup.rollup_id,
+                )
+                comparison = self.commercial.compare_project_replay_to_projection(
+                    project_replay_comparison_command(project_id=running["project_id"], key=f"operate-commercial-{key}-compare"),
+                    running["project_id"],
+                )
+
+                self.assertEqual(rollup.close_recommendation, expected_recommendation)
+                self.assertEqual(close_packet.recommendation, expected_recommendation)
+                self.assertEqual(rollup.commercial_rollup[field], expected_value)
+                self.assertTrue(comparison.matches)
+
+    def test_unreconciled_or_receiptless_operate_outcomes_do_not_count_as_customer_commitments(self):
+        running = self.running_operate_followup_task(
+            "operate-commercial-unreconciled",
+            summary="Please reconcile the invoice payment before renewal.",
+        )
+        grant = CapabilityGrant(
+            task_id=running["followup_task_id"],
+            subject_type="adapter",
+            subject_id="side_effect_broker",
+            capability_type="side_effect",
+            actions=["prepare"],
+            resource={"kind": "message", "target": "customer-unreconciled"},
+            scope={"project_id": running["project_id"]},
+            conditions={"operator_approved": True},
+            expires_at="2999-01-01T00:00:00Z",
+            policy_version=KERNEL_POLICY_VERSION,
+            max_uses=1,
+        )
+        side_effect_grant_id = self.store.issue_capability_grant(
+            project_task_command(project_id=running["project_id"], key="operate-commercial-unreconciled-side-effect-grant"),
+            grant,
+        )
+        intent = SideEffectIntent(
+            task_id=running["followup_task_id"],
+            side_effect_type="message",
+            target={"customer_ref": "customer-unreconciled", "channel": "support_desk"},
+            payload_hash=payload_hash({"message_ref": "artifact://local/operate-commercial-unreconciled/draft"}),
+            required_authority="operator_gate",
+            grant_id=side_effect_grant_id,
+            timeout_policy="ask_operator",
+        )
+        self.store.prepare_side_effect(
+            project_task_command(
+                project_id=running["project_id"],
+                key="operate-commercial-unreconciled-receiptless-side-effect-intent",
+                requested_by="operator",
+                requested_authority="operator_gate",
+            ),
+            intent,
+        )
+        self.commercial.record_project_operate_followup_outcome(
+            project_operate_followup_outcome_command(
+                project_id=running["project_id"],
+                task_id=running["followup_task_id"],
+                key="operate-commercial-unreconciled-record",
+                requested_by="operator",
+                requested_authority="operator_gate",
+            ),
+            running["followup_task_id"],
+            summary="Prepared an internal reconciliation draft without a customer commitment receipt.",
+            internal_result_ref="artifact://local/operate-commercial-unreconciled/reconciliation-draft",
+            operator_load_minutes=9,
+            operator_load_source="operator_reported",
+            result={"reconciliation_status": "needs_reconciliation"},
+            revenue_impact={"amount_usd": "500", "currency": "USD", "period": "2026-05"},
+            side_effect_intent_id=intent.intent_id,
+        )
+        rollup = self.commercial.derive_project_status_rollup(
+            project_status_rollup_command(project_id=running["project_id"], key="operate-commercial-unreconciled-final-rollup"),
+            running["project_id"],
+        )
+        comparison = self.commercial.compare_project_replay_to_projection(
+            project_replay_comparison_command(project_id=running["project_id"], key="operate-commercial-unreconciled-compare"),
+            running["project_id"],
+        )
+
+        self.assertEqual(rollup.commercial_rollup["revenue_reconciled_usd"], "0")
+        self.assertEqual(rollup.commercial_rollup["revenue_unreconciled_usd"], "500")
+        self.assertEqual(rollup.commercial_rollup["external_commitment_count"], 0)
+        self.assertEqual(rollup.commercial_rollup["receiptless_side_effect_count"], 1)
+        self.assertIn("unreconciled_operate_revenue", rollup.risk_flags)
+        self.assertIn("receiptless_operate_side_effect_intent", rollup.risk_flags)
+        self.assertTrue(comparison.matches)
+
+    def test_commercial_rollups_feed_operator_facing_portfolio_packet(self):
+        strong = self.budgeted_running_operate_task("portfolio-strong", budget_cap=Decimal("1000"))
+        weak = self.budgeted_running_operate_task(
+            "portfolio-weak",
+            budget_cap=Decimal("80"),
+            reserved_budget=Decimal("70"),
+            followup_type="retention",
+        )
+        self.commercial.record_project_operate_followup_outcome(
+            project_operate_followup_outcome_command(
+                project_id=strong["project_id"],
+                task_id=strong["task_id"],
+                key="portfolio-strong-outcome",
+            ),
+            strong["task_id"],
+            summary="Reconciled high-value invoice evidence.",
+            internal_result_ref="artifact://local/portfolio-strong/revenue",
+            operator_load_minutes=8,
+            operator_load_source="operator_reported",
+            result={"reconciliation_status": "reconciled"},
+            revenue_impact={"amount_usd": "900", "currency": "USD", "period": "2026-05"},
+        )
+        self.commercial.record_project_operate_followup_outcome(
+            project_operate_followup_outcome_command(
+                project_id=weak["project_id"],
+                task_id=weak["task_id"],
+                key="portfolio-weak-outcome",
+            ),
+            weak["task_id"],
+            summary="Retention signal shows customer at risk and high operator load.",
+            internal_result_ref="artifact://local/portfolio-weak/retention",
+            operator_load_minutes=180,
+            operator_load_source="operator_reported",
+            result={"retention_status": "at_risk"},
+        )
+
+        packet = self.commercial.create_project_portfolio_decision_packet(
+            project_portfolio_packet_command(
+                project_ids=[strong["project_id"], weak["project_id"]],
+                key="portfolio-packet",
+            ),
+            [strong["project_id"], weak["project_id"]],
+            constraints={"max_operator_load_minutes": 120, "min_budget_remaining_usd": "25"},
+        )
+
+        ranked = packet.packet["ranked_projects"]
+        self.assertEqual(packet.required_authority, "operator_gate")
+        self.assertEqual(packet.status, "gated")
+        self.assertEqual(packet.packet["authority"]["side_effects_authorized"], [])
+        self.assertFalse(packet.packet["authority"]["agents_may_reprioritize"])
+        self.assertFalse(packet.packet["authority"]["agents_may_commit_customer_work"])
+        self.assertEqual(ranked[0]["project_id"], strong["project_id"])
+        self.assertEqual(ranked[0]["recommended_action"], "harvest_or_complete")
+        self.assertEqual(ranked[1]["recommended_action"], "pause_until_operator_review")
+        self.assertEqual(ranked[0]["revenue"]["reconciled_usd"], "900")
+        self.assertEqual(ranked[1]["retention"]["at_risk"], 1)
+        self.assertEqual(ranked[1]["budget"]["remaining_usd"], "10")
+        self.assertIn("operator_load_over_constraint", packet.risk_flags)
+        self.assertIn("budget_under_required_remaining", packet.risk_flags)
+        self.assertTrue(any(ref.startswith("kernel:project_commercial_rollups/") for ref in packet.evidence_refs))
+
+    def test_portfolio_packet_resolution_is_operator_gated_planning_only(self):
+        running = self.budgeted_running_operate_task("portfolio-resolution", budget_cap=Decimal("500"))
+        self.commercial.record_project_operate_followup_outcome(
+            project_operate_followup_outcome_command(
+                project_id=running["project_id"],
+                task_id=running["task_id"],
+                key="portfolio-resolution-outcome",
+            ),
+            running["task_id"],
+            summary="Reconciled invoice evidence for planning packet.",
+            internal_result_ref="artifact://local/portfolio-resolution/revenue",
+            operator_load_minutes=5,
+            operator_load_source="operator_reported",
+            result={"reconciliation_status": "reconciled"},
+            revenue_impact={"amount_usd": "300", "currency": "USD", "period": "2026-05"},
+        )
+        packet = self.commercial.create_project_portfolio_decision_packet(
+            project_portfolio_packet_command(project_ids=[running["project_id"]], key="portfolio-resolution-packet"),
+            [running["project_id"]],
+        )
+        blocked_command = project_portfolio_packet_command(
+            project_ids=[running["project_id"]],
+            key="portfolio-agent-blocked",
+            requested_by="agent",
+            requested_authority="operator_gate",
+        )
+        with self.assertRaises(PermissionError):
+            self.commercial.create_project_portfolio_decision_packet(blocked_command, [running["project_id"]])
+        commitment_command = project_portfolio_packet_command(
+            project_ids=[running["project_id"]],
+            key="portfolio-commitment-blocked",
+            payload={"project_ids": [running["project_id"]], "customer_commitment_requested": True},
+        )
+        with self.assertRaises(PermissionError):
+            self.commercial.create_project_portfolio_decision_packet(commitment_command, [running["project_id"]])
+
+        resolution = self.commercial.resolve_project_portfolio_decision(
+            project_portfolio_resolution_command(
+                packet_id=packet.packet_id,
+                verdict="accept_prioritization",
+                key="portfolio-resolution-operator",
+            ),
+            packet.packet_id,
+            verdict="accept_prioritization",
+            operator_id="operator",
+            notes="Accept planning guidance without external commitments.",
+        )
+
+        self.assertEqual(resolution["authority_effect"], "planning_guidance_only")
+        self.assertEqual(resolution["project_status_changes"], [])
+        self.assertEqual(resolution["customer_commitments"], [])
+        with self.store.connect() as conn:
+            project_status = conn.execute(
+                "SELECT status FROM projects WHERE project_id=?",
+                (running["project_id"],),
+            ).fetchone()["status"]
+        self.assertEqual(project_status, "active")
+
+    def test_portfolio_packet_replay_projection_comparison_remains_clean(self):
+        running = self.budgeted_running_operate_task("portfolio-replay", budget_cap=Decimal("500"))
+        self.commercial.record_project_operate_followup_outcome(
+            project_operate_followup_outcome_command(
+                project_id=running["project_id"],
+                task_id=running["task_id"],
+                key="portfolio-replay-outcome",
+            ),
+            running["task_id"],
+            summary="Reconciled invoice evidence for replay comparison.",
+            internal_result_ref="artifact://local/portfolio-replay/revenue",
+            operator_load_minutes=4,
+            operator_load_source="operator_reported",
+            result={"reconciliation_status": "reconciled"},
+            revenue_impact={"amount_usd": "450", "currency": "USD", "period": "2026-05"},
+        )
+        packet = self.commercial.create_project_portfolio_decision_packet(
+            project_portfolio_packet_command(project_ids=[running["project_id"]], key="portfolio-replay-packet"),
+            [running["project_id"]],
+        )
+        comparison = self.commercial.compare_project_portfolio_replay_to_projection(
+            project_portfolio_replay_comparison_command(packet_id=packet.packet_id, key="portfolio-replay-compare"),
+            packet.packet_id,
+        )
+
+        self.assertTrue(comparison.matches)
+        self.assertEqual(comparison.mismatches, [])
+        replay = self.store.replay_critical_state()
+        self.assertEqual(replay.project_portfolio_decision_packets[packet.packet_id]["packet"], packet.packet)
+        self.assertTrue(
+            replay.project_portfolio_replay_projection_comparisons[comparison.comparison_id]["matches"]
+        )
+
+    def test_accepted_portfolio_packet_produces_bounded_internal_scheduling_intent(self):
+        strong = self.budgeted_running_operate_task("scheduling-strong", budget_cap=Decimal("900"))
+        weak = self.budgeted_running_operate_task(
+            "scheduling-weak",
+            budget_cap=Decimal("75"),
+            reserved_budget=Decimal("72"),
+            followup_type="retention",
+        )
+        self.commercial.record_project_operate_followup_outcome(
+            project_operate_followup_outcome_command(
+                project_id=strong["project_id"],
+                task_id=strong["task_id"],
+                key="scheduling-strong-outcome",
+            ),
+            strong["task_id"],
+            summary="Reconciled revenue evidence for next internal cycle.",
+            internal_result_ref="artifact://local/scheduling-strong/revenue",
+            operator_load_minutes=6,
+            operator_load_source="operator_reported",
+            result={"reconciliation_status": "reconciled"},
+            revenue_impact={"amount_usd": "700", "currency": "USD", "period": "2026-05"},
+        )
+        self.commercial.record_project_operate_followup_outcome(
+            project_operate_followup_outcome_command(
+                project_id=weak["project_id"],
+                task_id=weak["task_id"],
+                key="scheduling-weak-outcome",
+            ),
+            weak["task_id"],
+            summary="Retention risk and high operator load should hold new queue work.",
+            internal_result_ref="artifact://local/scheduling-weak/retention",
+            operator_load_minutes=150,
+            operator_load_source="operator_reported",
+            result={"retention_status": "at_risk"},
+        )
+        packet = self.commercial.create_project_portfolio_decision_packet(
+            project_portfolio_packet_command(
+                project_ids=[strong["project_id"], weak["project_id"]],
+                key="scheduling-packet",
+            ),
+            [strong["project_id"], weak["project_id"]],
+            constraints={"max_operator_load_minutes": 120, "min_budget_remaining_usd": "10", "high_revenue_usd": "500"},
+        )
+        self.commercial.resolve_project_portfolio_decision(
+            project_portfolio_resolution_command(
+                packet_id=packet.packet_id,
+                verdict="accept_prioritization",
+                key="scheduling-packet-accepted",
+            ),
+            packet.packet_id,
+            verdict="accept_prioritization",
+        )
+
+        intent = self.commercial.create_project_scheduling_intent(
+            project_scheduling_intent_command(packet_id=packet.packet_id, key="scheduling-intent"),
+            packet.packet_id,
+            scheduling_window="next_24h_internal_queue",
+        )
+
+        self.assertEqual(intent.required_authority, "rule")
+        self.assertEqual(intent.authority_effect, "internal_scheduling_recommendations_only")
+        self.assertEqual(intent.intent["bounds"]["max_queue_delta_tasks_per_project"], 1)
+        self.assertFalse(intent.intent["bounds"]["customer_visible_work"])
+        self.assertFalse(intent.intent["bounds"]["mutates_task_priority"])
+        self.assertFalse(intent.intent["bounds"]["cancels_tasks"])
+        self.assertEqual(len(intent.queue_adjustments), 2)
+        by_project = {item["project_id"]: item for item in intent.queue_adjustments}
+        self.assertEqual(by_project[strong["project_id"]]["queue_action"], "recommend_next_internal_task")
+        self.assertIn("revenue_high", by_project[strong["project_id"]]["tradeoff_drivers"])
+        self.assertEqual(by_project[weak["project_id"]]["queue_action"], "recommend_hold_new_internal_work")
+        self.assertIn("budget_low", by_project[weak["project_id"]]["tradeoff_drivers"])
+        self.assertIn("operator_load_high", by_project[weak["project_id"]]["tradeoff_drivers"])
+        self.assertIn("retention_at_risk", by_project[weak["project_id"]]["tradeoff_drivers"])
+        for adjustment in intent.queue_adjustments:
+            self.assertFalse(adjustment["priority_change"]["applied"])
+            self.assertTrue(adjustment["priority_change"]["requires_operator_gate"])
+            self.assertFalse(adjustment["cancellation"]["applied"])
+            self.assertTrue(adjustment["cancellation"]["requires_operator_gate"])
+            self.assertFalse(adjustment["customer_commitment"]["applied"])
+            self.assertFalse(adjustment["customer_commitment"]["allowed"])
+            self.assertEqual(adjustment["external_side_effects_authorized"], [])
+        self.assertIn("scheduling_budget_low", intent.risk_flags)
+        self.assertTrue(any(ref.startswith("kernel:project_portfolio_decision_packets/") for ref in intent.evidence_refs))
+
+    def test_scheduling_intent_fails_closed_before_acceptance_and_for_autonomous_commitments(self):
+        running = self.budgeted_running_operate_task("scheduling-blocked", budget_cap=Decimal("250"))
+        packet = self.commercial.create_project_portfolio_decision_packet(
+            project_portfolio_packet_command(project_ids=[running["project_id"]], key="scheduling-blocked-packet"),
+            [running["project_id"]],
+        )
+        with self.assertRaises(PermissionError):
+            self.commercial.create_project_scheduling_intent(
+                project_scheduling_intent_command(packet_id=packet.packet_id, key="scheduling-unaccepted"),
+                packet.packet_id,
+            )
+        self.commercial.resolve_project_portfolio_decision(
+            project_portfolio_resolution_command(
+                packet_id=packet.packet_id,
+                verdict="accept_prioritization",
+                key="scheduling-blocked-accepted",
+            ),
+            packet.packet_id,
+            verdict="accept_prioritization",
+        )
+        blocked_payloads = [
+            {"packet_id": packet.packet_id, "autonomous_reprioritization": True},
+            {"packet_id": packet.packet_id, "autonomous_cancellation": True},
+            {"packet_id": packet.packet_id, "customer_commitment_requested": True},
+            {"packet_id": packet.packet_id, "priority_change_requested": True},
+        ]
+        for index, payload in enumerate(blocked_payloads):
+            with self.subTest(payload=payload):
+                with self.assertRaises(PermissionError):
+                    self.commercial.create_project_scheduling_intent(
+                        project_scheduling_intent_command(
+                            packet_id=packet.packet_id,
+                            key=f"scheduling-blocked-{index}",
+                            payload=payload,
+                        ),
+                        packet.packet_id,
+                    )
+        with self.assertRaises(PermissionError):
+            self.commercial.create_project_scheduling_intent(
+                project_scheduling_intent_command(
+                    packet_id=packet.packet_id,
+                    key="scheduling-agent-blocked",
+                    requested_by="agent",
+                ),
+                packet.packet_id,
+            )
+        with self.store.connect() as conn:
+            statuses = [
+                row["status"]
+                for row in conn.execute(
+                    "SELECT status FROM project_tasks WHERE project_id=? ORDER BY created_at",
+                    (running["project_id"],),
+                ).fetchall()
+            ]
+        self.assertIn("running", statuses)
+        self.assertNotIn("cancelled", statuses)
+
+    def test_scheduling_intent_replay_projection_comparison_remains_clean(self):
+        running = self.budgeted_running_operate_task("scheduling-replay", budget_cap=Decimal("500"))
+        self.commercial.record_project_operate_followup_outcome(
+            project_operate_followup_outcome_command(
+                project_id=running["project_id"],
+                task_id=running["task_id"],
+                key="scheduling-replay-outcome",
+            ),
+            running["task_id"],
+            summary="Reconciled invoice evidence for scheduling replay.",
+            internal_result_ref="artifact://local/scheduling-replay/revenue",
+            operator_load_minutes=4,
+            operator_load_source="operator_reported",
+            result={"reconciliation_status": "reconciled"},
+            revenue_impact={"amount_usd": "450", "currency": "USD", "period": "2026-05"},
+        )
+        packet = self.commercial.create_project_portfolio_decision_packet(
+            project_portfolio_packet_command(project_ids=[running["project_id"]], key="scheduling-replay-packet"),
+            [running["project_id"]],
+        )
+        self.commercial.resolve_project_portfolio_decision(
+            project_portfolio_resolution_command(
+                packet_id=packet.packet_id,
+                verdict="accept_prioritization",
+                key="scheduling-replay-accepted",
+            ),
+            packet.packet_id,
+            verdict="accept_prioritization",
+        )
+        intent = self.commercial.create_project_scheduling_intent(
+            project_scheduling_intent_command(packet_id=packet.packet_id, key="scheduling-replay-intent"),
+            packet.packet_id,
+        )
+        comparison = self.commercial.compare_project_scheduling_replay_to_projection(
+            project_scheduling_replay_comparison_command(
+                intent_id=intent.intent_id,
+                key="scheduling-replay-compare",
+            ),
+            intent.intent_id,
+        )
+
+        self.assertTrue(comparison.matches)
+        self.assertEqual(comparison.mismatches, [])
+        replay = self.store.replay_critical_state()
+        self.assertEqual(replay.project_scheduling_intents[intent.intent_id]["intent"], intent.intent)
+        self.assertTrue(
+            replay.project_scheduling_replay_projection_comparisons[comparison.comparison_id]["matches"]
+        )
+
+    def test_accepted_scheduling_intent_produces_operator_gated_priority_change_packet(self):
+        running = self.budgeted_running_operate_task("priority-packet", budget_cap=Decimal("650"))
+        self.commercial.record_project_operate_followup_outcome(
+            project_operate_followup_outcome_command(
+                project_id=running["project_id"],
+                task_id=running["task_id"],
+                key="priority-packet-outcome",
+            ),
+            running["task_id"],
+            summary="Reconciled revenue evidence for priority packet creation.",
+            internal_result_ref="artifact://local/priority-packet/revenue",
+            operator_load_minutes=5,
+            operator_load_source="operator_reported",
+            result={"reconciliation_status": "reconciled"},
+            revenue_impact={"amount_usd": "550", "currency": "USD", "period": "2026-05"},
+        )
+        packet = self.commercial.create_project_portfolio_decision_packet(
+            project_portfolio_packet_command(project_ids=[running["project_id"]], key="priority-source-portfolio"),
+            [running["project_id"]],
+            constraints={"high_revenue_usd": "500"},
+        )
+        self.commercial.resolve_project_portfolio_decision(
+            project_portfolio_resolution_command(
+                packet_id=packet.packet_id,
+                verdict="accept_prioritization",
+                key="priority-source-accepted",
+            ),
+            packet.packet_id,
+            verdict="accept_prioritization",
+        )
+        intent = self.commercial.create_project_scheduling_intent(
+            project_scheduling_intent_command(packet_id=packet.packet_id, key="priority-source-intent"),
+            packet.packet_id,
+        )
+        with self.store.connect() as conn:
+            queued_before = conn.execute(
+                "SELECT COUNT(*) FROM project_tasks WHERE project_id=? AND status='queued'",
+                (running["project_id"],),
+            ).fetchone()[0]
+
+        priority_packet = self.commercial.create_project_scheduling_priority_change_packet(
+            project_scheduling_priority_packet_command(intent_id=intent.intent_id, key="priority-packet-created"),
+            intent.intent_id,
+        )
+
+        self.assertEqual(priority_packet.required_authority, "operator_gate")
+        self.assertEqual(priority_packet.status, "gated")
+        self.assertEqual(priority_packet.default_on_timeout, "defer")
+        self.assertEqual(priority_packet.applied_changes, [])
+        self.assertTrue(any(ref.startswith("kernel:project_scheduling_intents/") for ref in priority_packet.evidence_refs))
+        self.assertFalse(priority_packet.proposed_changes[0]["mutates_queue_on_packet_creation"])
+        self.assertTrue(priority_packet.proposed_changes[0]["applies_only_on_accept"])
+        self.assertFalse(priority_packet.proposed_changes[0]["customer_commitment"]["allowed"])
+        with self.store.connect() as conn:
+            queued_after = conn.execute(
+                "SELECT COUNT(*) FROM project_tasks WHERE project_id=? AND status='queued'",
+                (running["project_id"],),
+            ).fetchone()[0]
+        self.assertEqual(queued_after, queued_before)
+
+    def test_operator_approval_applies_bounded_internal_queue_change(self):
+        running = self.budgeted_running_operate_task("priority-approve", budget_cap=Decimal("650"))
+        self.commercial.record_project_operate_followup_outcome(
+            project_operate_followup_outcome_command(
+                project_id=running["project_id"],
+                task_id=running["task_id"],
+                key="priority-approve-outcome",
+            ),
+            running["task_id"],
+            summary="Reconciled revenue evidence should drive the next internal queue item.",
+            internal_result_ref="artifact://local/priority-approve/revenue",
+            operator_load_minutes=4,
+            operator_load_source="operator_reported",
+            result={"reconciliation_status": "reconciled"},
+            revenue_impact={"amount_usd": "600", "currency": "USD", "period": "2026-05"},
+        )
+        packet = self.commercial.create_project_portfolio_decision_packet(
+            project_portfolio_packet_command(project_ids=[running["project_id"]], key="priority-approve-portfolio"),
+            [running["project_id"]],
+            constraints={"high_revenue_usd": "500"},
+        )
+        self.commercial.resolve_project_portfolio_decision(
+            project_portfolio_resolution_command(
+                packet_id=packet.packet_id,
+                verdict="accept_prioritization",
+                key="priority-approve-portfolio-accepted",
+            ),
+            packet.packet_id,
+            verdict="accept_prioritization",
+        )
+        intent = self.commercial.create_project_scheduling_intent(
+            project_scheduling_intent_command(packet_id=packet.packet_id, key="priority-approve-intent"),
+            packet.packet_id,
+        )
+        priority_packet = self.commercial.create_project_scheduling_priority_change_packet(
+            project_scheduling_priority_packet_command(intent_id=intent.intent_id, key="priority-approve-packet"),
+            intent.intent_id,
+        )
+        with self.store.connect() as conn:
+            queued_before = conn.execute(
+                "SELECT COUNT(*) FROM project_tasks WHERE project_id=? AND status='queued'",
+                (running["project_id"],),
+            ).fetchone()[0]
+
+        resolution = self.commercial.resolve_project_scheduling_priority_change_packet(
+            project_scheduling_priority_resolution_command(
+                packet_id=priority_packet.packet_id,
+                verdict="accept_priority_changes",
+                key="priority-approve-resolution",
+            ),
+            priority_packet.packet_id,
+            verdict="accept_priority_changes",
+        )
+
+        self.assertEqual(resolution["authority_effect"], "bounded_internal_queue_changes")
+        self.assertEqual(len([change for change in resolution["applied_changes"] if change["status"] == "queued"]), 1)
+        with self.store.connect() as conn:
+            queued_after = conn.execute(
+                "SELECT COUNT(*) FROM project_tasks WHERE project_id=? AND status='queued'",
+                (running["project_id"],),
+            ).fetchone()[0]
+            task_row = conn.execute(
+                """
+                SELECT inputs_json, evidence_refs_json, authority_required, task_type
+                FROM project_tasks
+                WHERE task_id=?
+                """,
+                (resolution["applied_changes"][0]["task_id"],),
+            ).fetchone()
+        self.assertEqual(queued_after, queued_before + 1)
+        self.assertEqual(task_row["authority_required"], "rule")
+        self.assertIn(task_row["task_type"], {"operate", "feedback"})
+        self.assertFalse(json.loads(task_row["inputs_json"])["customer_commitments_allowed"])
+        self.assertTrue(
+            any(ref.startswith("kernel:project_scheduling_priority_change_packets/") for ref in json.loads(task_row["evidence_refs_json"]))
+        )
+
+    def test_priority_change_reject_or_defer_leaves_queue_unchanged(self):
+        for verdict in ("reject_priority_changes", "defer"):
+            with self.subTest(verdict=verdict):
+                running = self.budgeted_running_operate_task(f"priority-{verdict}", budget_cap=Decimal("300"))
+                packet = self.commercial.create_project_portfolio_decision_packet(
+                    project_portfolio_packet_command(project_ids=[running["project_id"]], key=f"{verdict}-portfolio"),
+                    [running["project_id"]],
+                )
+                self.commercial.resolve_project_portfolio_decision(
+                    project_portfolio_resolution_command(
+                        packet_id=packet.packet_id,
+                        verdict="accept_prioritization",
+                        key=f"{verdict}-portfolio-accepted",
+                    ),
+                    packet.packet_id,
+                    verdict="accept_prioritization",
+                )
+                intent = self.commercial.create_project_scheduling_intent(
+                    project_scheduling_intent_command(packet_id=packet.packet_id, key=f"{verdict}-intent"),
+                    packet.packet_id,
+                )
+                priority_packet = self.commercial.create_project_scheduling_priority_change_packet(
+                    project_scheduling_priority_packet_command(intent_id=intent.intent_id, key=f"{verdict}-packet"),
+                    intent.intent_id,
+                )
+                with self.store.connect() as conn:
+                    queued_before = conn.execute(
+                        "SELECT COUNT(*) FROM project_tasks WHERE project_id=? AND status='queued'",
+                        (running["project_id"],),
+                    ).fetchone()[0]
+                resolution = self.commercial.resolve_project_scheduling_priority_change_packet(
+                    project_scheduling_priority_resolution_command(
+                        packet_id=priority_packet.packet_id,
+                        verdict=verdict,
+                        key=f"{verdict}-resolution",
+                    ),
+                    priority_packet.packet_id,
+                    verdict=verdict,
+                )
+                with self.store.connect() as conn:
+                    queued_after = conn.execute(
+                        "SELECT COUNT(*) FROM project_tasks WHERE project_id=? AND status='queued'",
+                        (running["project_id"],),
+                    ).fetchone()[0]
+                self.assertEqual(queued_after, queued_before)
+                self.assertEqual(resolution["authority_effect"], "no_queue_changes")
+                self.assertTrue(all(change["status"] == "not_applied" for change in resolution["applied_changes"]))
+
+    def test_priority_change_packets_fail_closed_for_autonomous_mutation_cancellation_and_commitments(self):
+        running = self.budgeted_running_operate_task("priority-fail-closed", budget_cap=Decimal("300"))
+        packet = self.commercial.create_project_portfolio_decision_packet(
+            project_portfolio_packet_command(project_ids=[running["project_id"]], key="priority-fail-portfolio"),
+            [running["project_id"]],
+        )
+        self.commercial.resolve_project_portfolio_decision(
+            project_portfolio_resolution_command(
+                packet_id=packet.packet_id,
+                verdict="accept_prioritization",
+                key="priority-fail-portfolio-accepted",
+            ),
+            packet.packet_id,
+            verdict="accept_prioritization",
+        )
+        intent = self.commercial.create_project_scheduling_intent(
+            project_scheduling_intent_command(packet_id=packet.packet_id, key="priority-fail-intent"),
+            packet.packet_id,
+        )
+        blocked_payloads = [
+            {"intent_id": intent.intent_id, "autonomous_queue_mutation": True},
+            {"intent_id": intent.intent_id, "autonomous_reprioritization": True},
+            {"intent_id": intent.intent_id, "autonomous_cancellation": True},
+            {"intent_id": intent.intent_id, "customer_commitment_requested": True},
+            {"intent_id": intent.intent_id, "priority_change_apply_requested": True},
+        ]
+        for index, payload in enumerate(blocked_payloads):
+            with self.subTest(payload=payload):
+                with self.assertRaises(PermissionError):
+                    self.commercial.create_project_scheduling_priority_change_packet(
+                        project_scheduling_priority_packet_command(
+                            intent_id=intent.intent_id,
+                            key=f"priority-packet-blocked-{index}",
+                            payload=payload,
+                        ),
+                        intent.intent_id,
+                    )
+        priority_packet = self.commercial.create_project_scheduling_priority_change_packet(
+            project_scheduling_priority_packet_command(intent_id=intent.intent_id, key="priority-fail-packet"),
+            intent.intent_id,
+        )
+        for index, payload in enumerate(blocked_payloads[:4]):
+            with self.subTest(resolution_payload=payload):
+                with self.assertRaises(PermissionError):
+                    self.commercial.resolve_project_scheduling_priority_change_packet(
+                        project_scheduling_priority_resolution_command(
+                            packet_id=priority_packet.packet_id,
+                            verdict="accept_priority_changes",
+                            key=f"priority-resolution-blocked-{index}",
+                            payload={"packet_id": priority_packet.packet_id, **payload},
+                        ),
+                        priority_packet.packet_id,
+                        verdict="accept_priority_changes",
+                    )
+        with self.store.connect() as conn:
+            statuses = [
+                row["status"]
+                for row in conn.execute(
+                    "SELECT status FROM project_tasks WHERE project_id=? ORDER BY created_at",
+                    (running["project_id"],),
+                ).fetchall()
+            ]
+        self.assertIn("running", statuses)
+        self.assertNotIn("cancelled", statuses)
+
+    def test_priority_change_replay_projection_comparison_remains_clean_for_accept_and_reject(self):
+        for verdict in ("accept_priority_changes", "reject_priority_changes"):
+            with self.subTest(verdict=verdict):
+                running = self.budgeted_running_operate_task(f"priority-replay-{verdict}", budget_cap=Decimal("400"))
+                self.commercial.record_project_operate_followup_outcome(
+                    project_operate_followup_outcome_command(
+                        project_id=running["project_id"],
+                        task_id=running["task_id"],
+                        key=f"{verdict}-replay-outcome",
+                    ),
+                    running["task_id"],
+                    summary="Reconciled revenue evidence for priority replay comparison.",
+                    internal_result_ref=f"artifact://local/{verdict}/priority-replay",
+                    operator_load_minutes=3,
+                    operator_load_source="operator_reported",
+                    result={"reconciliation_status": "reconciled"},
+                    revenue_impact={"amount_usd": "525", "currency": "USD", "period": "2026-05"},
+                )
+                packet = self.commercial.create_project_portfolio_decision_packet(
+                    project_portfolio_packet_command(project_ids=[running["project_id"]], key=f"{verdict}-replay-portfolio"),
+                    [running["project_id"]],
+                    constraints={"high_revenue_usd": "500"},
+                )
+                self.commercial.resolve_project_portfolio_decision(
+                    project_portfolio_resolution_command(
+                        packet_id=packet.packet_id,
+                        verdict="accept_prioritization",
+                        key=f"{verdict}-replay-portfolio-accepted",
+                    ),
+                    packet.packet_id,
+                    verdict="accept_prioritization",
+                )
+                intent = self.commercial.create_project_scheduling_intent(
+                    project_scheduling_intent_command(packet_id=packet.packet_id, key=f"{verdict}-replay-intent"),
+                    packet.packet_id,
+                )
+                priority_packet = self.commercial.create_project_scheduling_priority_change_packet(
+                    project_scheduling_priority_packet_command(intent_id=intent.intent_id, key=f"{verdict}-replay-packet"),
+                    intent.intent_id,
+                )
+                self.commercial.resolve_project_scheduling_priority_change_packet(
+                    project_scheduling_priority_resolution_command(
+                        packet_id=priority_packet.packet_id,
+                        verdict=verdict,
+                        key=f"{verdict}-replay-resolution",
+                    ),
+                    priority_packet.packet_id,
+                    verdict=verdict,
+                )
+                comparison = self.commercial.compare_project_scheduling_priority_replay_to_projection(
+                    project_scheduling_priority_replay_comparison_command(
+                        packet_id=priority_packet.packet_id,
+                        key=f"{verdict}-priority-replay-compare",
+                    ),
+                    priority_packet.packet_id,
+                )
+                self.assertTrue(comparison.matches)
+                self.assertEqual(comparison.mismatches, [])
+                replay = self.store.replay_critical_state()
+                self.assertTrue(
+                    replay.project_scheduling_priority_replay_projection_comparisons[comparison.comparison_id]["matches"]
+                )
+
+    def test_accepted_priority_created_task_produces_assignment_packet_and_requires_acceptance(self):
+        created = self.accepted_priority_created_task("scheduling-assignment-packet")
+        grant_id = self.store.issue_capability_grant(
+            project_task_command(project_id=created["project_id"], key="scheduling-assignment-grant"),
+            CapabilityGrant(
+                task_id=created["task_id"],
+                subject_type="agent",
+                subject_id="scheduling-worker-1",
+                capability_type="memory_write",
+                actions=["record"],
+                resource={"kind": "project_internal_scheduling"},
+                scope={"project_id": created["project_id"]},
+                conditions={"external_side_effects": "blocked_without_operator_gate_and_receipt"},
+                expires_at="2999-01-01T00:00:00Z",
+                policy_version=KERNEL_POLICY_VERSION,
+                max_uses=1,
+            ),
+        )
+
+        assignment_id = self.commercial.create_project_scheduling_worker_assignment_packet(
+            project_scheduling_assignment_packet_command(task_id=created["task_id"], key="scheduling-assignment-packet"),
+            created["task_id"],
+            worker_id="scheduling-worker-1",
+            grant_ids=[grant_id],
+        )
+
+        with self.store.connect() as conn:
+            task = conn.execute("SELECT status, budget_id FROM project_tasks WHERE task_id=?", (created["task_id"],)).fetchone()
+            assignment = conn.execute(
+                "SELECT status, grant_ids_json, accepted_capabilities_json FROM project_task_assignments WHERE assignment_id=?",
+                (assignment_id,),
+            ).fetchone()
+        comparison = self.commercial.compare_project_replay_to_projection(
+            project_replay_comparison_command(project_id=created["project_id"], key="scheduling-assignment-packet-compare"),
+            created["project_id"],
+        )
+        self.assertEqual(task["status"], "queued")
+        self.assertEqual(task["budget_id"], created["budget_id"])
+        self.assertEqual(assignment["status"], "assigned")
+        self.assertEqual(json.loads(assignment["grant_ids_json"]), [grant_id])
+        self.assertEqual(json.loads(assignment["accepted_capabilities_json"]), [])
+        self.assertTrue(comparison.matches)
+        self.assertEqual(comparison.mismatches, [])
+
+    def test_worker_acceptance_with_valid_grants_runs_priority_created_task(self):
+        created = self.accepted_priority_created_task("scheduling-assignment-accept")
+        grant_id = self.store.issue_capability_grant(
+            project_task_command(project_id=created["project_id"], key="scheduling-assignment-accept-worker-grant"),
+            CapabilityGrant(
+                task_id=created["task_id"],
+                subject_type="agent",
+                subject_id="scheduling-worker-accept",
+                capability_type="memory_write",
+                actions=["record"],
+                resource={"kind": "project_internal_scheduling"},
+                scope={"project_id": created["project_id"]},
+                conditions={"external_side_effects": "blocked_without_operator_gate_and_receipt"},
+                expires_at="2999-01-01T00:00:00Z",
+                policy_version=KERNEL_POLICY_VERSION,
+                max_uses=1,
+            ),
+        )
+        assignment_id = self.commercial.create_project_scheduling_worker_assignment_packet(
+            project_scheduling_assignment_packet_command(task_id=created["task_id"], key="scheduling-assignment-accept-packet"),
+            created["task_id"],
+            worker_id="scheduling-worker-accept",
+            grant_ids=[grant_id],
+        )
+
+        self.commercial.resolve_project_scheduling_worker_assignment(
+            project_scheduling_assignment_resolution_command(
+                assignment_id=assignment_id,
+                verdict="accept",
+                key="scheduling-assignment-accept-resolution",
+                requester_id="scheduling-worker-accept",
+            ),
+            assignment_id,
+            verdict="accept",
+            worker_id="scheduling-worker-accept",
+            accepted_capabilities=[
+                {"capability_type": "memory_write", "actions": ["record"], "scope": "project_internal_scheduling"}
+            ],
+        )
+
+        replay = self.store.replay_critical_state()
+        self.assertEqual(replay.project_tasks[created["task_id"]]["status"], "running")
+        self.assertEqual(replay.project_task_assignments[assignment_id]["status"], "accepted")
+        self.assertEqual(replay.project_task_assignments[assignment_id]["grant_ids"], [grant_id])
+
+    def test_worker_rejection_leaves_priority_created_task_queued(self):
+        created = self.accepted_priority_created_task("scheduling-assignment-reject")
+        grant_id = self.store.issue_capability_grant(
+            project_task_command(project_id=created["project_id"], key="scheduling-assignment-reject-worker-grant"),
+            CapabilityGrant(
+                task_id=created["task_id"],
+                subject_type="agent",
+                subject_id="scheduling-worker-reject",
+                capability_type="memory_write",
+                actions=["record"],
+                resource={"kind": "project_internal_scheduling"},
+                scope={"project_id": created["project_id"]},
+                conditions={"external_side_effects": "blocked_without_operator_gate_and_receipt"},
+                expires_at="2999-01-01T00:00:00Z",
+                policy_version=KERNEL_POLICY_VERSION,
+                max_uses=1,
+            ),
+        )
+        assignment_id = self.commercial.create_project_scheduling_worker_assignment_packet(
+            project_scheduling_assignment_packet_command(task_id=created["task_id"], key="scheduling-assignment-reject-packet"),
+            created["task_id"],
+            worker_id="scheduling-worker-reject",
+            grant_ids=[grant_id],
+        )
+
+        self.commercial.resolve_project_scheduling_worker_assignment(
+            project_scheduling_assignment_resolution_command(
+                assignment_id=assignment_id,
+                verdict="reject",
+                key="scheduling-assignment-reject-resolution",
+                requester_id="scheduling-worker-reject",
+            ),
+            assignment_id,
+            verdict="reject",
+            worker_id="scheduling-worker-reject",
+            notes="worker unavailable",
+        )
+
+        with self.store.connect() as conn:
+            task = conn.execute("SELECT status FROM project_tasks WHERE task_id=?", (created["task_id"],)).fetchone()
+            assignment = conn.execute("SELECT status FROM project_task_assignments WHERE assignment_id=?", (assignment_id,)).fetchone()
+        comparison = self.commercial.compare_project_replay_to_projection(
+            project_replay_comparison_command(project_id=created["project_id"], key="scheduling-assignment-reject-compare"),
+            created["project_id"],
+        )
+        self.assertEqual(task["status"], "queued")
+        self.assertEqual(assignment["status"], "rejected")
+        self.assertTrue(comparison.matches)
+        self.assertEqual(comparison.mismatches, [])
+
+    def test_missing_budget_or_capability_evidence_blocks_priority_created_assignment(self):
+        created = self.accepted_priority_created_task("scheduling-assignment-blocked")
+        with self.assertRaises(PermissionError):
+            self.commercial.create_project_scheduling_worker_assignment_packet(
+                project_scheduling_assignment_packet_command(task_id=created["task_id"], key="scheduling-assignment-no-grant"),
+                created["task_id"],
+                worker_id="scheduling-worker-missing-grant",
+                grant_ids=[],
+            )
+
+        budgetless = self.accepted_priority_created_task("scheduling-assignment-no-budget")
+        self.store.transition_project_task(
+            project_task_command(project_id=budgetless["project_id"], key="scheduling-assignment-no-budget-block"),
+            budgetless["task_id"],
+            "blocked",
+            "simulate missing budget evidence before assignment",
+        )
+        with self.store.connect() as conn:
+            conn.execute("UPDATE project_tasks SET budget_id=NULL WHERE task_id=?", (budgetless["task_id"],))
+            conn.commit()
+        grant_id = self.store.issue_capability_grant(
+            project_task_command(project_id=budgetless["project_id"], key="scheduling-assignment-no-budget-worker-grant"),
+            CapabilityGrant(
+                task_id=budgetless["task_id"],
+                subject_type="agent",
+                subject_id="scheduling-worker-no-budget",
+                capability_type="memory_write",
+                actions=["record"],
+                resource={"kind": "project_internal_scheduling"},
+                scope={"project_id": budgetless["project_id"]},
+                conditions={"external_side_effects": "blocked_without_operator_gate_and_receipt"},
+                expires_at="2999-01-01T00:00:00Z",
+                policy_version=KERNEL_POLICY_VERSION,
+                max_uses=1,
+            ),
+        )
+        with self.assertRaises(PermissionError):
+            self.commercial.create_project_scheduling_worker_assignment_packet(
+                project_scheduling_assignment_packet_command(task_id=budgetless["task_id"], key="scheduling-assignment-missing-budget"),
+                budgetless["task_id"],
+                worker_id="scheduling-worker-no-budget",
+                grant_ids=[grant_id],
+            )
+
+    def test_scheduling_assignment_customer_commitments_and_autonomous_paths_fail_closed(self):
+        created = self.accepted_priority_created_task("scheduling-assignment-fail-closed")
+        grant_id = self.store.issue_capability_grant(
+            project_task_command(project_id=created["project_id"], key="scheduling-assignment-fail-worker-grant"),
+            CapabilityGrant(
+                task_id=created["task_id"],
+                subject_type="agent",
+                subject_id="scheduling-worker-fail",
+                capability_type="memory_write",
+                actions=["record"],
+                resource={"kind": "project_internal_scheduling"},
+                scope={"project_id": created["project_id"]},
+                conditions={"external_side_effects": "blocked_without_operator_gate_and_receipt"},
+                expires_at="2999-01-01T00:00:00Z",
+                policy_version=KERNEL_POLICY_VERSION,
+                max_uses=1,
+            ),
+        )
+        blocked_payloads = [
+            {"task_id": created["task_id"], "autonomous_assignment": True},
+            {"task_id": created["task_id"], "customer_commitment_requested": True},
+            {"task_id": created["task_id"], "external_side_effect_requested": True},
+        ]
+        for index, payload in enumerate(blocked_payloads):
+            with self.subTest(payload=payload):
+                with self.assertRaises(PermissionError):
+                    self.commercial.create_project_scheduling_worker_assignment_packet(
+                        project_scheduling_assignment_packet_command(
+                            task_id=created["task_id"],
+                            key=f"scheduling-assignment-packet-blocked-{index}",
+                            payload=payload,
+                        ),
+                        created["task_id"],
+                        worker_id="scheduling-worker-fail",
+                        grant_ids=[grant_id],
+                    )
+        with self.assertRaises(PermissionError):
+            self.commercial.create_project_scheduling_worker_assignment_packet(
+                project_scheduling_assignment_packet_command(
+                    task_id=created["task_id"],
+                    key="scheduling-assignment-agent-self-assign",
+                    requested_by="agent",
+                ),
+                created["task_id"],
+                worker_id="scheduling-worker-fail",
+                grant_ids=[grant_id],
+            )
+
+    def test_accepted_scheduling_assignment_records_internal_outcome_with_preserved_evidence(self):
+        created = self.accepted_assigned_priority_created_task("scheduling-outcome-internal")
+
+        result = self.commercial.record_project_scheduling_task_outcome(
+            project_scheduling_task_outcome_command(
+                project_id=created["project_id"],
+                task_id=created["task_id"],
+                key="scheduling-outcome-internal-record",
+                requester_id=created["worker_id"],
+            ),
+            created["task_id"],
+            summary="Recorded internal queue execution evidence for the next operating cycle.",
+            internal_result_ref="artifact://local/scheduling-outcome/internal-note",
+            result={"maintenance_status": "resolved"},
+            metrics={"queue_delta": 1},
+        )
+
+        with self.store.connect() as conn:
+            outcome = conn.execute(
+                """
+                SELECT outcome_type, status, artifact_refs_json, feedback_json,
+                       side_effect_intent_id, side_effect_receipt_id
+                FROM project_outcomes
+                WHERE outcome_id=?
+                """,
+                (result["outcome_id"],),
+            ).fetchone()
+            task = conn.execute("SELECT status FROM project_tasks WHERE task_id=?", (created["task_id"],)).fetchone()
+        feedback = json.loads(outcome["feedback_json"])
+        artifact_refs = json.loads(outcome["artifact_refs_json"])
+
+        self.assertEqual(outcome["outcome_type"], "operate_followup")
+        self.assertEqual(outcome["status"], "accepted")
+        self.assertEqual(task["status"], "completed")
+        self.assertIsNone(outcome["side_effect_intent_id"])
+        self.assertIsNone(outcome["side_effect_receipt_id"])
+        self.assertEqual(feedback["assignment_id"], created["assignment_id"])
+        self.assertEqual(feedback["budget_id"], created["budget_id"])
+        self.assertEqual(feedback["grant_ids"], [created["grant_id"]])
+        self.assertEqual(feedback["scheduling_priority_packet_id"], created["priority_packet_id"])
+        self.assertFalse(feedback["external_commitment_change"])
+        self.assertIn(f"kernel:project_task_assignments/{created['assignment_id']}", artifact_refs)
+        self.assertIn(f"kernel:budgets/{created['budget_id']}", artifact_refs)
+        self.assertIn(f"kernel:capability_grants/{created['grant_id']}", artifact_refs)
+
+    def test_scheduling_outcome_blocks_customer_commitments_and_receiptless_side_effects(self):
+        for index, kwargs in enumerate(
+            [
+                {"external_commitment_change": True},
+                {"side_effect_intent_id": new_id()},
+            ]
+        ):
+            with self.subTest(kwargs=kwargs):
+                created = self.accepted_assigned_priority_created_task(f"scheduling-outcome-blocked-{index}")
+                with self.assertRaises(PermissionError):
+                    self.commercial.record_project_scheduling_task_outcome(
+                        project_scheduling_task_outcome_command(
+                            project_id=created["project_id"],
+                            task_id=created["task_id"],
+                            key=f"scheduling-outcome-blocked-{index}-record",
+                            requester_id=created["worker_id"],
+                            payload={
+                                "project_id": created["project_id"],
+                                "task_id": created["task_id"],
+                                "customer_commitment_requested": True,
+                            },
+                        ),
+                        created["task_id"],
+                        summary="Attempted customer-visible scheduling outcome.",
+                        internal_result_ref=f"artifact://local/scheduling-outcome-blocked/{index}",
+                        **kwargs,
+                    )
+        created = self.accepted_assigned_priority_created_task("scheduling-outcome-operator-receiptless")
+        with self.assertRaises(PermissionError):
+            self.commercial.record_project_scheduling_task_outcome(
+                project_scheduling_task_outcome_command(
+                    project_id=created["project_id"],
+                    task_id=created["task_id"],
+                    key="scheduling-outcome-operator-receiptless-record",
+                    requested_by="operator",
+                ),
+                created["task_id"],
+                summary="Operator-gated side-effect intent still lacks durable receipt evidence.",
+                internal_result_ref="artifact://local/scheduling-outcome-operator-receiptless",
+                side_effect_intent_id=new_id(),
+            )
+
+    def test_completed_scheduling_task_updates_rollups_without_corrupting_scheduling_evidence(self):
+        created = self.accepted_assigned_priority_created_task("scheduling-outcome-rollup")
+        outcome = self.commercial.record_project_scheduling_task_outcome(
+            project_scheduling_task_outcome_command(
+                project_id=created["project_id"],
+                task_id=created["task_id"],
+                key="scheduling-outcome-rollup-record",
+                requester_id=created["worker_id"],
+            ),
+            created["task_id"],
+            summary="Completed internal maintenance work generated by accepted scheduling priority evidence.",
+            internal_result_ref="artifact://local/scheduling-outcome-rollup/maintenance",
+            result={"maintenance_status": "resolved"},
+        )
+        rollup = self.commercial.derive_project_status_rollup(
+            project_status_rollup_command(project_id=created["project_id"], key="scheduling-outcome-rollup-final"),
+            created["project_id"],
+        )
+        priority_comparison = self.commercial.compare_project_scheduling_priority_replay_to_projection(
+            project_scheduling_priority_replay_comparison_command(
+                packet_id=created["priority_packet_id"],
+                key="scheduling-outcome-rollup-priority-compare",
+            ),
+            created["priority_packet_id"],
+        )
+
+        self.assertEqual(rollup.task_counts["completed"], 2)
+        self.assertEqual(rollup.commercial_rollup["maintenance_resolved_count"], 1)
+        self.assertIn(f"kernel:project_outcomes/{outcome['outcome_id']}", rollup.commercial_rollup["evidence_refs"])
+        self.assertTrue(priority_comparison.matches)
+        self.assertEqual(priority_comparison.mismatches, [])
+
+    def test_completed_scheduling_outcome_feeds_close_and_portfolio_evidence(self):
+        created = self.accepted_assigned_priority_created_task("scheduling-outcome-packets")
+        outcome = self.commercial.record_project_scheduling_task_outcome(
+            project_scheduling_task_outcome_command(
+                project_id=created["project_id"],
+                task_id=created["task_id"],
+                key="scheduling-outcome-packets-record",
+                requester_id=created["worker_id"],
+            ),
+            created["task_id"],
+            summary="Completed scheduling-created revenue planning evidence for operator review.",
+            internal_result_ref="artifact://local/scheduling-outcome-packets/revenue",
+            result={"scheduling_outcome_type": "revenue_reconciliation", "reconciliation_status": "reconciled"},
+            revenue_impact={"amount_usd": "325", "currency": "USD", "period": "2026-05"},
+        )
+        rollup = self.commercial.derive_project_status_rollup(
+            project_status_rollup_command(project_id=created["project_id"], key="scheduling-outcome-packets-rollup"),
+            created["project_id"],
+        )
+        close_packet = self.commercial.create_project_close_decision(
+            project_close_decision_command(project_id=created["project_id"], key="scheduling-outcome-packets-close"),
+            created["project_id"],
+            rollup_id=rollup.rollup_id,
+        )
+        portfolio_packet = self.commercial.create_project_portfolio_decision_packet(
+            project_portfolio_packet_command(project_ids=[created["project_id"]], key="scheduling-outcome-packets-portfolio"),
+            [created["project_id"]],
+        )
+        portfolio_comparison = self.commercial.compare_project_portfolio_replay_to_projection(
+            project_portfolio_replay_comparison_command(
+                packet_id=portfolio_packet.packet_id,
+                key="scheduling-outcome-packets-portfolio-compare",
+            ),
+            portfolio_packet.packet_id,
+        )
+
+        lineage_refs = [
+            f"kernel:project_outcomes/{outcome['outcome_id']}",
+            f"kernel:project_task_assignments/{created['assignment_id']}",
+            f"kernel:project_scheduling_priority_change_packets/{created['priority_packet_id']}",
+            f"kernel:capability_grants/{created['grant_id']}",
+            f"kernel:budgets/{created['budget_id']}",
+        ]
+        for ref in lineage_refs:
+            self.assertIn(ref, rollup.commercial_rollup["evidence_refs"])
+            self.assertIn(ref, close_packet.evidence_refs)
+            self.assertIn(ref, portfolio_packet.evidence_refs)
+            self.assertIn(ref, portfolio_packet.packet["ranked_projects"][0]["evidence_refs"])
+        self.assertEqual(rollup.commercial_rollup["revenue_reconciled_usd"], "925")
+        self.assertTrue(portfolio_comparison.matches)
+        self.assertEqual(portfolio_comparison.mismatches, [])
+
+    def test_completed_scheduling_outcome_drives_internal_bounded_follow_on_planning(self):
+        created = self.accepted_assigned_priority_created_task("scheduling-outcome-follow-on")
+        outcome = self.commercial.record_project_scheduling_task_outcome(
+            project_scheduling_task_outcome_command(
+                project_id=created["project_id"],
+                task_id=created["task_id"],
+                key="scheduling-outcome-follow-on-record",
+                requester_id=created["worker_id"],
+            ),
+            created["task_id"],
+            summary="Completed scheduling-created internal evidence for the next bounded planning cycle.",
+            internal_result_ref="artifact://local/scheduling-outcome-follow-on/revenue",
+            result={"scheduling_outcome_type": "revenue_reconciliation", "reconciliation_status": "reconciled"},
+            revenue_impact={"amount_usd": "450", "currency": "USD", "period": "2026-05"},
+        )
+        portfolio_packet = self.commercial.create_project_portfolio_decision_packet(
+            project_portfolio_packet_command(project_ids=[created["project_id"]], key="scheduling-outcome-follow-on-portfolio"),
+            [created["project_id"]],
+            constraints={"high_revenue_usd": "250"},
+        )
+        self.commercial.resolve_project_portfolio_decision(
+            project_portfolio_resolution_command(
+                packet_id=portfolio_packet.packet_id,
+                verdict="accept_prioritization",
+                key="scheduling-outcome-follow-on-portfolio-accepted",
+            ),
+            portfolio_packet.packet_id,
+            verdict="accept_prioritization",
+        )
+        intent = self.commercial.create_project_scheduling_intent(
+            project_scheduling_intent_command(packet_id=portfolio_packet.packet_id, key="scheduling-outcome-follow-on-intent"),
+            portfolio_packet.packet_id,
+            scheduling_window="next_internal_planning_cycle",
+        )
+        priority_packet = self.commercial.create_project_scheduling_priority_change_packet(
+            project_scheduling_priority_packet_command(intent_id=intent.intent_id, key="scheduling-outcome-follow-on-priority"),
+            intent.intent_id,
+        )
+        resolution = self.commercial.resolve_project_scheduling_priority_change_packet(
+            project_scheduling_priority_resolution_command(
+                packet_id=priority_packet.packet_id,
+                verdict="accept_priority_changes",
+                key="scheduling-outcome-follow-on-priority-accepted",
+            ),
+            priority_packet.packet_id,
+            verdict="accept_priority_changes",
+        )
+        scheduling_comparison = self.commercial.compare_project_scheduling_replay_to_projection(
+            project_scheduling_replay_comparison_command(
+                intent_id=intent.intent_id,
+                key="scheduling-outcome-follow-on-scheduling-compare",
+            ),
+            intent.intent_id,
+        )
+        priority_comparison = self.commercial.compare_project_scheduling_priority_replay_to_projection(
+            project_scheduling_priority_replay_comparison_command(
+                packet_id=priority_packet.packet_id,
+                key="scheduling-outcome-follow-on-priority-compare",
+            ),
+            priority_packet.packet_id,
+        )
+
+        applied = next(change for change in resolution["applied_changes"] if change["status"] == "queued")
+        with self.store.connect() as conn:
+            task = conn.execute(
+                """
+                SELECT authority_required, inputs_json, evidence_refs_json
+                FROM project_tasks
+                WHERE task_id=?
+                """,
+                (applied["task_id"],),
+            ).fetchone()
+        inputs = json.loads(task["inputs_json"])
+        evidence_refs = json.loads(task["evidence_refs_json"])
+        self.assertEqual(resolution["authority_effect"], "bounded_internal_queue_changes")
+        self.assertEqual(applied["customer_visible"], False)
+        self.assertEqual(applied["external_side_effects_authorized"], [])
+        self.assertEqual(task["authority_required"], "rule")
+        self.assertFalse(inputs["customer_visible"])
+        self.assertFalse(inputs["customer_commitments_allowed"])
+        self.assertEqual(inputs["external_side_effects_authorized"], [])
+        self.assertIn(f"kernel:project_outcomes/{outcome['outcome_id']}", evidence_refs)
+        self.assertTrue(scheduling_comparison.matches)
+        self.assertEqual(scheduling_comparison.mismatches, [])
+        self.assertTrue(priority_comparison.matches)
+        self.assertEqual(priority_comparison.mismatches, [])
+
+    def test_completed_internal_outcome_produces_operator_gated_customer_visible_packet_evidence(self):
+        completed = self.completed_internal_scheduling_outcome("customer-visible-packet")
+        intent = self.staged_customer_visible_intent(
+            "customer-visible-packet",
+            completed["project_id"],
+            completed["task_id"],
+        )
+
+        packet = self.commercial.create_project_customer_visible_packet(
+            project_customer_visible_packet_command(
+                outcome_id=completed["outcome_id"],
+                key="customer-visible-packet-create",
+            ),
+            completed["outcome_id"],
+            packet_type="customer_message",
+            customer_ref="customer-customer-visible-packet",
+            channel="email",
+            subject="Support response draft",
+            summary="Operator packet for sending the completed support response draft.",
+            payload_ref="artifact://local/customer-visible-packet/customer-response-draft",
+            side_effect_intent_id=intent["intent_id"],
+        )
+
+        with self.store.connect() as conn:
+            commitments = conn.execute("SELECT COUNT(*) FROM project_customer_commitments").fetchone()[0]
+            receipts = conn.execute("SELECT COUNT(*) FROM side_effect_receipts").fetchone()[0]
+        self.assertEqual(packet.required_authority, "operator_gate")
+        self.assertEqual(packet.status, "gated")
+        self.assertIn(f"kernel:project_outcomes/{completed['outcome_id']}", packet.evidence_refs)
+        self.assertIn(f"kernel:side_effect_intents/{intent['intent_id']}", packet.evidence_refs)
+        self.assertIn("customer_visible_commitment_requires_receipt", packet.risk_flags)
+        self.assertEqual(commitments, 0)
+        self.assertEqual(receipts, 0)
+
+    def test_rejected_customer_visible_packet_records_no_commitment_or_external_receipt(self):
+        completed = self.completed_internal_scheduling_outcome("customer-visible-rejected")
+        intent = self.staged_customer_visible_intent(
+            "customer-visible-rejected",
+            completed["project_id"],
+            completed["task_id"],
+        )
+        packet = self.commercial.create_project_customer_visible_packet(
+            project_customer_visible_packet_command(
+                outcome_id=completed["outcome_id"],
+                key="customer-visible-rejected-create",
+            ),
+            completed["outcome_id"],
+            packet_type="customer_message",
+            customer_ref="customer-rejected",
+            channel="email",
+            subject="Support response draft",
+            summary="Operator packet that should be rejected without customer commitment.",
+            payload_ref="artifact://local/customer-visible-rejected/customer-response-draft",
+            side_effect_intent_id=intent["intent_id"],
+        )
+
+        resolution = self.commercial.resolve_project_customer_visible_packet(
+            project_customer_visible_resolution_command(
+                packet_id=packet.packet_id,
+                verdict="reject_customer_visible_packet",
+                key="customer-visible-rejected-resolution",
+            ),
+            packet.packet_id,
+            verdict="reject_customer_visible_packet",
+            operator_id="operator",
+            notes="Do not send this customer-visible communication.",
+        )
+
+        with self.store.connect() as conn:
+            commitments = conn.execute("SELECT COUNT(*) FROM project_customer_commitments").fetchone()[0]
+            receipts = conn.execute("SELECT COUNT(*) FROM side_effect_receipts").fetchone()[0]
+            packet_row = conn.execute(
+                "SELECT status, verdict FROM project_customer_visible_packets WHERE packet_id=?",
+                (packet.packet_id,),
+            ).fetchone()
+        self.assertEqual(resolution["customer_commitments"], [])
+        self.assertIsNone(resolution["customer_commitment_id"])
+        self.assertEqual(commitments, 0)
+        self.assertEqual(receipts, 0)
+        self.assertEqual(packet_row["status"], "decided")
+        self.assertEqual(packet_row["verdict"], "reject_customer_visible_packet")
+
+    def test_accepted_customer_visible_packet_requires_receipt_before_commitment(self):
+        completed = self.completed_internal_scheduling_outcome("customer-visible-accepted")
+        intent = self.staged_customer_visible_intent(
+            "customer-visible-accepted",
+            completed["project_id"],
+            completed["task_id"],
+        )
+        packet = self.commercial.create_project_customer_visible_packet(
+            project_customer_visible_packet_command(
+                outcome_id=completed["outcome_id"],
+                key="customer-visible-accepted-create",
+            ),
+            completed["outcome_id"],
+            packet_type="customer_message",
+            customer_ref="customer-accepted",
+            channel="email",
+            subject="Support response draft",
+            summary="Operator packet for a customer-visible support response.",
+            payload_ref="artifact://local/customer-visible-accepted/customer-response-draft",
+            side_effect_intent_id=intent["intent_id"],
+        )
+
+        with self.assertRaises(PermissionError):
+            self.commercial.resolve_project_customer_visible_packet(
+                project_customer_visible_resolution_command(
+                    packet_id=packet.packet_id,
+                    verdict="accept_customer_visible_packet",
+                    key="customer-visible-accepted-no-receipt",
+                ),
+                packet.packet_id,
+                verdict="accept_customer_visible_packet",
+            )
+        receipt_id = self.store.record_side_effect_receipt(
+            project_task_command(project_id=completed["project_id"], key="customer-visible-accepted-receipt"),
+            SideEffectReceipt(
+                intent_id=intent["intent_id"],
+                receipt_type="success",
+                receipt_hash=payload_hash({"sent": True, "packet": packet.packet_id}),
+                details={"message_ref": "artifact://local/customer-visible-accepted/customer-response-draft"},
+            ),
+        )
+        resolution = self.commercial.resolve_project_customer_visible_packet(
+            project_customer_visible_resolution_command(
+                packet_id=packet.packet_id,
+                verdict="accept_customer_visible_packet",
+                key="customer-visible-accepted-resolution",
+            ),
+            packet.packet_id,
+            verdict="accept_customer_visible_packet",
+            side_effect_receipt_id=receipt_id,
+            operator_id="operator",
+        )
+
+        with self.store.connect() as conn:
+            commitment = conn.execute(
+                """
+                SELECT packet_id, outcome_id, side_effect_intent_id, side_effect_receipt_id,
+                       commitment_type, evidence_refs_json
+                FROM project_customer_commitments
+                WHERE commitment_id=?
+                """,
+                (resolution["customer_commitment_id"],),
+            ).fetchone()
+        evidence_refs = json.loads(commitment["evidence_refs_json"])
+        self.assertEqual(commitment["packet_id"], packet.packet_id)
+        self.assertEqual(commitment["outcome_id"], completed["outcome_id"])
+        self.assertEqual(commitment["side_effect_intent_id"], intent["intent_id"])
+        self.assertEqual(commitment["side_effect_receipt_id"], receipt_id)
+        self.assertEqual(commitment["commitment_type"], "message_sent")
+        self.assertIn(f"kernel:project_outcomes/{completed['outcome_id']}", evidence_refs)
+        self.assertIn(f"kernel:side_effect_receipts/{receipt_id}", evidence_refs)
+
+    def test_customer_visible_autonomous_paths_fail_closed(self):
+        completed = self.completed_internal_scheduling_outcome("customer-visible-autonomous")
+        intent = self.staged_customer_visible_intent(
+            "customer-visible-autonomous",
+            completed["project_id"],
+            completed["task_id"],
+        )
+        with self.assertRaises(PermissionError):
+            self.commercial.create_project_customer_visible_packet(
+                project_customer_visible_packet_command(
+                    outcome_id=completed["outcome_id"],
+                    key="customer-visible-agent-create",
+                    requested_by="agent",
+                    requested_authority="operator_gate",
+                ),
+                completed["outcome_id"],
+                packet_type="customer_message",
+                customer_ref="customer-autonomous",
+                channel="email",
+                subject="Blocked",
+                summary="Blocked autonomous packet.",
+                payload_ref="artifact://local/customer-visible-autonomous/customer-response-draft",
+                side_effect_intent_id=intent["intent_id"],
+            )
+        packet = self.commercial.create_project_customer_visible_packet(
+            project_customer_visible_packet_command(
+                outcome_id=completed["outcome_id"],
+                key="customer-visible-autonomous-create",
+            ),
+            completed["outcome_id"],
+            packet_type="customer_message",
+            customer_ref="customer-autonomous",
+            channel="email",
+            subject="Support response draft",
+            summary="Packet stays gated until operator receipt evidence exists.",
+            payload_ref="artifact://local/customer-visible-autonomous/customer-response-draft",
+            side_effect_intent_id=intent["intent_id"],
+        )
+        with self.assertRaises(PermissionError):
+            self.commercial.resolve_project_customer_visible_packet(
+                project_customer_visible_resolution_command(
+                    packet_id=packet.packet_id,
+                    verdict="accept_customer_visible_packet",
+                    key="customer-visible-agent-resolution",
+                    requested_by="agent",
+                    requested_authority="operator_gate",
+                ),
+                packet.packet_id,
+                verdict="accept_customer_visible_packet",
+            )
+
+    def test_customer_visible_packet_replay_projection_comparison_remains_clean(self):
+        completed = self.completed_internal_scheduling_outcome("customer-visible-replay")
+        intent = self.staged_customer_visible_intent(
+            "customer-visible-replay",
+            completed["project_id"],
+            completed["task_id"],
+        )
+        packet = self.commercial.create_project_customer_visible_packet(
+            project_customer_visible_packet_command(
+                outcome_id=completed["outcome_id"],
+                key="customer-visible-replay-create",
+            ),
+            completed["outcome_id"],
+            packet_type="customer_message",
+            customer_ref="customer-replay",
+            channel="email",
+            subject="Support response draft",
+            summary="Replay-safe customer-visible packet.",
+            payload_ref="artifact://local/customer-visible-replay/customer-response-draft",
+            side_effect_intent_id=intent["intent_id"],
+        )
+        receipt_id = self.store.record_side_effect_receipt(
+            project_task_command(project_id=completed["project_id"], key="customer-visible-replay-receipt"),
+            SideEffectReceipt(
+                intent_id=intent["intent_id"],
+                receipt_type="success",
+                receipt_hash=payload_hash({"sent": True, "packet": packet.packet_id}),
+                details={"message_ref": "artifact://local/customer-visible-replay/customer-response-draft"},
+            ),
+        )
+        self.commercial.resolve_project_customer_visible_packet(
+            project_customer_visible_resolution_command(
+                packet_id=packet.packet_id,
+                verdict="accept_customer_visible_packet",
+                key="customer-visible-replay-resolution",
+            ),
+            packet.packet_id,
+            verdict="accept_customer_visible_packet",
+            side_effect_receipt_id=receipt_id,
+        )
+        comparison = self.commercial.compare_project_customer_visible_replay_to_projection(
+            project_customer_visible_replay_comparison_command(
+                packet_id=packet.packet_id,
+                key="customer-visible-replay-compare",
+            ),
+            packet.packet_id,
+        )
+        replay = self.store.replay_critical_state()
+
+        self.assertTrue(comparison.matches)
+        self.assertEqual(comparison.mismatches, [])
+        self.assertEqual(len(comparison.replay_commitments), 1)
+        self.assertEqual(replay.side_effects[intent["intent_id"]]["receipt"]["receipt_id"], receipt_id)
+        self.assertTrue(
+            replay.project_customer_visible_replay_projection_comparisons[comparison.comparison_id]["matches"]
+        )
+
+    def test_unaccepted_or_rejected_scheduling_assignments_cannot_record_outcomes(self):
+        for verdict in ("assigned", "rejected"):
+            with self.subTest(verdict=verdict):
+                created = self.accepted_priority_created_task(f"scheduling-outcome-{verdict}")
+                worker_id = f"scheduling-outcome-{verdict}-worker"
+                grant_id = self.store.issue_capability_grant(
+                    project_task_command(project_id=created["project_id"], key=f"scheduling-outcome-{verdict}-worker-grant"),
+                    CapabilityGrant(
+                        task_id=created["task_id"],
+                        subject_type="agent",
+                        subject_id=worker_id,
+                        capability_type="memory_write",
+                        actions=["record"],
+                        resource={"kind": "project_internal_scheduling"},
+                        scope={"project_id": created["project_id"]},
+                        conditions={"external_side_effects": "blocked_without_operator_gate_and_receipt"},
+                        expires_at="2999-01-01T00:00:00Z",
+                        policy_version=KERNEL_POLICY_VERSION,
+                        max_uses=1,
+                    ),
+                )
+                assignment_id = self.commercial.create_project_scheduling_worker_assignment_packet(
+                    project_scheduling_assignment_packet_command(
+                        task_id=created["task_id"],
+                        key=f"scheduling-outcome-{verdict}-{created['task_id']}-assignment",
+                    ),
+                    created["task_id"],
+                    worker_id=worker_id,
+                    grant_ids=[grant_id],
+                )
+                if verdict == "rejected":
+                    self.commercial.resolve_project_scheduling_worker_assignment(
+                        project_scheduling_assignment_resolution_command(
+                            assignment_id=assignment_id,
+                            verdict="reject",
+                            key=f"scheduling-outcome-{verdict}-reject",
+                            requester_id=worker_id,
+                        ),
+                        assignment_id,
+                        verdict="reject",
+                        worker_id=worker_id,
+                    )
+                with self.assertRaises(PermissionError):
+                    self.commercial.record_project_scheduling_task_outcome(
+                        project_scheduling_task_outcome_command(
+                            project_id=created["project_id"],
+                            task_id=created["task_id"],
+                            key=f"scheduling-outcome-{verdict}-record",
+                            requester_id=worker_id,
+                        ),
+                        created["task_id"],
+                        summary="Attempted to complete without accepted assignment evidence.",
+                        internal_result_ref=f"artifact://local/scheduling-outcome/{verdict}",
+                    )
+
+    def test_scheduling_task_outcome_replay_projection_comparison_remains_clean(self):
+        created = self.accepted_assigned_priority_created_task("scheduling-outcome-replay")
+        self.commercial.record_project_scheduling_task_outcome(
+            project_scheduling_task_outcome_command(
+                project_id=created["project_id"],
+                task_id=created["task_id"],
+                key="scheduling-outcome-replay-record",
+                requester_id=created["worker_id"],
+            ),
+            created["task_id"],
+            summary="Recorded replay-clean internal scheduling outcome.",
+            internal_result_ref="artifact://local/scheduling-outcome-replay/internal",
+            result={"maintenance_status": "resolved"},
+        )
+        self.commercial.derive_project_status_rollup(
+            project_status_rollup_command(project_id=created["project_id"], key="scheduling-outcome-replay-rollup"),
+            created["project_id"],
+        )
+        comparison = self.commercial.compare_project_replay_to_projection(
+            project_replay_comparison_command(project_id=created["project_id"], key="scheduling-outcome-replay-compare"),
+            created["project_id"],
+        )
+
+        self.assertTrue(comparison.matches)
+        self.assertEqual(comparison.mismatches, [])
+        replay = self.store.replay_critical_state()
+        self.assertTrue(replay.project_replay_projection_comparisons[comparison.comparison_id]["matches"])
+
+    def test_post_ship_negative_high_load_and_no_revenue_close_without_followup(self):
+        cases = [
+            ("negative", "The shipped artifact does not solve the support need.", "negative", 0, Decimal("0"), "kill"),
+            ("high-load", "The shipped artifact needs too much manual operation.", "positive", 75, Decimal("0"), "kill"),
+            ("no-revenue", "Customer accepted the artifact but no paid conversion happened.", "positive", 5, Decimal("0"), "pause"),
+        ]
+        for key, summary, sentiment, load_minutes, revenue_amount, expected_verdict in cases:
+            with self.subTest(expected_verdict=expected_verdict):
+                shipped = self.active_project_with_shipped_artifact(f"close-{key}")
+                self.record_post_ship_evidence(
+                    f"close-{key}",
+                    shipped,
+                    summary=summary,
+                    sentiment=sentiment,
+                    action_required=False,
+                    revenue_amount=revenue_amount,
+                    revenue_status="reconciled",
+                    load_minutes=load_minutes,
+                )
+                rollup = self.commercial.derive_project_status_rollup(
+                    project_status_rollup_command(project_id=shipped["project_id"], key=f"close-{key}-rollup"),
+                    shipped["project_id"],
+                )
+                close_packet = self.commercial.create_project_close_decision(
+                    project_close_decision_command(project_id=shipped["project_id"], key=f"close-{key}-packet"),
+                    shipped["project_id"],
+                    rollup_id=rollup.rollup_id,
+                )
+                resolution = self.commercial.resolve_project_close_decision(
+                    project_close_resolution_command(
+                        packet_id=close_packet.packet_id,
+                        verdict=expected_verdict,
+                        key=f"close-{key}-resolution",
+                    ),
+                    close_packet.packet_id,
+                    verdict=expected_verdict,
+                    operator_id="operator",
+                    notes="Apply close-loop recommendation without external side effects.",
+                )
+                comparison = self.commercial.compare_project_replay_to_projection(
+                    project_replay_comparison_command(project_id=shipped["project_id"], key=f"close-{key}-compare"),
+                    shipped["project_id"],
+                )
+
+                self.assertEqual(rollup.close_recommendation, expected_verdict)
+                self.assertEqual(close_packet.recommendation, expected_verdict)
+                self.assertIsNone(resolution["followup_task_id"])
+                self.assertEqual(resolution["project_status"], "killed" if expected_verdict == "kill" else "paused")
+                self.assertTrue(comparison.matches)
+                replay = self.store.replay_critical_state()
+                self.assertEqual(replay.projects[shipped["project_id"]]["status"], resolution["project_status"])
+                self.assertTrue(replay.project_replay_projection_comparisons[comparison.comparison_id]["matches"])
 
     def test_research_request_and_bundle_are_replayable_kernel_state(self):
         request = self.request()
@@ -608,6 +3184,241 @@ class KernelResearchTests(unittest.TestCase):
             kickoff["project_id"],
             rollup_id=rollup.rollup_id,
         )
+        close_resolution = self.commercial.resolve_project_close_decision(
+            project_close_resolution_command(
+                packet_id=close_packet.packet_id,
+                verdict="continue",
+                key="project-loop-close-resolution",
+            ),
+            close_packet.packet_id,
+            verdict="continue",
+            operator_id="operator",
+            notes="Continue with the scoped build follow-up requested in feedback.",
+            confidence=0.85,
+        )
+        build_task_id = close_resolution["followup_task_id"]
+        build_grant = CapabilityGrant(
+            task_id=build_task_id,
+            subject_type="agent",
+            subject_id="build-worker-1",
+            capability_type="file",
+            actions=["read", "write"],
+            resource={"kind": "project_workspace"},
+            scope={"project_id": kickoff["project_id"]},
+            conditions={"external_side_effects": "blocked"},
+            expires_at="2999-01-01T00:00:00Z",
+            policy_version=KERNEL_POLICY_VERSION,
+            max_uses=2,
+        )
+        build_grant_id = self.store.issue_capability_grant(
+            project_task_command(project_id=kickoff["project_id"], key="project-loop-build-grant"),
+            build_grant,
+        )
+        build_assignment = ProjectTaskAssignment(
+            task_id=build_task_id,
+            project_id=kickoff["project_id"],
+            worker_type="agent",
+            worker_id="build-worker-1",
+            grant_ids=[build_grant_id],
+            accepted_capabilities=[
+                {"capability_type": "file", "actions": ["read", "write"], "scope": "project_workspace"}
+            ],
+            notes="bounded build worker accepted the feedback follow-up",
+        )
+        build_assignment_id = self.store.assign_project_task(
+            project_task_command(project_id=kickoff["project_id"], key="project-loop-build-assignment"),
+            build_assignment,
+        )
+        build_delivery = self.commercial.record_project_followup_delivery(
+            project_followup_delivery_command(
+                project_id=kickoff["project_id"],
+                task_id=build_task_id,
+                key="project-loop-build-delivery",
+            ),
+            build_task_id,
+            artifact_ref="artifact://local/project-loop/scoped-build",
+            summary="Scoped build follow-up produced a governed local artifact for operator shipping review.",
+            metrics={"changes_completed": 1},
+            operator_load_actual="10 minutes",
+            next_recommendation="ship_to_customer_review",
+        )
+        post_build_rollup = self.commercial.derive_project_status_rollup(
+            project_status_rollup_command(project_id=kickoff["project_id"], key="project-loop-post-build-rollup"),
+            kickoff["project_id"],
+        )
+        post_build_close_packet = self.commercial.create_project_close_decision(
+            project_close_decision_command(project_id=kickoff["project_id"], key="project-loop-post-build-close"),
+            kickoff["project_id"],
+            rollup_id=post_build_rollup.rollup_id,
+        )
+        ship_task_id = build_delivery["ship_task_id"]
+        ship_grant = CapabilityGrant(
+            task_id=ship_task_id,
+            subject_type="adapter",
+            subject_id="side_effect_broker",
+            capability_type="side_effect",
+            actions=["prepare"],
+            resource={"kind": "publish", "artifact_ref": "artifact://local/project-loop/scoped-build"},
+            scope={"project_id": kickoff["project_id"]},
+            conditions={"operator_approved": True},
+            expires_at="2999-01-01T00:00:00Z",
+            policy_version=KERNEL_POLICY_VERSION,
+            max_uses=1,
+        )
+        ship_grant_id = self.store.issue_capability_grant(
+            project_task_command(project_id=kickoff["project_id"], key="project-loop-ship-grant"),
+            ship_grant,
+        )
+        ship_assignment = ProjectTaskAssignment(
+            task_id=ship_task_id,
+            project_id=kickoff["project_id"],
+            worker_type="agent",
+            worker_id="ship-worker-1",
+            grant_ids=[ship_grant_id],
+            accepted_capabilities=[
+                {"capability_type": "side_effect", "actions": ["prepare"], "scope": "project_delivery"}
+            ],
+            notes="operator-gated ship worker accepted the delivery follow-up",
+        )
+        ship_assignment_id = self.store.assign_project_task(
+            project_task_command(project_id=kickoff["project_id"], key="project-loop-ship-assignment"),
+            ship_assignment,
+        )
+        with self.assertRaises(PermissionError):
+            self.commercial.record_project_followup_delivery(
+                project_followup_delivery_command(
+                    project_id=kickoff["project_id"],
+                    task_id=ship_task_id,
+                    key="project-loop-ship-delivery-without-authority",
+                ),
+                ship_task_id,
+                artifact_ref="artifact://local/project-loop/scoped-build",
+                summary="Attempted customer-visible delivery without side-effect authority.",
+                delivery_channel="customer_channel",
+                customer_visible=True,
+            )
+        followup_side_effect_intent = SideEffectIntent(
+            task_id=ship_task_id,
+            side_effect_type="publish",
+            target={"channel": "operator_review_link"},
+            payload_hash=payload_hash({"artifact_ref": "artifact://local/project-loop/scoped-build"}),
+            required_authority="operator_gate",
+            grant_id=ship_grant_id,
+            timeout_policy="ask_operator",
+        )
+        followup_side_effect_intent_id = self.store.prepare_side_effect(
+            project_task_command(
+                project_id=kickoff["project_id"],
+                key="project-loop-followup-side-effect-intent",
+                requested_by="operator",
+                requested_authority="operator_gate",
+            ),
+            followup_side_effect_intent,
+        )
+        followup_side_effect_receipt = SideEffectReceipt(
+            intent_id=followup_side_effect_intent_id,
+            receipt_type="success",
+            receipt_hash=payload_hash({"published": True, "artifact_ref": "artifact://local/project-loop/scoped-build"}),
+            details={"artifact_ref": "artifact://local/project-loop/scoped-build", "visible_to": "operator"},
+        )
+        followup_side_effect_receipt_id = self.store.record_side_effect_receipt(
+            project_task_command(project_id=kickoff["project_id"], key="project-loop-followup-side-effect-receipt"),
+            followup_side_effect_receipt,
+        )
+        ship_delivery = self.commercial.record_project_followup_delivery(
+            project_followup_delivery_command(
+                project_id=kickoff["project_id"],
+                task_id=ship_task_id,
+                key="project-loop-ship-delivery",
+                requested_by="operator",
+                requested_authority="operator_gate",
+            ),
+            ship_task_id,
+            artifact_ref="artifact://local/project-loop/scoped-build",
+            summary="Operator-gated ship follow-up delivered the scoped build artifact to the review channel.",
+            delivery_channel="operator_review_link",
+            side_effect_intent_id=followup_side_effect_intent_id,
+            side_effect_receipt_id=followup_side_effect_receipt_id,
+            metrics={"delivery_completed": 1},
+            operator_load_actual="5 minutes",
+            next_recommendation="collect_feedback",
+        )
+        post_ship = self.commercial.record_project_post_ship_evidence(
+            project_post_ship_evidence_command(
+                project_id=kickoff["project_id"],
+                artifact_receipt_id=ship_delivery["artifact_receipt_id"],
+                key="project-loop-post-ship-evidence",
+            ),
+            ship_delivery["artifact_receipt_id"],
+            feedback=ProjectCustomerFeedback(
+                project_id=kickoff["project_id"],
+                task_id=ship_task_id,
+                source_type="customer",
+                customer_ref="operator-as-first-customer",
+                summary="The follow-on shipped artifact solved the scoped request and can close this loop.",
+                sentiment="positive",
+                action_required=False,
+                operator_review_required=False,
+                status="accepted",
+            ),
+            revenue=ProjectRevenueAttribution(
+                project_id=kickoff["project_id"],
+                task_id=ship_task_id,
+                amount_usd=Decimal("250"),
+                source="operator_reported",
+                attribution_period="2026-05",
+                confidence=0.9,
+                evidence_refs=[f"kernel:side_effect_receipts/{followup_side_effect_receipt_id}"],
+                status="reconciled",
+            ),
+            operator_load=ProjectOperatorLoadRecord(
+                project_id=kickoff["project_id"],
+                task_id=ship_task_id,
+                minutes=5,
+                load_type="client_sales",
+                source="operator_reported",
+                notes="Post-ship customer response and revenue attribution review",
+            ),
+        )
+        with self.assertRaises(PermissionError):
+            self.commercial.record_project_post_ship_evidence(
+                project_post_ship_evidence_command(
+                    project_id=kickoff["project_id"],
+                    artifact_receipt_id=build_delivery["artifact_receipt_id"],
+                    key="project-loop-post-ship-evidence-without-shipped-authority",
+                ),
+                build_delivery["artifact_receipt_id"],
+                feedback=ProjectCustomerFeedback(
+                    project_id=kickoff["project_id"],
+                    source_type="customer",
+                    customer_ref="customer-1",
+                    summary="This cannot be attached to a non-shipped artifact.",
+                    sentiment="positive",
+                ),
+                revenue=ProjectRevenueAttribution(
+                    project_id=kickoff["project_id"],
+                    amount_usd=Decimal("1"),
+                    source="operator_reported",
+                    attribution_period="2026-05",
+                    confidence=0.8,
+                    status="reconciled",
+                ),
+                operator_load=ProjectOperatorLoadRecord(
+                    project_id=kickoff["project_id"],
+                    minutes=1,
+                    load_type="client_sales",
+                    source="operator_reported",
+                ),
+            )
+        post_ship_rollup = self.commercial.derive_project_status_rollup(
+            project_status_rollup_command(project_id=kickoff["project_id"], key="project-loop-post-ship-rollup"),
+            kickoff["project_id"],
+        )
+        post_ship_close_packet = self.commercial.create_project_close_decision(
+            project_close_decision_command(project_id=kickoff["project_id"], key="project-loop-post-ship-close"),
+            kickoff["project_id"],
+            rollup_id=post_ship_rollup.rollup_id,
+        )
         comparison = self.commercial.compare_project_replay_to_projection(
             project_replay_comparison_command(project_id=kickoff["project_id"], key="project-loop-replay-compare"),
             kickoff["project_id"],
@@ -675,6 +3486,88 @@ class KernelResearchTests(unittest.TestCase):
                 """,
                 (comparison.comparison_id,),
             ).fetchone()
+            followup_task_row = conn.execute(
+                """
+                SELECT task_id, status, task_type, phase_name, authority_required,
+                       inputs_json, evidence_refs_json
+                FROM project_tasks
+                WHERE task_id=?
+                """,
+                (close_resolution["followup_task_id"],),
+            ).fetchone()
+            build_artifact_row = conn.execute(
+                """
+                SELECT artifact_kind, customer_visible, side_effect_receipt_id, status
+                FROM project_artifact_receipts
+                WHERE receipt_id=?
+                """,
+                (build_delivery["artifact_receipt_id"],),
+            ).fetchone()
+            build_outcome_row = conn.execute(
+                "SELECT outcome_type, status FROM project_outcomes WHERE outcome_id=?",
+                (build_delivery["outcome_id"],),
+            ).fetchone()
+            ship_task_row = conn.execute(
+                """
+                SELECT status, task_type, phase_name, authority_required,
+                       inputs_json, evidence_refs_json
+                FROM project_tasks
+                WHERE task_id=?
+                """,
+                (build_delivery["ship_task_id"],),
+            ).fetchone()
+            followup_shipped_artifact_row = conn.execute(
+                """
+                SELECT artifact_kind, customer_visible, side_effect_receipt_id, status
+                FROM project_artifact_receipts
+                WHERE receipt_id=?
+                """,
+                (ship_delivery["artifact_receipt_id"],),
+            ).fetchone()
+            ship_outcome_row = conn.execute(
+                "SELECT outcome_type, status FROM project_outcomes WHERE outcome_id=?",
+                (ship_delivery["outcome_id"],),
+            ).fetchone()
+            post_build_close_row = conn.execute(
+                """
+                SELECT recommendation, required_authority, status
+                FROM project_close_decision_packets
+                WHERE packet_id=?
+                """,
+                (post_build_close_packet.packet_id,),
+            ).fetchone()
+            post_ship_close_row = conn.execute(
+                """
+                SELECT recommendation, required_authority, status
+                FROM project_close_decision_packets
+                WHERE packet_id=?
+                """,
+                (post_ship_close_packet.packet_id,),
+            ).fetchone()
+            post_ship_feedback_row = conn.execute(
+                """
+                SELECT artifact_receipt_id, sentiment, action_required, operator_review_required, status
+                FROM project_customer_feedback
+                WHERE feedback_id=?
+                """,
+                (post_ship["feedback_id"],),
+            ).fetchone()
+            post_ship_revenue_row = conn.execute(
+                """
+                SELECT artifact_receipt_id, amount_usd, status
+                FROM project_revenue_attributions
+                WHERE attribution_id=?
+                """,
+                (post_ship["revenue_attribution_id"],),
+            ).fetchone()
+            post_ship_load_row = conn.execute(
+                """
+                SELECT artifact_receipt_id, minutes, load_type
+                FROM project_operator_load
+                WHERE load_id=?
+                """,
+                (post_ship["operator_load_id"],),
+            ).fetchone()
 
         self.assertEqual(decision_row["status"], "decided")
         self.assertEqual(decision_row["verdict"], "approve_validation")
@@ -705,7 +3598,51 @@ class KernelResearchTests(unittest.TestCase):
         self.assertEqual(rollup_row["operator_load_minutes"], 15)
         self.assertEqual(close_decision_row["recommendation"], "continue")
         self.assertEqual(close_decision_row["required_authority"], "operator_gate")
-        self.assertEqual(close_decision_row["status"], "gated")
+        self.assertEqual(close_decision_row["status"], "decided")
+        self.assertEqual(close_resolution["project_status"], "active")
+        self.assertTrue(close_resolution["followup_task_id"])
+        self.assertEqual(followup_task_row["status"], "completed")
+        self.assertEqual(followup_task_row["task_type"], "build")
+        self.assertEqual(followup_task_row["phase_name"], "Build")
+        self.assertEqual(followup_task_row["authority_required"], "single_agent")
+        self.assertIn(feedback_id, followup_task_row["inputs_json"])
+        self.assertIn(feedback_id, followup_task_row["evidence_refs_json"])
+        self.assertEqual(build_artifact_row["artifact_kind"], "build_artifact")
+        self.assertEqual(build_artifact_row["customer_visible"], 0)
+        self.assertIsNone(build_artifact_row["side_effect_receipt_id"])
+        self.assertEqual(build_artifact_row["status"], "accepted")
+        self.assertEqual(build_outcome_row["outcome_type"], "build_artifact")
+        self.assertEqual(build_outcome_row["status"], "accepted")
+        self.assertEqual(ship_task_row["status"], "completed")
+        self.assertEqual(ship_task_row["task_type"], "ship")
+        self.assertEqual(ship_task_row["phase_name"], "Ship")
+        self.assertEqual(ship_task_row["authority_required"], "operator_gate")
+        self.assertIn(build_delivery["artifact_receipt_id"], ship_task_row["inputs_json"])
+        self.assertIn(build_delivery["artifact_receipt_id"], ship_task_row["evidence_refs_json"])
+        self.assertEqual(followup_shipped_artifact_row["artifact_kind"], "shipped_artifact")
+        self.assertEqual(followup_shipped_artifact_row["customer_visible"], 1)
+        self.assertEqual(followup_shipped_artifact_row["side_effect_receipt_id"], followup_side_effect_receipt_id)
+        self.assertEqual(followup_shipped_artifact_row["status"], "accepted")
+        self.assertEqual(ship_outcome_row["outcome_type"], "shipped_artifact")
+        self.assertEqual(ship_outcome_row["status"], "accepted")
+        self.assertEqual(post_build_close_row["recommendation"], "continue")
+        self.assertEqual(post_build_close_row["required_authority"], "operator_gate")
+        self.assertEqual(post_build_close_row["status"], "gated")
+        self.assertEqual(post_ship["artifact_receipt_id"], ship_delivery["artifact_receipt_id"])
+        self.assertEqual(post_ship_feedback_row["artifact_receipt_id"], ship_delivery["artifact_receipt_id"])
+        self.assertEqual(post_ship_feedback_row["sentiment"], "positive")
+        self.assertEqual(post_ship_feedback_row["action_required"], 0)
+        self.assertEqual(post_ship_feedback_row["operator_review_required"], 0)
+        self.assertEqual(post_ship_feedback_row["status"], "accepted")
+        self.assertEqual(post_ship_revenue_row["artifact_receipt_id"], ship_delivery["artifact_receipt_id"])
+        self.assertEqual(post_ship_revenue_row["amount_usd"], "250")
+        self.assertEqual(post_ship_revenue_row["status"], "reconciled")
+        self.assertEqual(post_ship_load_row["artifact_receipt_id"], ship_delivery["artifact_receipt_id"])
+        self.assertEqual(post_ship_load_row["minutes"], 5)
+        self.assertEqual(post_ship_load_row["load_type"], "client_sales")
+        self.assertEqual(post_ship_close_row["recommendation"], "complete")
+        self.assertEqual(post_ship_close_row["required_authority"], "operator_gate")
+        self.assertEqual(post_ship_close_row["status"], "gated")
         self.assertEqual(comparison_row["matches"], 1)
         self.assertEqual(comparison_row["mismatches_json"], "[]")
 
@@ -723,6 +3660,47 @@ class KernelResearchTests(unittest.TestCase):
         self.assertEqual(replay.project_operator_load[load_id]["minutes"], 15)
         self.assertEqual(replay.project_status_rollups[rollup.rollup_id]["close_recommendation"], "continue")
         self.assertEqual(replay.project_close_decision_packets[close_packet.packet_id]["recommendation"], "continue")
+        self.assertEqual(replay.project_close_decision_packets[close_packet.packet_id]["status"], "decided")
+        self.assertEqual(replay.project_close_decision_packets[close_packet.packet_id]["verdict"], "continue")
+        self.assertEqual(replay.projects[kickoff["project_id"]]["last_close_decision_packet_id"], close_packet.packet_id)
+        self.assertEqual(replay.project_tasks[close_resolution["followup_task_id"]]["task_type"], "build")
+        self.assertEqual(
+            replay.project_tasks[close_resolution["followup_task_id"]]["inputs"]["feedback_id"],
+            feedback_id,
+        )
+        self.assertEqual(replay.project_task_assignments[build_assignment_id]["grant_ids"], [build_grant_id])
+        self.assertEqual(replay.project_tasks[build_task_id]["status"], "completed")
+        self.assertEqual(
+            replay.project_artifact_receipts[build_delivery["artifact_receipt_id"]]["artifact_kind"],
+            "build_artifact",
+        )
+        self.assertEqual(replay.project_outcomes[build_delivery["outcome_id"]]["outcome_type"], "build_artifact")
+        self.assertEqual(replay.project_task_assignments[ship_assignment_id]["grant_ids"], [ship_grant_id])
+        self.assertEqual(replay.project_tasks[build_delivery["ship_task_id"]]["task_type"], "ship")
+        self.assertEqual(replay.project_tasks[build_delivery["ship_task_id"]]["authority_required"], "operator_gate")
+        self.assertEqual(replay.project_tasks[ship_task_id]["status"], "completed")
+        self.assertEqual(
+            replay.project_artifact_receipts[ship_delivery["artifact_receipt_id"]]["side_effect_receipt_id"],
+            followup_side_effect_receipt_id,
+        )
+        self.assertEqual(replay.project_outcomes[ship_delivery["outcome_id"]]["outcome_type"], "shipped_artifact")
+        self.assertEqual(
+            replay.project_customer_feedback[post_ship["feedback_id"]]["artifact_receipt_id"],
+            ship_delivery["artifact_receipt_id"],
+        )
+        self.assertEqual(
+            replay.project_revenue_attributions[post_ship["revenue_attribution_id"]]["artifact_receipt_id"],
+            ship_delivery["artifact_receipt_id"],
+        )
+        self.assertEqual(
+            replay.project_operator_load[post_ship["operator_load_id"]]["artifact_receipt_id"],
+            ship_delivery["artifact_receipt_id"],
+        )
+        self.assertEqual(replay.project_revenue_attributions[post_ship["revenue_attribution_id"]]["amount_usd"], "250")
+        self.assertEqual(replay.project_status_rollups[post_build_rollup.rollup_id]["close_recommendation"], "continue")
+        self.assertEqual(replay.project_close_decision_packets[post_build_close_packet.packet_id]["status"], "gated")
+        self.assertEqual(replay.project_status_rollups[post_ship_rollup.rollup_id]["close_recommendation"], "complete")
+        self.assertEqual(replay.project_close_decision_packets[post_ship_close_packet.packet_id]["status"], "gated")
         self.assertTrue(replay.project_replay_projection_comparisons[comparison.comparison_id]["matches"])
 
     def test_bundle_rejects_unsupported_source_references(self):

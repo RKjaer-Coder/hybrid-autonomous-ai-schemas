@@ -43,9 +43,19 @@ EXPECTED_OBJECTS = {
             "project_customer_feedback",
             "project_revenue_attributions",
             "project_operator_load",
+            "project_commercial_rollups",
             "project_status_rollups",
             "project_close_decision_packets",
             "project_replay_projection_comparisons",
+            "project_portfolio_decision_packets",
+            "project_portfolio_replay_projection_comparisons",
+            "project_scheduling_intents",
+            "project_scheduling_priority_change_packets",
+            "project_scheduling_priority_replay_projection_comparisons",
+            "project_scheduling_replay_projection_comparisons",
+            "project_customer_visible_packets",
+            "project_customer_commitments",
+            "project_customer_visible_replay_projection_comparisons",
             "model_task_classes",
             "model_candidates",
             "model_holdout_policies",
@@ -95,9 +105,23 @@ EXPECTED_OBJECTS = {
             "idx_project_revenue_attributions_status",
             "idx_project_operator_load_project",
             "idx_project_operator_load_type",
+            "idx_project_commercial_rollups_project",
             "idx_project_status_rollups_project",
             "idx_project_close_decision_packets_project",
             "idx_project_replay_projection_comparisons_project",
+            "idx_project_portfolio_decision_packets_status",
+            "idx_project_portfolio_replay_projection_packet",
+            "idx_project_scheduling_intents_packet",
+            "idx_project_scheduling_intents_status",
+            "idx_project_scheduling_priority_packets_intent",
+            "idx_project_scheduling_priority_packets_status",
+            "idx_project_scheduling_priority_replay_projection_packet",
+            "idx_project_scheduling_replay_projection_intent",
+            "idx_project_customer_visible_packets_project",
+            "idx_project_customer_visible_packets_outcome",
+            "idx_project_customer_commitments_project",
+            "idx_project_customer_commitments_packet",
+            "idx_project_customer_visible_replay_projection_packet",
             "idx_model_task_classes_status",
             "idx_model_candidates_state",
             "idx_model_holdout_policies_task",
@@ -242,6 +266,7 @@ def _preflight_schema_compat(conn: sqlite3.Connection, schema_name: str) -> None
     if schema_name == "kernel.sql":
         _rebuild_kernel_events_for_research_entities(conn)
         _rebuild_kernel_projection_outbox_if_drifted(conn)
+        _rebuild_project_outcomes_for_operate_followup(conn)
         return
     if schema_name == "strategic_memory.sql":
         _ensure_column(
@@ -464,6 +489,65 @@ def _rebuild_kernel_projection_outbox_if_drifted(conn: sqlite3.Connection) -> No
                 """
             )
         conn.execute("DROP TABLE projection_outbox__old")
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
+
+
+def _rebuild_project_outcomes_for_operate_followup(conn: sqlite3.Connection) -> None:
+    """Rebuild old project_outcomes constraints for Operate follow-up receipts."""
+    existing_sql = _object_sql(conn, "table", "project_outcomes")
+    if not existing_sql:
+        return
+    existing_cols = _table_columns(conn, "project_outcomes")
+    if (
+        "operate_followup" in existing_sql
+        and "side_effect_intent_id" in existing_cols
+        and "side_effect_receipt_id" in existing_cols
+    ):
+        return
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.execute("ALTER TABLE project_outcomes RENAME TO project_outcomes__old")
+        conn.execute(
+            """
+            CREATE TABLE project_outcomes (
+              outcome_id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL REFERENCES projects(project_id),
+              task_id TEXT REFERENCES project_tasks(task_id),
+              phase_name TEXT,
+              outcome_type TEXT NOT NULL CHECK (outcome_type IN ('validation','build_artifact','shipped_artifact','feedback','project_close','operate_followup')),
+              summary TEXT NOT NULL,
+              artifact_refs_json TEXT NOT NULL CHECK (json_valid(artifact_refs_json)),
+              metrics_json TEXT NOT NULL CHECK (json_valid(metrics_json)),
+              feedback_json TEXT NOT NULL CHECK (json_valid(feedback_json)),
+              revenue_impact_json TEXT NOT NULL CHECK (json_valid(revenue_impact_json)),
+              operator_load_actual TEXT,
+              side_effect_intent_id TEXT REFERENCES side_effect_intents(intent_id),
+              side_effect_receipt_id TEXT REFERENCES side_effect_receipts(receipt_id),
+              status TEXT NOT NULL CHECK (status IN ('recorded','accepted','needs_followup')),
+              created_at TEXT NOT NULL
+            ) STRICT
+            """
+        )
+        side_effect_intent_expr = "side_effect_intent_id" if "side_effect_intent_id" in existing_cols else "NULL"
+        side_effect_receipt_expr = "side_effect_receipt_id" if "side_effect_receipt_id" in existing_cols else "NULL"
+        conn.execute(
+            f"""
+            INSERT INTO project_outcomes (
+              outcome_id, project_id, task_id, phase_name, outcome_type, summary,
+              artifact_refs_json, metrics_json, feedback_json, revenue_impact_json,
+              operator_load_actual, side_effect_intent_id, side_effect_receipt_id,
+              status, created_at
+            )
+            SELECT
+              outcome_id, project_id, task_id, phase_name, outcome_type, summary,
+              artifact_refs_json, metrics_json, feedback_json, revenue_impact_json,
+              operator_load_actual, {side_effect_intent_expr}, {side_effect_receipt_expr},
+              status, created_at
+            FROM project_outcomes__old
+            """
+        )
+        conn.execute("DROP TABLE project_outcomes__old")
     finally:
         conn.execute("PRAGMA foreign_keys=ON")
 
