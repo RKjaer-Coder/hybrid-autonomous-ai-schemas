@@ -4,11 +4,13 @@ from typing import Any
 
 from .records import (
     Command,
+    CommercialDecisionRecommendationRecord,
     Decision,
     OpportunityProjectDecisionPacket,
     Project,
     ProjectArtifactReceipt,
     ProjectCloseDecisionPacket,
+    ProjectCustomerCommitmentReceipt,
     ProjectCustomerFeedback,
     ProjectCustomerVisiblePacket,
     ProjectCustomerVisibleReplayProjectionComparison,
@@ -153,6 +155,8 @@ class KernelCommercialResearchWorkflow:
             "rollback_or_compensation": "No external commitments are authorized by this packet; keep project proposed.",
             "authority_policy_version": KERNEL_POLICY_VERSION,
             "freshness_summary": row["freshness_summary"],
+            "quality_gate_result": row["quality_gate_result"],
+            "unsupported_claims": unsupported_claims,
         }
         decision_id = new_id()
         decision = Decision(
@@ -196,11 +200,73 @@ class KernelCommercialResearchWorkflow:
             default_on_timeout="pause",
             status="gated",
         )
+        deliberation_record = _commercial_deliberation_record(
+            packet=packet,
+            confidence=float(row["confidence"]),
+            uncertainty=row["uncertainty"],
+            quality_gate_context=_quality_gate_context(self.store, row["bundle_id"]),
+            source_refs=source_refs,
+        )
         self.store.execute_command(
             command,
-            lambda tx: (tx.create_decision(decision), tx.create_commercial_decision_packet(packet))[1],
+            lambda tx: (
+                tx.create_decision(decision),
+                tx.create_commercial_decision_packet(packet),
+                tx.create_commercial_decision_recommendation(deliberation_record),
+            )[1],
         )
         return packet
+
+    def create_deliberation_recommendation(
+        self,
+        command: Command,
+        packet_id: str,
+    ) -> CommercialDecisionRecommendationRecord:
+        with self.store.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                  p.packet_id, p.decision_id, p.request_id, p.evidence_bundle_id,
+                  p.recommendation, p.gate_packet_json, p.evidence_used_json,
+                  p.risk_flags_json, p.default_on_timeout, d.confidence,
+                  d.decisive_uncertainty, e.sources_json
+                FROM commercial_decision_packets p
+                JOIN decisions d ON d.decision_id = p.decision_id
+                JOIN evidence_bundles e ON e.bundle_id = p.evidence_bundle_id
+                WHERE p.packet_id=?
+                """,
+                (packet_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError("commercial decision packet not found")
+        gate_packet = _loads(row["gate_packet_json"])
+        sources = _loads(row["sources_json"])
+        packet = OpportunityProjectDecisionPacket(
+            packet_id=row["packet_id"],
+            decision_id=row["decision_id"],
+            request_id=row["request_id"],
+            evidence_bundle_id=row["evidence_bundle_id"],
+            decision_target=gate_packet.get("decision_target", "existing-packet"),
+            question=gate_packet["question"],
+            recommendation=row["recommendation"],
+            required_authority="operator_gate",
+            opportunity={},
+            project={},
+            gate_packet=gate_packet,
+            evidence_used=_loads(row["evidence_used_json"]),
+            risk_flags=_loads(row["risk_flags_json"]),
+            default_on_timeout=row["default_on_timeout"],
+            status="gated",
+        )
+        record = _commercial_deliberation_record(
+            packet=packet,
+            confidence=float(row["confidence"] or 0.0),
+            uncertainty=row["decisive_uncertainty"] or gate_packet.get("uncertainty", ""),
+            quality_gate_context=_quality_gate_context(self.store, row["evidence_bundle_id"]),
+            source_refs=[source["url_or_ref"] for source in sources],
+        )
+        self.store.create_commercial_decision_recommendation(command, record)
+        return record
 
     def approve_g1_validation_project(
         self,
@@ -301,6 +367,15 @@ class KernelCommercialResearchWorkflow:
 
     def record_project_customer_feedback(self, command: Command, feedback: ProjectCustomerFeedback) -> str:
         return self.store.record_project_customer_feedback(command, feedback)
+
+    def record_project_customer_commitment_receipt(
+        self,
+        command: Command,
+        receipt: ProjectCustomerCommitmentReceipt,
+    ) -> dict[str, str | None]:
+        if command.requested_by in {"agent", "model", "tool"}:
+            raise PermissionError("workers cannot record customer commitment receipts")
+        return self.store.record_project_customer_commitment_receipt(command, receipt)
 
     def record_project_revenue_attribution(self, command: Command, attribution: ProjectRevenueAttribution) -> str:
         return self.store.record_project_revenue_attribution(command, attribution)
@@ -735,6 +810,25 @@ def commercial_decision_packet_command(
         requested_authority="operator_gate",
         idempotency_key=key or f"commercial-decision-packet:{evidence_bundle_id}:{new_id()}",
         payload=payload or {"evidence_bundle_id": evidence_bundle_id},
+    )
+
+
+def commercial_deliberation_recommendation_command(
+    *,
+    packet_id: str,
+    key: str | None = None,
+    payload: dict[str, Any] | None = None,
+    requester_id: str = "kernel",
+) -> Command:
+    return Command(
+        command_type="commercial.deliberation_recommendation",
+        requested_by="kernel",
+        requester_id=requester_id,
+        target_entity_type="decision",
+        target_entity_id=packet_id,
+        requested_authority=None,
+        idempotency_key=key or f"commercial-deliberation-recommendation:{packet_id}:{new_id()}",
+        payload=payload or {"packet_id": packet_id},
     )
 
 
@@ -1224,6 +1318,25 @@ def project_customer_visible_replay_comparison_command(
     )
 
 
+def project_customer_commitment_receipt_command(
+    *,
+    commitment_id: str,
+    key: str | None = None,
+    payload: dict[str, Any] | None = None,
+    requester_id: str = "operator",
+    requested_by: str = "operator",
+) -> Command:
+    return Command(
+        command_type="commercial.project_customer_commitment_receipt",
+        requested_by=requested_by,  # type: ignore[arg-type]
+        requester_id=requester_id,
+        target_entity_type="project",
+        target_entity_id=commitment_id,
+        idempotency_key=key or f"commercial-project-customer-commitment-receipt:{commitment_id}:{new_id()}",
+        payload=payload or {"commitment_id": commitment_id},
+    )
+
+
 def project_scheduling_assignment_packet_command(
     *,
     task_id: str,
@@ -1300,7 +1413,7 @@ def _recommendation(
     contradictions: list[dict[str, Any]],
     unsupported_claims: list[str],
 ) -> str:
-    if quality_gate_result == "degraded" or len(unsupported_claims) >= 2:
+    if quality_gate_result in {"degraded", "fail"} or len(unsupported_claims) >= 2:
         return "insufficient_evidence"
     if contradictions:
         return "pause"
@@ -1321,6 +1434,8 @@ def _risk_flags(
     claims: list[dict[str, Any]],
 ) -> list[str]:
     flags: list[str] = []
+    if quality_gate_result == "fail":
+        flags.append("quality_gate_failed")
     if quality_gate_result == "degraded":
         flags.append("quality_gate_degraded")
     if confidence < 0.65:
@@ -1423,11 +1538,93 @@ def _validation_cost_estimate(claims: list[dict[str, Any]]) -> dict[str, Any]:
     return {"amount": 0, "currency": "USD", "basis": cost_claim or "default zero-spend validation"}
 
 
+def _quality_gate_context(store: KernelStore, bundle_id: str) -> dict[str, Any]:
+    with store.connect() as conn:
+        row = conn.execute(
+            """
+            SELECT gate_event_id, request_id, bundle_id, source_plan_id, profile,
+                   result, confidence, checks_json, created_at
+            FROM quality_gate_events
+            WHERE bundle_id=?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (bundle_id,),
+        ).fetchone()
+    if row is None:
+        raise ValueError("quality gate context not found for commercial packet")
+    return {
+        "gate_event_id": row["gate_event_id"],
+        "request_id": row["request_id"],
+        "bundle_id": row["bundle_id"],
+        "source_plan_id": row["source_plan_id"],
+        "profile": row["profile"],
+        "result": row["result"],
+        "confidence": float(row["confidence"]),
+        "checks": _loads(row["checks_json"]),
+        "created_at": row["created_at"],
+    }
+
+
+def _commercial_deliberation_record(
+    *,
+    packet: OpportunityProjectDecisionPacket,
+    confidence: float,
+    uncertainty: str,
+    quality_gate_context: dict[str, Any],
+    source_refs: list[str],
+) -> CommercialDecisionRecommendationRecord:
+    result = quality_gate_context["result"]
+    high_uncertainty = confidence < 0.70 or bool(packet.gate_packet.get("counter_thesis"))
+    contradictory = "contradictory_evidence" in packet.risk_flags
+    if result == "fail":
+        authority = "single_agent"
+        rationale = "Quality gate failed; deterministic policy records an insufficient-evidence single-agent recommendation for operator review."
+    elif result == "degraded" or contradictory or high_uncertainty:
+        authority = "council"
+        rationale = "Commercial packet has material uncertainty or degraded evidence; deterministic policy routes it to a Council recommendation record."
+    else:
+        authority = "single_agent"
+        rationale = "Commercial packet is routine enough for a single-agent recommendation record while preserving the operator gate."
+
+    evidence_refs = [f"kernel:evidence_bundles/{packet.evidence_bundle_id}"]
+    evidence_refs.extend(f"kernel:claims/{claim_id}" for claim_id in packet.evidence_used)
+    evidence_refs.extend(source_refs)
+    evidence_refs.append(f"kernel:quality_gate_events/{quality_gate_context['gate_event_id']}")
+    return CommercialDecisionRecommendationRecord(
+        packet_id=packet.packet_id,
+        decision_id=packet.decision_id,
+        request_id=packet.request_id,
+        evidence_bundle_id=packet.evidence_bundle_id,
+        recommendation_authority=authority,  # type: ignore[arg-type]
+        recommendation=packet.recommendation,
+        confidence=confidence,
+        decisive_factors=packet.evidence_used,
+        decisive_uncertainty=uncertainty,
+        evidence_used=packet.evidence_used,
+        evidence_refs=evidence_refs,
+        quality_gate_context=quality_gate_context,
+        risk_flags=packet.risk_flags,
+        operator_gate_defaults={
+            "required_authority": "operator_gate",
+            "decision_default_on_timeout": packet.default_on_timeout,
+            "default_on_timeout": packet.default_on_timeout,
+            "status": packet.status,
+            "side_effects_authorized": packet.gate_packet.get("side_effects_authorized", []),
+        },
+        rationale=rationale,
+        model_routes_used=[],
+        degraded=result != "pass",
+    )
+
+
 __all__ = [
     "KernelCommercialResearchWorkflow",
     "commercial_decision_packet_command",
+    "commercial_deliberation_recommendation_command",
     "g1_project_approval_command",
     "project_artifact_receipt_command",
+    "project_customer_commitment_receipt_command",
     "project_customer_visible_packet_command",
     "project_customer_visible_replay_comparison_command",
     "project_customer_visible_resolution_command",

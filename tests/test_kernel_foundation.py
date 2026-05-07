@@ -300,6 +300,7 @@ class KernelFoundationTests(unittest.TestCase):
         self.assertIn("project_scheduling_replay_projection_comparisons", tables)
         self.assertIn("project_customer_visible_packets", tables)
         self.assertIn("project_customer_commitments", tables)
+        self.assertIn("project_customer_commitment_receipts", tables)
         self.assertIn("project_customer_visible_replay_projection_comparisons", tables)
         self.assertNotIn("research_tasks", tables)
 

@@ -63,6 +63,13 @@ ProjectArtifactStatus = Literal["recorded", "accepted", "quarantined"]
 ProjectFeedbackSourceType = Literal["operator", "customer", "platform", "internal_signal"]
 ProjectFeedbackSentiment = Literal["positive", "neutral", "negative", "mixed", "unknown"]
 ProjectFeedbackStatus = Literal["recorded", "accepted", "needs_followup"]
+ProjectCustomerCommitmentReceiptType = Literal[
+    "customer_response",
+    "delivery_failure",
+    "timeout",
+    "compensation_needed",
+]
+ProjectCustomerCommitmentReceiptStatus = Literal["recorded", "accepted", "needs_followup"]
 ProjectRevenueSource = Literal["operator_reported", "invoice", "stripe", "app_store", "marketplace", "platform", "other"]
 ProjectRevenueStatus = Literal["recorded", "reconciled", "needs_reconciliation"]
 ProjectOperatorLoadType = Literal[
@@ -107,6 +114,7 @@ QualityGateResult = Literal["pass", "fail", "degraded"]
 SourcePlanStatus = Literal["planned", "collecting", "completed", "blocked"]
 AcquisitionBoundaryResult = Literal["allowed", "blocked", "requires_grant"]
 CommercialDecisionRecommendation = Literal["pursue", "pause", "reject", "insufficient_evidence"]
+CommercialDeliberationAuthority = Literal["single_agent", "council"]
 CommercialRevenueMechanism = Literal[
     "client_work",
     "software",
@@ -409,6 +417,29 @@ class OpportunityProjectDecisionPacket:
     default_on_timeout: str
     status: Literal["proposed", "gated", "decided", "cancelled"] = "proposed"
     packet_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class CommercialDecisionRecommendationRecord:
+    packet_id: str
+    decision_id: str
+    request_id: str
+    evidence_bundle_id: str
+    recommendation_authority: CommercialDeliberationAuthority
+    recommendation: CommercialDecisionRecommendation
+    confidence: float
+    decisive_factors: list[str]
+    decisive_uncertainty: str
+    evidence_used: list[str]
+    evidence_refs: list[str]
+    quality_gate_context: JsonObject
+    risk_flags: list[str]
+    operator_gate_defaults: JsonObject
+    rationale: str
+    model_routes_used: list[str]
+    degraded: bool
+    record_id: str = field(default_factory=new_id)
     created_at: str = field(default_factory=now_iso)
 
 
@@ -783,12 +814,30 @@ class ProjectCustomerCommitment:
 
 
 @dataclass(frozen=True)
+class ProjectCustomerCommitmentReceipt:
+    commitment_id: str
+    project_id: str
+    receipt_type: ProjectCustomerCommitmentReceiptType
+    summary: str
+    receipt_id: str = field(default_factory=new_id)
+    source_type: ProjectFeedbackSourceType = "customer"
+    customer_ref: str | None = None
+    evidence_refs: list[str] = field(default_factory=list)
+    action_required: bool = True
+    status: ProjectCustomerCommitmentReceiptStatus = "needs_followup"
+    followup_task_id: str | None = None
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
 class ProjectCustomerVisibleReplayProjectionComparison:
     packet_id: str
     replay_packet: JsonObject
     projection_packet: JsonObject
     replay_commitments: list[JsonObject]
     projection_commitments: list[JsonObject]
+    replay_commitment_receipts: list[JsonObject]
+    projection_commitment_receipts: list[JsonObject]
     matches: bool
     mismatches: list[str]
     comparison_id: str = field(default_factory=new_id)

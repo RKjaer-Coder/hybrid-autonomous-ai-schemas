@@ -14,8 +14,10 @@ from kernel import (
     KernelCommercialResearchWorkflow,
     KernelResearchEngine,
     KernelStore,
+    ProjectResearchInput,
     Project,
     ProjectArtifactReceipt,
+    ProjectCustomerCommitmentReceipt,
     ProjectCustomerFeedback,
     ProjectOperatorLoadRecord,
     ProjectOutcome,
@@ -44,6 +46,7 @@ from kernel.commercial import (
     project_artifact_receipt_command,
     project_close_decision_command,
     project_close_resolution_command,
+    project_customer_commitment_receipt_command,
     project_customer_visible_packet_command,
     project_customer_visible_replay_comparison_command,
     project_customer_visible_resolution_command,
@@ -719,6 +722,119 @@ class KernelResearchTests(unittest.TestCase):
             ),
         )
         return {"grant_id": grant_id, "intent_id": intent_id}
+
+    def accepted_customer_visible_commitment(self, key: str) -> dict[str, str]:
+        completed = self.completed_internal_scheduling_outcome(key)
+        intent = self.staged_customer_visible_intent(key, completed["project_id"], completed["task_id"])
+        packet = self.commercial.create_project_customer_visible_packet(
+            project_customer_visible_packet_command(
+                outcome_id=completed["outcome_id"],
+                key=f"{key}-customer-visible-create",
+            ),
+            completed["outcome_id"],
+            packet_type="customer_message",
+            customer_ref=f"customer-{key}",
+            channel="email",
+            subject="Support response draft",
+            summary="Operator packet for a customer-visible support response.",
+            payload_ref=f"artifact://local/{key}/customer-response-draft",
+            side_effect_intent_id=intent["intent_id"],
+        )
+        receipt_id = self.store.record_side_effect_receipt(
+            project_task_command(project_id=completed["project_id"], key=f"{key}-customer-visible-receipt"),
+            SideEffectReceipt(
+                intent_id=intent["intent_id"],
+                receipt_type="success",
+                receipt_hash=payload_hash({"sent": True, "packet": packet.packet_id}),
+                details={"message_ref": f"artifact://local/{key}/customer-response-draft"},
+            ),
+        )
+        resolution = self.commercial.resolve_project_customer_visible_packet(
+            project_customer_visible_resolution_command(
+                packet_id=packet.packet_id,
+                verdict="accept_customer_visible_packet",
+                key=f"{key}-customer-visible-resolution",
+            ),
+            packet.packet_id,
+            verdict="accept_customer_visible_packet",
+            side_effect_receipt_id=receipt_id,
+        )
+        return {
+            **completed,
+            "packet_id": packet.packet_id,
+            "intent_id": intent["intent_id"],
+            "side_effect_receipt_id": receipt_id,
+            "commitment_id": resolution["customer_commitment_id"],
+        }
+
+    def running_commitment_receipt_followup_task(
+        self,
+        key: str,
+        *,
+        receipt_type: str,
+        summary: str,
+        source_type: str = "platform",
+    ) -> dict[str, str]:
+        accepted = self.accepted_customer_visible_commitment(key)
+        result = self.commercial.record_project_customer_commitment_receipt(
+            project_customer_commitment_receipt_command(
+                commitment_id=accepted["commitment_id"],
+                key=f"{key}-receipt-record",
+            ),
+            ProjectCustomerCommitmentReceipt(
+                commitment_id=accepted["commitment_id"],
+                project_id=accepted["project_id"],
+                receipt_type=receipt_type,  # type: ignore[arg-type]
+                source_type=source_type,  # type: ignore[arg-type]
+                summary=summary,
+                evidence_refs=[f"platform://commitment-receipts/{key}"],
+                action_required=True,
+                status="needs_followup",
+            ),
+        )
+        task_id = result["followup_task_id"]
+        grant = CapabilityGrant(
+            task_id=task_id,
+            subject_type="agent",
+            subject_id=f"{key}-receipt-worker",
+            capability_type="memory_write",
+            actions=["record"],
+            resource={"kind": "project_commitment_receipt_followup"},
+            scope={"project_id": accepted["project_id"]},
+            conditions={"external_side_effects": "blocked_without_operator_gate_and_receipt"},
+            expires_at="2999-01-01T00:00:00Z",
+            policy_version=KERNEL_POLICY_VERSION,
+            max_uses=1,
+        )
+        grant_id = self.store.issue_capability_grant(
+            project_task_command(project_id=accepted["project_id"], key=f"{key}-receipt-grant"),
+            grant,
+        )
+        assignment_id = self.store.assign_project_task(
+            project_task_command(project_id=accepted["project_id"], key=f"{key}-receipt-assignment"),
+            ProjectTaskAssignment(
+                task_id=task_id,
+                project_id=accepted["project_id"],
+                worker_type="agent",
+                worker_id=f"{key}-receipt-worker",
+                grant_ids=[grant_id],
+                accepted_capabilities=[
+                    {
+                        "capability_type": "memory_write",
+                        "actions": ["record"],
+                        "scope": "project_commitment_receipt_followup",
+                    }
+                ],
+                notes="bounded worker accepted the customer commitment receipt follow-up",
+            ),
+        )
+        return {
+            **accepted,
+            "receipt_id": result["receipt_id"],
+            "followup_task_id": task_id,
+            "receipt_grant_id": grant_id,
+            "receipt_assignment_id": assignment_id,
+        }
 
     def test_accepted_post_ship_feedback_creates_governed_operate_followup_types(self):
         cases = [
@@ -2612,6 +2728,314 @@ class KernelResearchTests(unittest.TestCase):
             replay.project_customer_visible_replay_projection_comparisons[comparison.comparison_id]["matches"]
         )
 
+    def test_customer_commitment_receipt_creates_governed_operate_followup(self):
+        accepted = self.accepted_customer_visible_commitment("commitment-receipt-failure")
+        result = self.commercial.record_project_customer_commitment_receipt(
+            project_customer_commitment_receipt_command(
+                commitment_id=accepted["commitment_id"],
+                key="commitment-receipt-failure-record",
+            ),
+            ProjectCustomerCommitmentReceipt(
+                commitment_id=accepted["commitment_id"],
+                project_id=accepted["project_id"],
+                receipt_type="delivery_failure",
+                source_type="platform",
+                summary="The email provider reported delivery failure for the customer response.",
+                evidence_refs=["platform://email/delivery-failure/commitment-receipt-failure"],
+                action_required=True,
+                status="needs_followup",
+            ),
+        )
+        rollup = self.commercial.derive_project_status_rollup(
+            project_status_rollup_command(project_id=accepted["project_id"], key="commitment-receipt-failure-rollup"),
+            accepted["project_id"],
+        )
+        comparison = self.commercial.compare_project_customer_visible_replay_to_projection(
+            project_customer_visible_replay_comparison_command(
+                packet_id=accepted["packet_id"],
+                key="commitment-receipt-failure-compare",
+            ),
+            accepted["packet_id"],
+        )
+
+        with self.store.connect() as conn:
+            receipt = conn.execute(
+                """
+                SELECT commitment_id, receipt_type, source_type, action_required,
+                       status, followup_task_id
+                FROM project_customer_commitment_receipts
+                WHERE receipt_id=?
+                """,
+                (result["receipt_id"],),
+            ).fetchone()
+            task = conn.execute(
+                """
+                SELECT phase_name, task_type, authority_required, inputs_json,
+                       expected_output_schema_json, required_capabilities_json,
+                       evidence_refs_json
+                FROM project_tasks
+                WHERE task_id=?
+                """,
+                (result["followup_task_id"],),
+            ).fetchone()
+            commercial_rollup = conn.execute(
+                "SELECT evidence_refs_json, risk_flags_json FROM project_commercial_rollups WHERE rollup_id=?",
+                (rollup.commercial_rollup_id,),
+            ).fetchone()
+
+        inputs = json.loads(task["inputs_json"])
+        expected_output_schema = json.loads(task["expected_output_schema_json"])
+        capabilities = json.loads(task["required_capabilities_json"])
+        evidence_refs = json.loads(task["evidence_refs_json"])
+        commercial_evidence = json.loads(commercial_rollup["evidence_refs_json"])
+        commercial_risks = json.loads(commercial_rollup["risk_flags_json"])
+        self.assertEqual(receipt["commitment_id"], accepted["commitment_id"])
+        self.assertEqual(receipt["receipt_type"], "delivery_failure")
+        self.assertEqual(receipt["source_type"], "platform")
+        self.assertEqual(receipt["action_required"], 1)
+        self.assertEqual(receipt["status"], "needs_followup")
+        self.assertEqual(receipt["followup_task_id"], result["followup_task_id"])
+        self.assertEqual(task["phase_name"], "Operate")
+        self.assertEqual(task["task_type"], "operate")
+        self.assertEqual(task["authority_required"], "rule")
+        self.assertEqual(inputs["commitment_id"], accepted["commitment_id"])
+        self.assertEqual(inputs["customer_commitment_receipt_id"], result["receipt_id"])
+        self.assertEqual(inputs["operate_followup_type"], "maintenance")
+        self.assertEqual(
+            expected_output_schema["properties"]["external_commitment_change"]["const"],
+            False,
+        )
+        self.assertEqual(capabilities[0]["external_side_effects"], "blocked_without_operator_gate_and_receipt")
+        self.assertIn(f"kernel:project_customer_commitments/{accepted['commitment_id']}", evidence_refs)
+        self.assertIn(f"kernel:project_customer_commitment_receipts/{result['receipt_id']}", evidence_refs)
+        self.assertIn("customer_delivery_failure", rollup.risk_flags)
+        self.assertIn("customer_commitment_receipt_followup_open", rollup.risk_flags)
+        self.assertIn(f"kernel:project_customer_commitment_receipts/{result['receipt_id']}", commercial_evidence)
+        self.assertIn("customer_commitment_delivery_failure_needs_followup", commercial_risks)
+        self.assertTrue(comparison.matches)
+        self.assertEqual(len(comparison.replay_commitment_receipts), 1)
+        self.assertEqual(comparison.replay_commitment_receipts, comparison.projection_commitment_receipts)
+
+    def test_customer_commitment_receipts_fail_closed_before_accepted_commitment(self):
+        completed = self.completed_internal_scheduling_outcome("commitment-receipt-blocked")
+        intent = self.staged_customer_visible_intent(
+            "commitment-receipt-blocked",
+            completed["project_id"],
+            completed["task_id"],
+        )
+        packet = self.commercial.create_project_customer_visible_packet(
+            project_customer_visible_packet_command(
+                outcome_id=completed["outcome_id"],
+                key="commitment-receipt-blocked-create",
+            ),
+            completed["outcome_id"],
+            packet_type="customer_message",
+            customer_ref="customer-commitment-receipt-blocked",
+            channel="email",
+            subject="Support response draft",
+            summary="Gated customer-visible packet without accepted commitment.",
+            payload_ref="artifact://local/commitment-receipt-blocked/customer-response-draft",
+            side_effect_intent_id=intent["intent_id"],
+        )
+        with self.assertRaises(ValueError):
+            self.commercial.record_project_customer_commitment_receipt(
+                project_customer_commitment_receipt_command(
+                    commitment_id=packet.packet_id,
+                    key="commitment-receipt-unknown-commitment",
+                ),
+                ProjectCustomerCommitmentReceipt(
+                    commitment_id=packet.packet_id,
+                    project_id=completed["project_id"],
+                    receipt_type="timeout",
+                    source_type="platform",
+                    summary="No accepted commitment exists for this packet.",
+                ),
+            )
+        accepted = self.accepted_customer_visible_commitment("commitment-receipt-agent-block")
+        with self.assertRaises(PermissionError):
+            self.commercial.record_project_customer_commitment_receipt(
+                project_customer_commitment_receipt_command(
+                    commitment_id=accepted["commitment_id"],
+                    key="commitment-receipt-agent-block-record",
+                    requested_by="agent",
+                ),
+                ProjectCustomerCommitmentReceipt(
+                    commitment_id=accepted["commitment_id"],
+                    project_id=accepted["project_id"],
+                    receipt_type="compensation_needed",
+                    source_type="customer",
+                    summary="The customer requested compensation.",
+                ),
+            )
+        with self.assertRaises(PermissionError):
+            self.commercial.record_project_customer_commitment_receipt(
+                project_customer_commitment_receipt_command(
+                    commitment_id=accepted["commitment_id"],
+                    key="commitment-receipt-no-followup-block",
+                ),
+                ProjectCustomerCommitmentReceipt(
+                    commitment_id=accepted["commitment_id"],
+                    project_id=accepted["project_id"],
+                    receipt_type="timeout",
+                    source_type="platform",
+                    summary="The customer-visible commitment timed out.",
+                    action_required=False,
+                    status="recorded",
+                ),
+            )
+
+    def test_commitment_receipt_followup_outcomes_complete_receipt_governance(self):
+        cases = [
+            (
+                "customer-response",
+                "customer_response",
+                "customer",
+                "The customer confirmed renewal interest and asked for adoption follow-up.",
+                "retention",
+                {"retention_status": "retained"},
+                "retained_customer_count",
+                1,
+            ),
+            (
+                "delivery-failure",
+                "delivery_failure",
+                "platform",
+                "The email provider reported delivery failure for the customer response.",
+                "maintenance",
+                {"maintenance_status": "resolved"},
+                "maintenance_resolved_count",
+                1,
+            ),
+            (
+                "timeout",
+                "timeout",
+                "platform",
+                "The customer-visible commitment timed out without a response.",
+                "customer_support",
+                {"support_status": "open"},
+                "support_open_count",
+                1,
+            ),
+            (
+                "compensation",
+                "compensation_needed",
+                "customer",
+                "The customer requested compensation after a failed delivery.",
+                "customer_support",
+                {"support_status": "resolved", "compensation_status": "operator_review_prepared"},
+                "support_resolved_count",
+                1,
+            ),
+        ]
+        for key, receipt_type, source_type, summary, expected_type, result_payload, rollup_field, expected_value in cases:
+            with self.subTest(receipt_type=receipt_type):
+                running = self.running_commitment_receipt_followup_task(
+                    f"commitment-receipt-outcome-{key}",
+                    receipt_type=receipt_type,
+                    source_type=source_type,
+                    summary=summary,
+                )
+                result = self.commercial.record_project_operate_followup_outcome(
+                    project_operate_followup_outcome_command(
+                        project_id=running["project_id"],
+                        task_id=running["followup_task_id"],
+                        key=f"commitment-receipt-outcome-{key}-record",
+                    ),
+                    running["followup_task_id"],
+                    summary="Completed governed internal follow-up for the customer commitment receipt.",
+                    internal_result_ref=f"artifact://local/commitment-receipt-outcome-{key}/internal-result",
+                    operator_load_minutes=5,
+                    operator_load_source="operator_reported",
+                    result=result_payload,
+                )
+                rollup = self.commercial.derive_project_status_rollup(
+                    project_status_rollup_command(
+                        project_id=running["project_id"],
+                        key=f"commitment-receipt-outcome-{key}-rollup",
+                    ),
+                    running["project_id"],
+                )
+                comparison = self.commercial.compare_project_customer_visible_replay_to_projection(
+                    project_customer_visible_replay_comparison_command(
+                        packet_id=running["packet_id"],
+                        key=f"commitment-receipt-outcome-{key}-compare",
+                    ),
+                    running["packet_id"],
+                )
+
+                with self.store.connect() as conn:
+                    receipt = conn.execute(
+                        """
+                        SELECT action_required, status, followup_task_id
+                        FROM project_customer_commitment_receipts
+                        WHERE receipt_id=?
+                        """,
+                        (running["receipt_id"],),
+                    ).fetchone()
+                    outcome = conn.execute(
+                        """
+                        SELECT artifact_refs_json, feedback_json, side_effect_intent_id,
+                               side_effect_receipt_id
+                        FROM project_outcomes
+                        WHERE outcome_id=?
+                        """,
+                        (result["outcome_id"],),
+                    ).fetchone()
+                    commercial_rollup = conn.execute(
+                        "SELECT risk_flags_json FROM project_commercial_rollups WHERE rollup_id=?",
+                        (rollup.commercial_rollup_id,),
+                    ).fetchone()
+
+                feedback = json.loads(outcome["feedback_json"])
+                artifact_refs = json.loads(outcome["artifact_refs_json"])
+                commercial_risks = json.loads(commercial_rollup["risk_flags_json"])
+                self.assertEqual(result["operate_followup_type"], expected_type)
+                self.assertEqual(receipt["action_required"], 0)
+                self.assertEqual(receipt["status"], "accepted")
+                self.assertEqual(receipt["followup_task_id"], running["followup_task_id"])
+                self.assertEqual(feedback["customer_commitment_receipt_id"], running["receipt_id"])
+                self.assertEqual(feedback["source_commitment_id"], running["commitment_id"])
+                self.assertEqual(feedback["receipt_type"], receipt_type)
+                self.assertFalse(feedback["external_commitment_change"])
+                self.assertIsNone(outcome["side_effect_intent_id"])
+                self.assertIsNone(outcome["side_effect_receipt_id"])
+                self.assertIn(f"kernel:project_customer_commitments/{running['commitment_id']}", artifact_refs)
+                self.assertIn(f"kernel:project_customer_commitment_receipts/{running['receipt_id']}", artifact_refs)
+                self.assertNotIn("customer_commitment_receipt_followup_open", rollup.risk_flags)
+                self.assertNotIn(f"customer_commitment_{receipt_type}_needs_followup", commercial_risks)
+                self.assertEqual(rollup.commercial_rollup[rollup_field], expected_value)
+                self.assertTrue(comparison.matches)
+                self.assertEqual(comparison.mismatches, [])
+
+    def test_commitment_receipt_followup_side_effect_intents_require_receipts(self):
+        running = self.running_commitment_receipt_followup_task(
+            "commitment-receipt-outcome-side-effect-blocked",
+            receipt_type="timeout",
+            source_type="platform",
+            summary="The customer-visible commitment timed out without a response.",
+        )
+        side_effect = self.staged_operate_side_effect(
+            "commitment-receipt-outcome-side-effect-blocked",
+            running["project_id"],
+            running["followup_task_id"],
+        )
+        with self.assertRaises(PermissionError):
+            self.commercial.record_project_operate_followup_outcome(
+                project_operate_followup_outcome_command(
+                    project_id=running["project_id"],
+                    task_id=running["followup_task_id"],
+                    key="commitment-receipt-outcome-side-effect-blocked-record",
+                    requested_by="operator",
+                    requested_authority="operator_gate",
+                ),
+                running["followup_task_id"],
+                summary="Prepared customer follow-up, but no durable execution receipt exists.",
+                internal_result_ref="artifact://local/commitment-receipt-outcome-side-effect-blocked/result",
+                operator_load_minutes=4,
+                operator_load_source="operator_reported",
+                side_effect_intent_id=side_effect["intent_id"],
+            )
+
     def test_unaccepted_or_rejected_scheduling_assignments_cannot_record_outcomes(self):
         for verdict in ("assigned", "rejected"):
             with self.subTest(verdict=verdict):
@@ -2865,6 +3289,147 @@ class KernelResearchTests(unittest.TestCase):
         replay = self.store.replay_critical_state()
         self.assertIn(check_id, replay.source_acquisition_checks)
 
+    def test_project_pulled_commercial_inputs_synthesize_evidence_bundle_and_packet_lineage(self):
+        request = self.request()
+        self.engine.create_request(request_command("research-create-synthesis"), request)
+        plan = self.plan(request.request_id)
+        self.engine.create_source_plan(source_plan_command(request_id=request.request_id, key="source-plan-synthesis"), plan)
+        self.engine.start_collection(request_command("research-collect-synthesis"), request.request_id)
+        self.engine.start_synthesis(request_command("research-synthesize-synthesis"), request.request_id)
+
+        bundle = self.engine.synthesize_project_commercial_evidence_bundle(
+            evidence_bundle_command(request_id=request.request_id, key="evidence-synthesis"),
+            request.request_id,
+            plan.source_plan_id,
+            [
+                ProjectResearchInput(
+                    url_or_ref="https://example.com/pricing",
+                    text="Official pricing lists a $99 per month package for comparable teams.",
+                    source_type="official",
+                    source_date="2026-05-01",
+                    access_method="public_web",
+                    data_class="public",
+                    retrieved_at="2026-05-02T08:00:00Z",
+                    relevance=0.9,
+                    reliability=0.95,
+                    license_or_tos_notes="metadata-only cache",
+                ),
+                ProjectResearchInput(
+                    url_or_ref="internal://operator/customer-call-1",
+                    text=(
+                        "Buyer customer notes show willingness-to-pay for local-first agent operations. "
+                        "Validation can run as a one-week pilot with low operator load of two hours."
+                    ),
+                    source_type="primary_data",
+                    source_date="2026-04-29",
+                    access_method="operator_provided",
+                    data_class="internal",
+                    retrieved_at="2026-05-02T08:01:00Z",
+                    relevance=0.88,
+                    reliability=0.82,
+                    artifact_ref="kernel:artifact_refs/customer-call-1",
+                ),
+            ],
+        )
+
+        packet = self.commercial.create_decision_packet(
+            commercial_decision_packet_command(evidence_bundle_id=bundle.bundle_id, key="commercial-synthesis-packet"),
+            bundle.bundle_id,
+        )
+
+        self.assertEqual(bundle.quality_gate_result, "pass")
+        self.assertEqual(packet.recommendation, "pursue")
+        self.assertEqual(packet.gate_packet["quality_gate_result"], "pass")
+        self.assertIn(bundle.claims[0].claim_id, packet.evidence_used)
+        self.assertEqual(bundle.sources[1].artifact_ref, "kernel:artifact_refs/customer-call-1")
+        self.assertIn("kernel:artifact_refs/customer-call-1", [bundle.sources[1].artifact_ref])
+
+        with self.store.connect() as conn:
+            row = conn.execute(
+                "SELECT sources_json, claims_json FROM evidence_bundles WHERE bundle_id=?",
+                (bundle.bundle_id,),
+            ).fetchone()
+            decision_row = conn.execute(
+                "SELECT evidence_refs_json, risk_flags_json FROM decisions WHERE decision_id=?",
+                (packet.decision_id,),
+            ).fetchone()
+
+        sources = json.loads(row["sources_json"])
+        claims = json.loads(row["claims_json"])
+        decision_refs = json.loads(decision_row["evidence_refs_json"])
+        self.assertEqual(sources[1]["artifact_ref"], "kernel:artifact_refs/customer-call-1")
+        self.assertEqual(claims[0]["source_ids"], [sources[0]["source_id"]])
+        self.assertIn("https://example.com/pricing", decision_refs)
+        self.assertNotIn("quality_gate_failed", json.loads(decision_row["risk_flags_json"]))
+
+    def test_failed_synthesized_commercial_quality_gate_feeds_insufficient_evidence_packet(self):
+        request = self.request()
+        self.engine.create_request(request_command("research-create-failed-synthesis"), request)
+        plan = self.plan(request.request_id)
+        self.engine.create_source_plan(source_plan_command(request_id=request.request_id, key="source-plan-failed-synthesis"), plan)
+        self.engine.start_collection(request_command("research-collect-failed-synthesis"), request.request_id)
+        self.engine.start_synthesis(request_command("research-synthesize-failed-synthesis"), request.request_id)
+
+        bundle = self.engine.synthesize_project_commercial_evidence_bundle(
+            evidence_bundle_command(request_id=request.request_id, key="evidence-failed-synthesis"),
+            request.request_id,
+            plan.source_plan_id,
+            [
+                {
+                    "url_or_ref": "internal://operator/idea-only",
+                    "text": "Maybe build this later.",
+                    "source_type": "internal_record",
+                    "source_date": "2026-05-01",
+                    "access_method": "operator_provided",
+                    "data_class": "internal",
+                }
+            ],
+        )
+        packet = self.commercial.create_decision_packet(
+            commercial_decision_packet_command(evidence_bundle_id=bundle.bundle_id, key="commercial-failed-synthesis-packet"),
+            bundle.bundle_id,
+        )
+
+        self.assertEqual(bundle.quality_gate_result, "fail")
+        self.assertEqual(packet.recommendation, "insufficient_evidence")
+        self.assertEqual(packet.gate_packet["quality_gate_result"], "fail")
+        self.assertIn("Customer/problem evidence is missing.", packet.gate_packet["unsupported_claims"])
+        self.assertIn("quality_gate_failed", packet.risk_flags)
+        self.assertIn("unsupported_claims", packet.risk_flags)
+
+        with self.store.connect() as conn:
+            gate_row = conn.execute(
+                "SELECT result, checks_json FROM quality_gate_events WHERE bundle_id=?",
+                (bundle.bundle_id,),
+            ).fetchone()
+            packet_row = conn.execute(
+                "SELECT recommendation, risk_flags_json FROM commercial_decision_packets WHERE packet_id=?",
+                (packet.packet_id,),
+            ).fetchone()
+            recommendation_row = conn.execute(
+                """
+                SELECT recommendation_authority, recommendation, evidence_bundle_id,
+                       quality_gate_context_json, risk_flags_json,
+                       operator_gate_defaults_json, degraded
+                FROM commercial_decision_recommendations
+                WHERE packet_id=?
+                """,
+                (packet.packet_id,),
+            ).fetchone()
+
+        checks = json.loads(gate_row["checks_json"])
+        self.assertEqual(gate_row["result"], "fail")
+        self.assertIn("minimum_sources", {check["name"] for check in checks})
+        self.assertEqual(packet_row["recommendation"], "insufficient_evidence")
+        self.assertIn("quality_gate_failed", json.loads(packet_row["risk_flags_json"]))
+        self.assertEqual(recommendation_row["recommendation_authority"], "single_agent")
+        self.assertEqual(recommendation_row["recommendation"], "insufficient_evidence")
+        self.assertEqual(recommendation_row["evidence_bundle_id"], bundle.bundle_id)
+        self.assertEqual(json.loads(recommendation_row["quality_gate_context_json"])["result"], "fail")
+        self.assertIn("quality_gate_failed", json.loads(recommendation_row["risk_flags_json"]))
+        self.assertEqual(json.loads(recommendation_row["operator_gate_defaults_json"])["default_on_timeout"], "pause")
+        self.assertEqual(recommendation_row["degraded"], 1)
+
     def test_commercial_workflow_creates_replayable_opportunity_project_decision_packet(self):
         request = self.request()
         self.engine.create_request(request_command("research-create-commercial-packet"), request)
@@ -2974,6 +3539,86 @@ class KernelResearchTests(unittest.TestCase):
         self.assertEqual(packet.recommendation, "insufficient_evidence")
         self.assertIn("quality_gate_degraded", packet.risk_flags)
         self.assertIn("unsupported_claims", packet.risk_flags)
+        with self.store.connect() as conn:
+            recommendation_row = conn.execute(
+                """
+                SELECT recommendation_authority, quality_gate_context_json,
+                       evidence_refs_json, operator_gate_defaults_json, degraded
+                FROM commercial_decision_recommendations
+                WHERE packet_id=?
+                """,
+                (packet.packet_id,),
+            ).fetchone()
+        self.assertEqual(recommendation_row["recommendation_authority"], "council")
+        self.assertEqual(json.loads(recommendation_row["quality_gate_context_json"])["result"], "degraded")
+        self.assertIn(f"kernel:evidence_bundles/{degraded.bundle_id}", json.loads(recommendation_row["evidence_refs_json"]))
+        self.assertEqual(json.loads(recommendation_row["operator_gate_defaults_json"])["required_authority"], "operator_gate")
+        self.assertEqual(recommendation_row["degraded"], 1)
+
+    def test_high_uncertainty_commercial_packet_routes_to_council_recommendation_record(self):
+        request = self.request()
+        self.engine.create_request(request_command("research-create-high-uncertainty-packet"), request)
+        plan = self.plan(request.request_id)
+        self.engine.create_source_plan(source_plan_command(request_id=request.request_id, key="source-plan-high-uncertainty-packet"), plan)
+        self.engine.start_collection(request_command("research-collect-high-uncertainty-packet"), request.request_id)
+        self.engine.start_synthesis(request_command("research-synthesize-high-uncertainty-packet"), request.request_id)
+        bundle = self.bundle_for_plan(request.request_id, plan.source_plan_id)
+        uncertain = EvidenceBundle(
+            request_id=bundle.request_id,
+            source_plan_id=bundle.source_plan_id,
+            sources=bundle.sources,
+            claims=bundle.claims,
+            contradictions=[],
+            unsupported_claims=[],
+            freshness_summary=bundle.freshness_summary,
+            confidence=0.66,
+            uncertainty="Buyer segment breadth is materially uncertain despite enough source coverage.",
+            counter_thesis="Early demand may be custom consulting pull rather than product demand.",
+            quality_gate_result="pass",
+            data_classes=bundle.data_classes,
+            retention_policy=bundle.retention_policy,
+        )
+        self.engine.commit_evidence_bundle(
+            evidence_bundle_command(request_id=request.request_id, key="evidence-high-uncertainty-packet"),
+            uncertain,
+        )
+
+        packet = self.commercial.create_decision_packet(
+            commercial_decision_packet_command(evidence_bundle_id=uncertain.bundle_id, key="high-uncertainty-commercial-packet"),
+            uncertain.bundle_id,
+        )
+
+        self.assertEqual(packet.recommendation, "pause")
+        with self.store.connect() as conn:
+            recommendation_row = conn.execute(
+                """
+                SELECT recommendation_authority, recommendation, confidence,
+                       decisive_uncertainty, evidence_used_json,
+                       quality_gate_context_json, operator_gate_defaults_json,
+                       model_routes_used_json, degraded
+                FROM commercial_decision_recommendations
+                WHERE packet_id=?
+                """,
+                (packet.packet_id,),
+            ).fetchone()
+
+        self.assertEqual(recommendation_row["recommendation_authority"], "council")
+        self.assertEqual(recommendation_row["recommendation"], "pause")
+        self.assertAlmostEqual(recommendation_row["confidence"], 0.66)
+        self.assertEqual(
+            recommendation_row["decisive_uncertainty"],
+            "Buyer segment breadth is materially uncertain despite enough source coverage.",
+        )
+        self.assertEqual(json.loads(recommendation_row["evidence_used_json"]), packet.evidence_used)
+        self.assertEqual(json.loads(recommendation_row["quality_gate_context_json"])["result"], "pass")
+        self.assertEqual(json.loads(recommendation_row["operator_gate_defaults_json"])["default_on_timeout"], "pause")
+        self.assertEqual(json.loads(recommendation_row["operator_gate_defaults_json"])["side_effects_authorized"], [])
+        self.assertEqual(json.loads(recommendation_row["model_routes_used_json"]), [])
+        self.assertEqual(recommendation_row["degraded"], 0)
+        replay = self.store.replay_critical_state()
+        record = next(iter(replay.commercial_decision_recommendations.values()))
+        self.assertEqual(record["packet_id"], packet.packet_id)
+        self.assertEqual(record["recommendation_authority"], "council")
 
     def test_g1_approval_creates_replayable_project_task_and_outcome_loop(self):
         request = self.request()

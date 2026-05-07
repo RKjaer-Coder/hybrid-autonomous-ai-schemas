@@ -157,6 +157,28 @@ CREATE TABLE IF NOT EXISTS commercial_decision_packets (
   created_at TEXT NOT NULL
 ) STRICT;
 
+CREATE TABLE IF NOT EXISTS commercial_decision_recommendations (
+  record_id TEXT PRIMARY KEY,
+  packet_id TEXT NOT NULL UNIQUE REFERENCES commercial_decision_packets(packet_id),
+  decision_id TEXT NOT NULL REFERENCES decisions(decision_id),
+  request_id TEXT NOT NULL REFERENCES research_requests(request_id),
+  evidence_bundle_id TEXT NOT NULL REFERENCES evidence_bundles(bundle_id),
+  recommendation_authority TEXT NOT NULL CHECK (recommendation_authority IN ('single_agent','council')),
+  recommendation TEXT NOT NULL CHECK (recommendation IN ('pursue','pause','reject','insufficient_evidence')),
+  confidence REAL NOT NULL CHECK (confidence >= 0.0 AND confidence <= 1.0),
+  decisive_factors_json TEXT NOT NULL CHECK (json_valid(decisive_factors_json)),
+  decisive_uncertainty TEXT NOT NULL,
+  evidence_used_json TEXT NOT NULL CHECK (json_valid(evidence_used_json)),
+  evidence_refs_json TEXT NOT NULL CHECK (json_valid(evidence_refs_json)),
+  quality_gate_context_json TEXT NOT NULL CHECK (json_valid(quality_gate_context_json)),
+  risk_flags_json TEXT NOT NULL CHECK (json_valid(risk_flags_json)),
+  operator_gate_defaults_json TEXT NOT NULL CHECK (json_valid(operator_gate_defaults_json)),
+  rationale TEXT NOT NULL,
+  model_routes_used_json TEXT NOT NULL CHECK (json_valid(model_routes_used_json)),
+  degraded INTEGER NOT NULL CHECK (degraded IN (0, 1)),
+  created_at TEXT NOT NULL
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS projects (
   project_id TEXT PRIMARY KEY,
   opportunity_id TEXT,
@@ -494,6 +516,21 @@ CREATE TABLE IF NOT EXISTS project_customer_commitments (
   created_at TEXT NOT NULL
 ) STRICT;
 
+CREATE TABLE IF NOT EXISTS project_customer_commitment_receipts (
+  receipt_id TEXT PRIMARY KEY,
+  commitment_id TEXT NOT NULL REFERENCES project_customer_commitments(commitment_id),
+  project_id TEXT NOT NULL REFERENCES projects(project_id),
+  receipt_type TEXT NOT NULL CHECK (receipt_type IN ('customer_response','delivery_failure','timeout','compensation_needed')),
+  source_type TEXT NOT NULL CHECK (source_type IN ('operator','customer','platform','internal_signal')),
+  customer_ref TEXT,
+  summary TEXT NOT NULL,
+  evidence_refs_json TEXT NOT NULL CHECK (json_valid(evidence_refs_json)),
+  action_required INTEGER NOT NULL CHECK (action_required IN (0, 1)),
+  status TEXT NOT NULL CHECK (status IN ('recorded','accepted','needs_followup')),
+  followup_task_id TEXT REFERENCES project_tasks(task_id),
+  created_at TEXT NOT NULL
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS project_customer_visible_replay_projection_comparisons (
   comparison_id TEXT PRIMARY KEY,
   packet_id TEXT NOT NULL REFERENCES project_customer_visible_packets(packet_id),
@@ -501,6 +538,8 @@ CREATE TABLE IF NOT EXISTS project_customer_visible_replay_projection_comparison
   projection_packet_json TEXT NOT NULL CHECK (json_valid(projection_packet_json)),
   replay_commitments_json TEXT NOT NULL CHECK (json_valid(replay_commitments_json)),
   projection_commitments_json TEXT NOT NULL CHECK (json_valid(projection_commitments_json)),
+  replay_commitment_receipts_json TEXT NOT NULL CHECK (json_valid(replay_commitment_receipts_json)),
+  projection_commitment_receipts_json TEXT NOT NULL CHECK (json_valid(projection_commitment_receipts_json)),
   matches INTEGER NOT NULL CHECK (matches IN (0, 1)),
   mismatches_json TEXT NOT NULL CHECK (json_valid(mismatches_json)),
   created_at TEXT NOT NULL
@@ -784,6 +823,8 @@ CREATE INDEX IF NOT EXISTS idx_evidence_bundles_request ON evidence_bundles(requ
 CREATE INDEX IF NOT EXISTS idx_evidence_bundles_quality ON evidence_bundles(quality_gate_result, confidence);
 CREATE INDEX IF NOT EXISTS idx_commercial_decision_packets_target ON commercial_decision_packets(decision_target, status, created_at);
 CREATE INDEX IF NOT EXISTS idx_commercial_decision_packets_bundle ON commercial_decision_packets(evidence_bundle_id);
+CREATE INDEX IF NOT EXISTS idx_commercial_decision_recommendations_packet ON commercial_decision_recommendations(packet_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_commercial_decision_recommendations_authority ON commercial_decision_recommendations(recommendation_authority, created_at);
 CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_projects_packet ON projects(decision_packet_id);
 CREATE INDEX IF NOT EXISTS idx_project_tasks_project_status ON project_tasks(project_id, status, created_at);
@@ -816,6 +857,8 @@ CREATE INDEX IF NOT EXISTS idx_project_customer_visible_packets_project ON proje
 CREATE INDEX IF NOT EXISTS idx_project_customer_visible_packets_outcome ON project_customer_visible_packets(outcome_id, status, created_at);
 CREATE INDEX IF NOT EXISTS idx_project_customer_commitments_project ON project_customer_commitments(project_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_project_customer_commitments_packet ON project_customer_commitments(packet_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_project_customer_commitment_receipts_project ON project_customer_commitment_receipts(project_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_project_customer_commitment_receipts_commitment ON project_customer_commitment_receipts(commitment_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_project_customer_visible_replay_projection_packet ON project_customer_visible_replay_projection_comparisons(packet_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_model_task_classes_status ON model_task_classes(status, task_class);
 CREATE INDEX IF NOT EXISTS idx_model_candidates_state ON model_candidates(promotion_state, provider, hardware_fit);

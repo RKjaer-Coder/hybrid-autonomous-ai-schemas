@@ -11,6 +11,7 @@ from .records import (
     Budget,
     CapabilityGrant,
     Command,
+    CommercialDecisionRecommendationRecord,
     Decision,
     EvidenceBundle,
     Event,
@@ -29,6 +30,7 @@ from .records import (
     ProjectCommercialRollup,
     ProjectCloseDecisionPacket,
     ProjectCustomerCommitment,
+    ProjectCustomerCommitmentReceipt,
     ProjectCustomerFeedback,
     ProjectCustomerVisiblePacket,
     ProjectCustomerVisibleReplayProjectionComparison,
@@ -99,6 +101,7 @@ class ReplayState:
     quality_gate_events: dict[str, dict[str, Any]] = field(default_factory=dict)
     evidence_bundles: dict[str, dict[str, Any]] = field(default_factory=dict)
     commercial_decision_packets: dict[str, dict[str, Any]] = field(default_factory=dict)
+    commercial_decision_recommendations: dict[str, dict[str, Any]] = field(default_factory=dict)
     projects: dict[str, dict[str, Any]] = field(default_factory=dict)
     project_tasks: dict[str, dict[str, Any]] = field(default_factory=dict)
     project_task_assignments: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -119,6 +122,7 @@ class ReplayState:
     project_scheduling_replay_projection_comparisons: dict[str, dict[str, Any]] = field(default_factory=dict)
     project_customer_visible_packets: dict[str, dict[str, Any]] = field(default_factory=dict)
     project_customer_commitments: dict[str, dict[str, Any]] = field(default_factory=dict)
+    project_customer_commitment_receipts: dict[str, dict[str, Any]] = field(default_factory=dict)
     project_customer_visible_replay_projection_comparisons: dict[str, dict[str, Any]] = field(default_factory=dict)
     model_task_classes: dict[str, dict[str, Any]] = field(default_factory=dict)
     model_candidates: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -300,6 +304,16 @@ class KernelStore:
 
         return self.execute_command(command, handler)
 
+    def create_commercial_decision_recommendation(
+        self,
+        command: Command,
+        recommendation: CommercialDecisionRecommendationRecord,
+    ) -> str:
+        def handler(tx: KernelTransaction) -> str:
+            return tx.create_commercial_decision_recommendation(recommendation)
+
+        return self.execute_command(command, handler)
+
     def create_project(self, command: Command, project: Project) -> str:
         def handler(tx: KernelTransaction) -> str:
             return tx.create_project(project)
@@ -442,6 +456,16 @@ class KernelStore:
     def record_project_customer_feedback(self, command: Command, feedback: ProjectCustomerFeedback) -> str:
         def handler(tx: KernelTransaction) -> str:
             return tx.record_project_customer_feedback(feedback)
+
+        return self.execute_command(command, handler)
+
+    def record_project_customer_commitment_receipt(
+        self,
+        command: Command,
+        receipt: ProjectCustomerCommitmentReceipt,
+    ) -> dict[str, str | None]:
+        def handler(tx: KernelTransaction) -> dict[str, str | None]:
+            return tx.record_project_customer_commitment_receipt(receipt)
 
         return self.execute_command(command, handler)
 
@@ -903,6 +927,8 @@ class KernelStore:
             state.research_requests[payload["request_id"]]["updated_at"] = payload["created_at"]
         elif event_type == "commercial_decision_packet_created":
             state.commercial_decision_packets[entity_id] = dict(payload)
+        elif event_type == "commercial_decision_recommendation_recorded":
+            state.commercial_decision_recommendations[entity_id] = dict(payload)
         elif event_type == "project_created":
             state.projects[entity_id] = dict(payload)
         elif event_type == "project_task_created":
@@ -989,6 +1015,14 @@ class KernelStore:
             packet["decided_at"] = payload["decided_at"]
         elif event_type == "project_customer_commitment_recorded":
             state.project_customer_commitments[entity_id] = dict(payload)
+        elif event_type == "project_customer_commitment_receipt_recorded":
+            state.project_customer_commitment_receipts[entity_id] = dict(payload)
+        elif event_type == "project_customer_commitment_receipt_followup_completed":
+            receipt = state.project_customer_commitment_receipts.get(payload["receipt_id"])
+            if receipt is not None:
+                receipt["action_required"] = False
+                receipt["status"] = "accepted"
+                receipt["followup_task_id"] = payload["followup_task_id"]
         elif event_type == "project_customer_visible_replay_projection_compared":
             state.project_customer_visible_replay_projection_comparisons[entity_id] = dict(payload)
         elif event_type == "model_task_class_registered":
@@ -1773,8 +1807,6 @@ class KernelTransaction:
             raise ValueError("evidence bundle not found for decision packet")
         if row["profile"] not in {"commercial", "project_support"}:
             raise ValueError("commercial decision packet requires commercial or project_support evidence")
-        if row["quality_gate_result"] == "fail":
-            raise ValueError("failed evidence bundle cannot produce a commercial decision packet")
         if row["decision_target"] and row["decision_target"] != packet.decision_target:
             raise ValueError("decision packet target does not match research request")
         if not packet.decision_target:
@@ -1829,6 +1861,97 @@ class KernelTransaction:
         )
         self.enqueue_projection(event_id, "commercial_decision_packet_projection")
         return packet.packet_id
+
+    def create_commercial_decision_recommendation(
+        self,
+        recommendation: CommercialDecisionRecommendationRecord,
+    ) -> str:
+        if recommendation.recommendation_authority not in {"single_agent", "council"}:
+            raise ValueError("commercial recommendation authority must be single_agent or council")
+        if not 0.0 <= recommendation.confidence <= 1.0:
+            raise ValueError("commercial recommendation confidence must be between 0 and 1")
+        packet = self.conn.execute(
+            """
+            SELECT p.decision_id, p.request_id, p.evidence_bundle_id, p.recommendation,
+                   p.risk_flags_json, p.default_on_timeout, p.status,
+                   d.required_authority, d.default_on_timeout AS decision_default_on_timeout
+            FROM commercial_decision_packets p
+            JOIN decisions d ON d.decision_id = p.decision_id
+            WHERE p.packet_id=?
+            """,
+            (recommendation.packet_id,),
+        ).fetchone()
+        if packet is None:
+            raise ValueError("commercial decision packet not found for recommendation")
+        if packet["decision_id"] != recommendation.decision_id:
+            raise ValueError("commercial recommendation Decision id must match packet")
+        if packet["request_id"] != recommendation.request_id:
+            raise ValueError("commercial recommendation request id must match packet")
+        if packet["evidence_bundle_id"] != recommendation.evidence_bundle_id:
+            raise ValueError("commercial recommendation evidence bundle must match packet")
+        if packet["recommendation"] != recommendation.recommendation:
+            raise ValueError("commercial recommendation verdict must match packet recommendation")
+        if packet["required_authority"] != "operator_gate":
+            raise PermissionError("commercial recommendation records preserve operator-gate final authority")
+        defaults = recommendation.operator_gate_defaults
+        if defaults.get("required_authority") != "operator_gate":
+            raise ValueError("commercial recommendation must preserve operator-gate authority default")
+        if defaults.get("default_on_timeout") != packet["default_on_timeout"]:
+            raise ValueError("commercial recommendation timeout default must match packet")
+        if defaults.get("decision_default_on_timeout") != packet["decision_default_on_timeout"]:
+            raise ValueError("commercial recommendation decision timeout default must match Decision record")
+        quality_gate_context = recommendation.quality_gate_context
+        if quality_gate_context.get("bundle_id") != recommendation.evidence_bundle_id:
+            raise ValueError("commercial recommendation quality context must reference evidence bundle")
+        if quality_gate_context.get("request_id") != recommendation.request_id:
+            raise ValueError("commercial recommendation quality context must reference research request")
+        if not recommendation.evidence_refs:
+            raise ValueError("commercial recommendation requires durable evidence references")
+        if f"kernel:evidence_bundles/{recommendation.evidence_bundle_id}" not in recommendation.evidence_refs:
+            raise ValueError("commercial recommendation must preserve EvidenceBundle lineage")
+
+        payload = _commercial_decision_recommendation_payload(recommendation)
+        event_id = self.append_event(
+            "commercial_decision_recommendation_recorded",
+            "decision",
+            recommendation.record_id,
+            payload,
+        )
+        self.conn.execute(
+            """
+            INSERT INTO commercial_decision_recommendations (
+              record_id, packet_id, decision_id, request_id, evidence_bundle_id,
+              recommendation_authority, recommendation, confidence,
+              decisive_factors_json, decisive_uncertainty, evidence_used_json,
+              evidence_refs_json, quality_gate_context_json, risk_flags_json,
+              operator_gate_defaults_json, rationale, model_routes_used_json,
+              degraded, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                recommendation.record_id,
+                recommendation.packet_id,
+                recommendation.decision_id,
+                recommendation.request_id,
+                recommendation.evidence_bundle_id,
+                recommendation.recommendation_authority,
+                recommendation.recommendation,
+                recommendation.confidence,
+                canonical_json(recommendation.decisive_factors),
+                recommendation.decisive_uncertainty,
+                canonical_json(recommendation.evidence_used),
+                canonical_json(recommendation.evidence_refs),
+                canonical_json(recommendation.quality_gate_context),
+                canonical_json(recommendation.risk_flags),
+                canonical_json(recommendation.operator_gate_defaults),
+                recommendation.rationale,
+                canonical_json(recommendation.model_routes_used),
+                1 if recommendation.degraded else 0,
+                recommendation.created_at,
+            ),
+        )
+        self.enqueue_projection(event_id, "commercial_decision_recommendation_projection")
+        return recommendation.record_id
 
     def create_project(self, project: Project) -> str:
         if not project.name.strip() or not project.objective.strip():
@@ -2326,6 +2449,24 @@ class KernelTransaction:
             raise ValueError("operate follow-up operator load source is required")
 
         inputs = _loads(task["inputs_json"])
+        commitment_receipt_id = inputs.get("customer_commitment_receipt_id")
+        commitment_id = inputs.get("commitment_id")
+        receipt_row = None
+        if commitment_receipt_id:
+            receipt_row = self.conn.execute(
+                """
+                SELECT receipt_id, commitment_id, receipt_type, followup_task_id
+                FROM project_customer_commitment_receipts
+                WHERE receipt_id=?
+                """,
+                (commitment_receipt_id,),
+            ).fetchone()
+            if receipt_row is None:
+                raise ValueError("operate follow-up outcome references unknown customer commitment receipt")
+            if receipt_row["followup_task_id"] != task_id:
+                raise PermissionError("customer commitment receipt follow-up task mismatch")
+            if commitment_id and receipt_row["commitment_id"] != commitment_id:
+                raise ValueError("customer commitment receipt/commitment mismatch")
         expected_followup_type = operate_followup_type or inputs.get("operate_followup_type")
         if expected_followup_type not in {
             "revenue_reconciliation",
@@ -2351,6 +2492,8 @@ class KernelTransaction:
         elif external_commitment_change:
             raise PermissionError("operate follow-up external commitments require a durable side-effect receipt")
         elif side_effect_intent_id:
+            if commitment_receipt_id:
+                raise PermissionError("customer commitment receipt follow-up side effects require a durable receipt")
             if self.command.requested_by != "operator" or self.command.requested_authority != "operator_gate":
                 raise PermissionError("staged operate follow-up side-effect intents require operator-gate authority")
             self._require_task_side_effect_intent(task_id, side_effect_intent_id)
@@ -2363,11 +2506,30 @@ class KernelTransaction:
         output_result["side_effect_receipt_id"] = side_effect_receipt_id
         output_result["source_feedback_id"] = inputs.get("feedback_id")
         output_result["source_artifact_receipt_id"] = inputs.get("artifact_receipt_id")
+        output_result["source_commitment_id"] = commitment_id
+        output_result["customer_commitment_receipt_id"] = commitment_receipt_id
+        output_result["receipt_type"] = receipt_row["receipt_type"] if receipt_row else inputs.get("receipt_type")
+        output_result["source_outcome_id"] = inputs.get("source_outcome_id")
+        output_result["evidence_refs"] = _merge_refs(
+            _loads(task["evidence_refs_json"]),
+            output_result.get("evidence_refs") or [],
+            (
+                [
+                    f"kernel:project_customer_commitments/{commitment_id}",
+                    f"kernel:project_customer_commitment_receipts/{commitment_receipt_id}",
+                ]
+                if commitment_receipt_id and commitment_id
+                else []
+            ),
+        )
 
-        artifact_refs = [
-            internal_result_ref,
-            f"kernel:project_tasks/{task_id}",
-        ]
+        artifact_refs = _merge_refs(
+            [
+                internal_result_ref,
+                f"kernel:project_tasks/{task_id}",
+            ],
+            output_result["evidence_refs"],
+        )
         if inputs.get("feedback_id"):
             artifact_refs.append(f"kernel:project_customer_feedback/{inputs['feedback_id']}")
         if resolved_intent_id:
@@ -2391,6 +2553,31 @@ class KernelTransaction:
             status="accepted",
         )
         outcome_id = self.record_project_outcome(outcome)
+        if commitment_receipt_id:
+            followup_payload = {
+                "receipt_id": commitment_receipt_id,
+                "commitment_id": commitment_id,
+                "project_id": task["project_id"],
+                "followup_task_id": task_id,
+                "outcome_id": outcome_id,
+                "status": "accepted",
+                "action_required": False,
+            }
+            event_id = self.append_event(
+                "project_customer_commitment_receipt_followup_completed",
+                "project",
+                commitment_receipt_id,
+                followup_payload,
+            )
+            self.conn.execute(
+                """
+                UPDATE project_customer_commitment_receipts
+                SET status='accepted', action_required=0
+                WHERE receipt_id=? AND followup_task_id=?
+                """,
+                (commitment_receipt_id, task_id),
+            )
+            self.enqueue_projection(event_id, "project_customer_commitment_receipt_followup_projection")
         load_type = inputs.get("default_operator_load_type") or {
             "revenue_reconciliation": "reconciliation",
             "retention": "client_sales",
@@ -2777,6 +2964,103 @@ class KernelTransaction:
         self.enqueue_projection(event_id, "project_feedback_projection")
         return feedback.feedback_id
 
+    def record_project_customer_commitment_receipt(
+        self,
+        receipt: ProjectCustomerCommitmentReceipt,
+    ) -> dict[str, str | None]:
+        if self.command.requested_by in {"agent", "model", "tool"}:
+            raise PermissionError("workers cannot record customer commitment receipts")
+        if self.command.payload.get("customer_commitment_requested") or self.command.payload.get("external_action_executed"):
+            raise PermissionError("commitment receipt ingestion cannot create customer commitments or execute external actions")
+        if not receipt.summary.strip():
+            raise ValueError("customer commitment receipt summary is required")
+        if receipt.receipt_type not in {"customer_response", "delivery_failure", "timeout", "compensation_needed"}:
+            raise ValueError("unknown customer commitment receipt type")
+        if receipt.source_type not in {"operator", "customer", "platform", "internal_signal"}:
+            raise ValueError("unknown customer commitment receipt source type")
+        if receipt.receipt_type in {"delivery_failure", "timeout", "compensation_needed"} and not receipt.action_required:
+            raise PermissionError("failure, timeout, and compensation receipts require governed follow-up")
+
+        commitment = self.conn.execute(
+            """
+            SELECT c.*, p.status AS packet_status, p.verdict AS packet_verdict
+            FROM project_customer_commitments c
+            JOIN project_customer_visible_packets p ON p.packet_id = c.packet_id
+            WHERE c.commitment_id=?
+            """,
+            (receipt.commitment_id,),
+        ).fetchone()
+        if commitment is None:
+            raise ValueError("customer commitment receipt requires an accepted commitment")
+        if commitment["project_id"] != receipt.project_id:
+            raise ValueError("customer commitment receipt project mismatch")
+        if commitment["packet_status"] != "decided" or commitment["packet_verdict"] != "accept_customer_visible_packet":
+            raise PermissionError("customer commitment receipts require an accepted customer-visible packet")
+
+        customer_ref = receipt.customer_ref or commitment["customer_ref"]
+        evidence_refs = _merge_refs(
+            _loads(commitment["evidence_refs_json"]),
+            receipt.evidence_refs,
+            [
+                f"kernel:project_customer_commitments/{receipt.commitment_id}",
+                f"kernel:project_customer_visible_packets/{commitment['packet_id']}",
+            ],
+        )
+        followup_task_id = receipt.followup_task_id
+        if receipt.action_required and followup_task_id is None:
+            followup_task_id = self._create_commitment_receipt_followup_task(
+                commitment,
+                receipt,
+                customer_ref=customer_ref,
+                evidence_refs=evidence_refs,
+            )
+        normalized = ProjectCustomerCommitmentReceipt(
+            receipt_id=receipt.receipt_id,
+            commitment_id=receipt.commitment_id,
+            project_id=receipt.project_id,
+            receipt_type=receipt.receipt_type,
+            source_type=receipt.source_type,
+            customer_ref=customer_ref,
+            summary=receipt.summary,
+            evidence_refs=evidence_refs,
+            action_required=receipt.action_required,
+            status=receipt.status,
+            followup_task_id=followup_task_id,
+            created_at=receipt.created_at,
+        )
+        payload = _project_customer_commitment_receipt_payload(normalized)
+        event_id = self.append_event("project_customer_commitment_receipt_recorded", "project", normalized.receipt_id, payload)
+        self.conn.execute(
+            """
+            INSERT INTO project_customer_commitment_receipts (
+              receipt_id, commitment_id, project_id, receipt_type, source_type,
+              customer_ref, summary, evidence_refs_json, action_required,
+              status, followup_task_id, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                normalized.receipt_id,
+                normalized.commitment_id,
+                normalized.project_id,
+                normalized.receipt_type,
+                normalized.source_type,
+                normalized.customer_ref,
+                normalized.summary,
+                canonical_json(normalized.evidence_refs),
+                int(normalized.action_required),
+                normalized.status,
+                normalized.followup_task_id,
+                normalized.created_at,
+            ),
+        )
+        self.enqueue_projection(event_id, "project_customer_commitment_receipt_projection")
+        return {
+            "project_id": normalized.project_id,
+            "commitment_id": normalized.commitment_id,
+            "receipt_id": normalized.receipt_id,
+            "followup_task_id": normalized.followup_task_id,
+        }
+
     def record_project_revenue_attribution(self, attribution: ProjectRevenueAttribution) -> str:
         self._require_project(attribution.project_id)
         if attribution.task_id:
@@ -3091,6 +3375,21 @@ class KernelTransaction:
             risk_flags.append("support_open")
         if maintenance_open and "maintenance_open" not in risk_flags:
             risk_flags.append("maintenance_open")
+        commitment_receipt_rows = self.conn.execute(
+            """
+            SELECT receipt_id, receipt_type, action_required, status
+            FROM project_customer_commitment_receipts
+            WHERE project_id=?
+            ORDER BY created_at, receipt_id
+            """,
+            (project_id,),
+        ).fetchall()
+        for receipt in commitment_receipt_rows:
+            evidence_refs = _merge_refs(evidence_refs, [f"kernel:project_customer_commitment_receipts/{receipt['receipt_id']}"])
+            if receipt["action_required"] or receipt["status"] == "needs_followup":
+                flag = f"customer_commitment_{receipt['receipt_type']}_needs_followup"
+                if flag not in risk_flags:
+                    risk_flags.append(flag)
 
         rollup = ProjectCommercialRollup(
             project_id=project_id,
@@ -3153,6 +3452,7 @@ class KernelTransaction:
         revenue_total = self._project_revenue_total(project_id)
         load_minutes = self._project_operator_load_minutes(project_id)
         post_ship = self._project_post_ship_evidence_summary(project_id)
+        commitment_receipts = self._project_commitment_receipt_summary(project_id)
         commercial_rollup = self._derive_project_commercial_rollup(project_id)
         commercial_payload = _project_commercial_rollup_payload(commercial_rollup)
         risk_flags: list[str] = []
@@ -3170,6 +3470,14 @@ class KernelTransaction:
             risk_flags.append("post_ship_action_required")
         if post_ship["operator_load_minutes"] >= 60 and post_ship["revenue_attributed_usd"] == Decimal("0"):
             risk_flags.append("post_ship_operator_load_without_revenue")
+        if commitment_receipts["open_followup_count"]:
+            risk_flags.append("customer_commitment_receipt_followup_open")
+        if commitment_receipts["delivery_failure_count"]:
+            risk_flags.append("customer_delivery_failure")
+        if commitment_receipts["timeout_count"]:
+            risk_flags.append("customer_commitment_timeout")
+        if commitment_receipts["compensation_needed_count"]:
+            risk_flags.append("customer_compensation_needed")
         risk_flags.extend(flag for flag in commercial_rollup.risk_flags if flag not in risk_flags)
         recommended_status = project["status"]
         close_recommendation = "continue"
@@ -4607,17 +4915,34 @@ class KernelTransaction:
             key=lambda item: item["commitment_id"],
         )
         projection_commitments = self._project_customer_commitments_for_packet(packet_id)
+        replay_commitment_ids = {commitment["commitment_id"] for commitment in replay_commitments}
+        projection_commitment_ids = {commitment["commitment_id"] for commitment in projection_commitments}
+        replay_commitment_receipts = sorted(
+            (
+                receipt
+                for receipt in replay.project_customer_commitment_receipts.values()
+                if receipt.get("commitment_id") in replay_commitment_ids
+            ),
+            key=lambda item: item["receipt_id"],
+        )
+        projection_commitment_receipts = self._project_customer_commitment_receipts_for_commitments(
+            projection_commitment_ids
+        )
         mismatches: list[str] = []
         if replay_packet != projection_packet:
             mismatches.append("project_customer_visible_packet")
         if replay_commitments != projection_commitments:
             mismatches.append("project_customer_commitments")
+        if replay_commitment_receipts != projection_commitment_receipts:
+            mismatches.append("project_customer_commitment_receipts")
         comparison = ProjectCustomerVisibleReplayProjectionComparison(
             packet_id=packet_id,
             replay_packet=replay_packet or {},
             projection_packet=projection_packet,
             replay_commitments=replay_commitments,
             projection_commitments=projection_commitments,
+            replay_commitment_receipts=replay_commitment_receipts,
+            projection_commitment_receipts=projection_commitment_receipts,
             matches=not mismatches,
             mismatches=mismatches,
         )
@@ -4628,8 +4953,9 @@ class KernelTransaction:
             INSERT INTO project_customer_visible_replay_projection_comparisons (
               comparison_id, packet_id, replay_packet_json, projection_packet_json,
               replay_commitments_json, projection_commitments_json,
+              replay_commitment_receipts_json, projection_commitment_receipts_json,
               matches, mismatches_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 comparison.comparison_id,
@@ -4638,6 +4964,8 @@ class KernelTransaction:
                 canonical_json(comparison.projection_packet),
                 canonical_json(comparison.replay_commitments),
                 canonical_json(comparison.projection_commitments),
+                canonical_json(comparison.replay_commitment_receipts),
+                canonical_json(comparison.projection_commitment_receipts),
                 int(comparison.matches),
                 canonical_json(comparison.mismatches),
                 comparison.created_at,
@@ -4662,6 +4990,20 @@ class KernelTransaction:
             (packet_id,),
         ).fetchall()
         return [_project_customer_commitment_from_row(row) for row in rows]
+
+    def _project_customer_commitment_receipts_for_commitments(self, commitment_ids: set[str]) -> list[dict[str, Any]]:
+        if not commitment_ids:
+            return []
+        placeholders = ",".join("?" for _ in commitment_ids)
+        rows = self.conn.execute(
+            f"""
+            SELECT * FROM project_customer_commitment_receipts
+            WHERE commitment_id IN ({placeholders})
+            ORDER BY receipt_id
+            """,
+            tuple(sorted(commitment_ids)),
+        ).fetchall()
+        return [_project_customer_commitment_receipt_from_row(row) for row in rows]
 
     def _create_scheduling_priority_task(self, packet_row: sqlite3.Row, change: dict[str, Any]) -> str:
         if change.get("customer_visible") or change.get("external_side_effects_authorized"):
@@ -5051,6 +5393,96 @@ class KernelTransaction:
         )
         return self.create_project_task(task)
 
+    def _create_commitment_receipt_followup_task(
+        self,
+        commitment: sqlite3.Row,
+        receipt: ProjectCustomerCommitmentReceipt,
+        *,
+        customer_ref: str,
+        evidence_refs: list[str],
+    ) -> str:
+        task_key = f"commercial-commitment-receipt-followup:{receipt.project_id}:{receipt.receipt_id}"
+        existing = self.conn.execute(
+            "SELECT task_id FROM project_tasks WHERE project_id=? AND idempotency_key=?",
+            (receipt.project_id, task_key),
+        ).fetchone()
+        if existing is not None:
+            return existing["task_id"]
+        followup_type = _commitment_receipt_followup_type(receipt.receipt_type, receipt.summary)
+        load_type_by_followup = {
+            "revenue_reconciliation": "reconciliation",
+            "retention": "client_sales",
+            "maintenance": "maintenance",
+            "customer_support": "other",
+        }
+        capability_scope_by_type = {
+            "revenue_reconciliation": "project_revenue_reconciliation",
+            "retention": "project_retention_analysis",
+            "maintenance": "project_maintenance_triage",
+            "customer_support": "project_customer_support_draft",
+        }
+        task = ProjectTask(
+            project_id=receipt.project_id,
+            phase_name="Operate",
+            task_type="operate",
+            autonomy_class="A1",
+            objective=f"Prepare governed Operate follow-up for customer commitment receipt: {receipt.summary.strip()}",
+            inputs={
+                "commitment_id": receipt.commitment_id,
+                "customer_commitment_receipt_id": receipt.receipt_id,
+                "source_outcome_id": commitment["outcome_id"],
+                "customer_ref": customer_ref,
+                "receipt_type": receipt.receipt_type,
+                "source_type": receipt.source_type,
+                "summary": receipt.summary,
+                "operate_followup_type": followup_type,
+                "external_commitment_policy": "draft_or_internal_only_without_side_effect_receipt",
+                "default_operator_load_type": load_type_by_followup[followup_type],
+            },
+            expected_output_schema={
+                "type": "object",
+                "required": [
+                    "operate_followup_type",
+                    "internal_result_ref",
+                    "evidence_refs",
+                    "operator_load_actual",
+                    "external_commitment_change",
+                    "side_effect_receipt_id",
+                ],
+                "properties": {
+                    "operate_followup_type": {"const": followup_type},
+                    "external_commitment_change": {"const": False},
+                    "side_effect_receipt_id": {"type": ["string", "null"]},
+                },
+            },
+            risk_level="low",
+            required_capabilities=[
+                {
+                    "capability_type": "memory_write",
+                    "actions": ["record"],
+                    "scope": capability_scope_by_type[followup_type],
+                    "grant_required_before_run": True,
+                    "external_side_effects": "blocked_without_operator_gate_and_receipt",
+                }
+            ],
+            model_requirement={
+                "task_class": "quick_research_summarization",
+                "local_allowed_only_if_promoted": True,
+                "frontier_fallback_allowed_with_budget": False,
+            },
+            authority_required="rule",
+            recovery_policy="ask_operator",
+            idempotency_key=task_key,
+            evidence_refs=_merge_refs(
+                evidence_refs,
+                [
+                    f"kernel:project_customer_commitment_receipts/{receipt.receipt_id}",
+                    f"kernel:project_outcomes/{commitment['outcome_id']}",
+                ],
+            ),
+        )
+        return self.create_project_task(task)
+
     def _create_ship_task_from_build_delivery(
         self,
         *,
@@ -5279,6 +5711,28 @@ class KernelTransaction:
             "open_followup_count": int(feedback["open_followup_count"]),
             "revenue_attributed_usd": sum((Decimal(row["amount_usd"]) for row in revenue_rows), Decimal("0")),
             "operator_load_minutes": int(load["minutes"]),
+        }
+
+    def _project_commitment_receipt_summary(self, project_id: str) -> dict[str, Any]:
+        row = self.conn.execute(
+            """
+            SELECT
+              COUNT(*) AS count,
+              COALESCE(SUM(CASE WHEN action_required = 1 OR status = 'needs_followup' THEN 1 ELSE 0 END), 0) AS open_followup_count,
+              COALESCE(SUM(CASE WHEN receipt_type = 'delivery_failure' THEN 1 ELSE 0 END), 0) AS delivery_failure_count,
+              COALESCE(SUM(CASE WHEN receipt_type = 'timeout' THEN 1 ELSE 0 END), 0) AS timeout_count,
+              COALESCE(SUM(CASE WHEN receipt_type = 'compensation_needed' THEN 1 ELSE 0 END), 0) AS compensation_needed_count
+            FROM project_customer_commitment_receipts
+            WHERE project_id=?
+            """,
+            (project_id,),
+        ).fetchone()
+        return {
+            "count": int(row["count"]),
+            "open_followup_count": int(row["open_followup_count"]),
+            "delivery_failure_count": int(row["delivery_failure_count"]),
+            "timeout_count": int(row["timeout_count"]),
+            "compensation_needed_count": int(row["compensation_needed_count"]),
         }
 
     def _project_phase_last_activity(self, project_id: str, phase_name: str) -> str | None:
@@ -6244,6 +6698,30 @@ def _commercial_decision_packet_payload(packet: Any) -> dict[str, Any]:
     }
 
 
+def _commercial_decision_recommendation_payload(recommendation: Any) -> dict[str, Any]:
+    return {
+        "record_id": recommendation.record_id,
+        "packet_id": recommendation.packet_id,
+        "decision_id": recommendation.decision_id,
+        "request_id": recommendation.request_id,
+        "evidence_bundle_id": recommendation.evidence_bundle_id,
+        "recommendation_authority": recommendation.recommendation_authority,
+        "recommendation": recommendation.recommendation,
+        "confidence": recommendation.confidence,
+        "decisive_factors": recommendation.decisive_factors,
+        "decisive_uncertainty": recommendation.decisive_uncertainty,
+        "evidence_used": recommendation.evidence_used,
+        "evidence_refs": recommendation.evidence_refs,
+        "quality_gate_context": recommendation.quality_gate_context,
+        "risk_flags": recommendation.risk_flags,
+        "operator_gate_defaults": recommendation.operator_gate_defaults,
+        "rationale": recommendation.rationale,
+        "model_routes_used": recommendation.model_routes_used,
+        "degraded": recommendation.degraded,
+        "created_at": recommendation.created_at,
+    }
+
+
 def _project_payload(project: Any) -> dict[str, Any]:
     return {
         "project_id": project.project_id,
@@ -6418,6 +6896,14 @@ def _operate_followup_type(summary: str) -> str:
     if any(term in text for term in ("bug", "broken", "fix", "maintenance", "latency", "slow", "error", "regression", "outage")):
         return "maintenance"
     return "customer_support"
+
+
+def _commitment_receipt_followup_type(receipt_type: str, summary: str) -> str:
+    if receipt_type == "delivery_failure":
+        return "maintenance"
+    if receipt_type in {"timeout", "compensation_needed"}:
+        return "customer_support"
+    return _operate_followup_type(summary)
 
 
 def _project_phase_rollup_payload(phase: ProjectPhaseRollup) -> dict[str, Any]:
@@ -6662,6 +7148,23 @@ def _project_customer_commitment_payload(commitment: ProjectCustomerCommitment) 
     }
 
 
+def _project_customer_commitment_receipt_payload(receipt: ProjectCustomerCommitmentReceipt) -> dict[str, Any]:
+    return {
+        "receipt_id": receipt.receipt_id,
+        "commitment_id": receipt.commitment_id,
+        "project_id": receipt.project_id,
+        "receipt_type": receipt.receipt_type,
+        "source_type": receipt.source_type,
+        "customer_ref": receipt.customer_ref,
+        "summary": receipt.summary,
+        "evidence_refs": receipt.evidence_refs,
+        "action_required": receipt.action_required,
+        "status": receipt.status,
+        "followup_task_id": receipt.followup_task_id,
+        "created_at": receipt.created_at,
+    }
+
+
 def _project_customer_visible_replay_projection_comparison_payload(
     comparison: ProjectCustomerVisibleReplayProjectionComparison,
 ) -> dict[str, Any]:
@@ -6672,6 +7175,8 @@ def _project_customer_visible_replay_projection_comparison_payload(
         "projection_packet": comparison.projection_packet,
         "replay_commitments": comparison.replay_commitments,
         "projection_commitments": comparison.projection_commitments,
+        "replay_commitment_receipts": comparison.replay_commitment_receipts,
+        "projection_commitment_receipts": comparison.projection_commitment_receipts,
         "matches": comparison.matches,
         "mismatches": comparison.mismatches,
         "created_at": comparison.created_at,
@@ -6780,6 +7285,23 @@ def _project_customer_commitment_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "payload_ref": row["payload_ref"],
         "summary": row["summary"],
         "evidence_refs": _loads(row["evidence_refs_json"]),
+        "created_at": row["created_at"],
+    }
+
+
+def _project_customer_commitment_receipt_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "receipt_id": row["receipt_id"],
+        "commitment_id": row["commitment_id"],
+        "project_id": row["project_id"],
+        "receipt_type": row["receipt_type"],
+        "source_type": row["source_type"],
+        "customer_ref": row["customer_ref"],
+        "summary": row["summary"],
+        "evidence_refs": _loads(row["evidence_refs_json"]),
+        "action_required": bool(row["action_required"]),
+        "status": row["status"],
+        "followup_task_id": row["followup_task_id"],
         "created_at": row["created_at"],
     }
 
