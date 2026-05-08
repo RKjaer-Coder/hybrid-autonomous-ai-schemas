@@ -114,6 +114,12 @@ from .store import (
     ReplayState,
     create_kernel_database,
 )
+from .backup import (
+    build_kernel_backup_manifest,
+    create_kernel_backup,
+    restore_kernel_backup,
+    verify_kernel_backup,
+)
 from .runtime import (
     KernelRuntime,
     PreparedProviderCall,
@@ -198,7 +204,9 @@ __all__ = [
     "SourcePlan",
     "SourceRecord",
     "bootstrap_runtime_state",
+    "build_kernel_backup_manifest",
     "create_kernel_database",
+    "create_kernel_backup",
     "commercial_decision_packet_command",
     "commercial_deliberation_recommendation_command",
     "evidence_bundle_command",
@@ -209,6 +217,7 @@ __all__ = [
     "normalize_runtime_layout",
     "prepare_runtime_directories",
     "require_runtime_databases",
+    "restore_kernel_backup",
     "runtime_logs_dir",
     "research_request_command",
     "g1_project_approval_command",
@@ -242,4 +251,5 @@ __all__ = [
     "source_acquisition_command",
     "source_plan_command",
     "verify_runtime_databases",
+    "verify_kernel_backup",
 ]
