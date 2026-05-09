@@ -1416,6 +1416,10 @@ class KernelTransaction:
         )
 
     def issue_capability_grant(self, grant: CapabilityGrant) -> str:
+        if self.command.requested_by in {"agent", "model", "tool"}:
+            raise PermissionError("workers cannot mint capability grants")
+        if grant.issuer != "kernel":
+            raise PermissionError("capability grants must be issued by the kernel")
         payload = {
             "grant_id": grant.grant_id,
             "task_id": grant.task_id,
@@ -8147,6 +8151,8 @@ class KernelTransaction:
         return decision
 
     def prepare_side_effect(self, intent: SideEffectIntent) -> str:
+        if self.command.requested_by in {"agent", "model", "tool"}:
+            raise PermissionError("workers cannot prepare side effects directly")
         if not self.use_grant(intent.grant_id, "adapter", "side_effect_broker", "side_effect", "prepare"):
             raise PermissionError("side-effect grant denied")
         payload = {
