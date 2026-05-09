@@ -13,14 +13,33 @@ current blockers, and latest verification, use `../CURRENT_STATE.md`.
 - Treat this README as a repo runbook, not a rolling project-status document.
 - Treat `../spec/*.md` as the architecture source of truth and this repo as
   implemented behavior.
-- The current code is a useful legacy substrate plus the first v3.1 kernel
-  slice. Do not assume the legacy five-database schemas or broad proof/evidence
-  harnesses are v3.1 authority.
+- The current code is a deterministic pre-Hermes substrate with kernel-owned
+  authority for state, policy, evidence, replay, recovery, artifacts, side
+  effects, model intelligence seeds, and the first bounded commercial loops.
+  Do not treat legacy databases, skills, or dashboards as authority unless a
+  kernel module explicitly owns that behavior.
+
+## Current Posture
+
+The repo is built to harden the control kernel before live Hermes attachment.
+Hermes Agent remains the target execution and operator environment, but live
+Hermes, LM Studio, Mac Studio validation, provider plugins, and dashboard
+authority are still gated until the target machine can prove them.
+
+The custom Mission Control server/dashboard plugin has been retired. Operator
+visual workflows should use Hermes Agent's native dashboard surfaces: Kanban,
+agent profiles, analytics, chat, models, and plugin controls. The repo keeps
+the install/profile/runtime contracts, while gates, spend, side effects,
+artifact governance, recovery, and replay remain kernel-owned.
 
 ## v3.1 Kernel Posture
 
 The first deterministic foundation-kernel slice lives in `kernel/` and
-`schemas/kernel.sql`. The existing modules are classified as:
+`schemas/kernel.sql`. The kernel now owns the audit-critical records for
+commands, events, grants, budgets, research evidence, decisions, project loops,
+artifact governance, side-effect receipts, recovery readiness, encrypted
+storage descriptors, backup/restore verification, model routing seeds, and
+replay/projection comparison. The existing modules are classified as:
 
 - `adopt`: keep as v3.1 authoritative behavior with minimal changes
 - `adapt`: preserve and change to satisfy v3.1 contracts
@@ -39,10 +58,11 @@ The highest-level posture is:
 - wrap Hermes dispatch/adapters, generated profile artifacts, and
   provider/session integration
 - convert strategic memory, research domain, opportunity pipeline, operator
-  interface, observability, Mission Control, and current `schemas/*.sql` into
+  interface, observability, and current `schemas/*.sql` into
   projections
-- retire ignored local artifacts and superseded shims after tests prove they
-  are unused; the root `bootstrap_patch.py` shim has been retired
+- retire ignored local artifacts, superseded shims, and repo-maintained UI
+  surfaces after tests prove they are unused; the root `bootstrap_patch.py`
+  shim and custom Mission Control dashboard have been retired
 
 ## Common Workflows
 
@@ -69,11 +89,13 @@ tests/               Unit and integration coverage
 .github/workflows/   CI
 ```
 
-## Current Databases
+## Runtime State
 
 - `kernel.db`: v3.1 command/event, capability grant, budget, artifact,
-  side-effect, commercial project loop, phase/status rollup, close-decision,
-  and replay/projection comparison authority
+  side-effect, research evidence, commercial project loop, phase/status rollup,
+  close-decision, customer commitment receipt, model intelligence,
+  backup/restore, encrypted payload, recovery-readiness, and replay/projection
+  comparison authority
 - `strategic_memory.db`: briefs, opportunities, research tasks, council outputs
 - `telemetry.db`: step outcomes, execution traces, harness variants, replay data
 - `immune_system.db`: immune verdicts, alerts, breakers, quarantine/fallback audit
@@ -103,11 +125,10 @@ table SQL semantics, including CHECK constraints and STRICT tables, and the
 runtime refuses to boot if any deployed database does not match the current
 schema contract.
 
-The commercial loop now has kernel-owned records for G1-approved projects,
-project tasks and assignments, outcomes, shipped artifact receipts, customer
-feedback, revenue attribution, operator-load records, derived phase/status
-rollups, operator-gated close decisions, and replay comparison against the
-commercial projection rows.
+The commercial loop, artifact lifecycle, backup/restore path, recovery
+readiness packets, encrypted payload descriptors, and model-routing seed records
+are kernel-owned deterministic state. Live workers, real customer integrations,
+revenue webhooks, and Hermes-native dashboard authority remain future-gated.
 
 Run the full test suite:
 
@@ -158,22 +179,17 @@ Capture a runtime/bootstrap snapshot plus replay summary:
 python3 -m skills.runtime --optimizer-snapshot
 ```
 
-Start the lean local operator UI prototype:
-
-```bash
-python3 -m skills.runtime --mission-control
-```
-
-Install the Hermes-native Mission Control dashboard plugin:
+Install the repo-owned Hermes profile and use Hermes Agent's native dashboard
+for Kanban, agent profiles, analytics, chat, models, and plugin controls:
 
 ```bash
 python3 -m skills.runtime --install-profile
 hermes dashboard --no-open
 ```
 
-The standalone Mission Control server is a prototype and API-contract harness.
-The Hermes dashboard plugin remains read-only until auth, audit, timeout, and
-replay semantics are proven equivalent to the local gate path.
+The repo no longer ships a custom Mission Control server or dashboard plugin.
+Gate and side-effect authority remains in the kernel/runtime contracts; the
+dashboard is a native Hermes operator surface.
 
 Rank constrained harness candidates from real replay evidence:
 
@@ -224,5 +240,6 @@ python3 -m skills.runtime --mac-studio-day-one
 
 The best short description of this repository is:
 
-> The tested legacy substrate plus the first v3.1 deterministic control-kernel
-> authority slice.
+> A deterministic v3.1 control-kernel substrate for a local-first Hermes Agent
+> workspace, with legacy modules kept only as adapters, projections, or
+> compatibility surfaces until promoted into kernel authority.

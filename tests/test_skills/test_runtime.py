@@ -217,15 +217,17 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
     assert Path(manifest["optimizer_snapshot_path"]).is_file()
     assert Path(manifest["harness_candidate_report_path"]).is_file()
     assert Path(manifest["mac_studio_day_one_handoff_path"]).is_file()
-    assert Path(result.dashboard_plugin_path, "dashboard", "manifest.json").is_file()
-    assert manifest["dashboard_plugins"]["hybrid-mission-control"]["path"] == result.dashboard_plugin_path
-    assert manifest["dashboard_plugins"]["hybrid-mission-control"]["route"] == "/mission-control"
-    assert manifest["dashboard_plugins"]["hybrid-mission-control"]["gate_actions_enabled"] is False
-    assert manifest["dashboard_plugins"]["hybrid-mission-control"]["page_scoped_slots"] == ["models", "chat", "plugins"]
-    plugin_config = json.loads((Path(result.dashboard_plugin_path) / "runtime_config.json").read_text(encoding="utf-8"))
-    assert plugin_config["repo_root"] == str(repo_root.resolve())
-    assert plugin_config["data_dir"] == cfg.data_dir
-    assert plugin_config["interaction_channel"] == "hermes_dashboard"
+    assert "dashboard_plugins" not in manifest
+    assert manifest["dashboard"]["mode"] == "hermes_native"
+    assert manifest["dashboard"]["custom_plugin"] is False
+    assert manifest["dashboard"]["surfaces"] == [
+        "Models",
+        "Chat",
+        "Plugins",
+        "Kanban",
+        "Agent Profiles",
+        "Analytics",
+    ]
     assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["profile_name"] == "hybrid-test"
     assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["repo_contract_version"] == 1
     assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["routing"]["max_api_spend_usd"] == 0.0
@@ -278,7 +280,7 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
     assert "propose_best_harness_candidate" in manifest["commands"]
     assert "mac_studio_day_one" in manifest["commands"]
     assert "milestone_status" in manifest["commands"]
-    assert "mission_control" in manifest["commands"]
+    assert "mission_control" not in manifest["commands"]
     assert sorted(Path(path).name for path in result.linked_skill_paths) == ["immune_system", "strategic_memory"]
     for launcher_path in result.launcher_paths.values():
         launcher = Path(launcher_path)

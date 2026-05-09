@@ -87,7 +87,9 @@ EXPECTED_DASHBOARD_SURFACES = (
     "Models",
     "Chat",
     "Plugins",
-    "Mission Control",
+    "Kanban",
+    "Agent Profiles",
+    "Analytics",
 )
 EXPECTED_V012_HOOKS = (
     "pre_tool_call",
@@ -121,7 +123,6 @@ CONFIG_SURFACE_UNCERTAINTY_NOTE = (
 )
 DEFAULT_EVIDENCE_CYCLES = 5
 DEFAULT_REPLAY_REPORT_LIMIT = 10
-MISSION_CONTROL_DASHBOARD_PLUGIN = "hybrid-mission-control"
 
 
 @dataclass(frozen=True)
@@ -145,7 +146,6 @@ class RuntimeProfileInstallResult:
     profile_config_path: str
     spec_profile_path: str
     profile_manifest_path: str
-    dashboard_plugin_path: str
     launcher_paths: dict[str, str]
     linked_skill_paths: list[str]
 
@@ -751,7 +751,6 @@ def _runtime_launcher_paths(config: IntegrationConfig) -> dict[str, Path]:
         "mac_studio_day_one": bin_dir / "mac_studio_day_one.sh",
         "gateway": bin_dir / "start_gateway.sh",
         "workspace": bin_dir / "start_workspace.sh",
-        "mission_control": bin_dir / "start_mission_control.sh",
         "operator_checklist": bin_dir / "operator_validation_checklist.sh",
         "milestone_status": bin_dir / "milestone_status.sh",
         "workspace_overview": bin_dir / "workspace_overview.sh",
@@ -772,10 +771,6 @@ def _runtime_profile_dir(config: IntegrationConfig) -> Path:
 
 def _runtime_logs_dir(config: IntegrationConfig) -> Path:
     return _kernel_runtime_logs_dir(config)
-
-
-def _runtime_dashboard_plugin_dir(config: IntegrationConfig) -> Path:
-    return _runtime_root(config) / "plugins" / MISSION_CONTROL_DASHBOARD_PLUGIN
 
 
 def _runtime_profile_config_path(config: IntegrationConfig) -> Path:
@@ -1219,7 +1214,6 @@ def _v012_offline_contract_checks(config: IntegrationConfig, repo_root: Path) ->
     workspace_doc = _read_json_yaml(_runtime_workspace_manifest_path(config)) or {}
     local_provider_doc = _read_json_yaml(_runtime_local_provider_doctor_path(config)) or {}
     curator_doc = _read_json_yaml(_runtime_curator_readiness_path(config)) or {}
-    plugin_manifest = _read_json_yaml(_runtime_dashboard_plugin_dir(config) / "dashboard" / "manifest.json") or {}
     checklist_path = _runtime_operator_validation_checklist_path(config)
     checklist_text = checklist_path.read_text(encoding="utf-8") if checklist_path.is_file() else ""
     profile_config = (
@@ -1246,8 +1240,7 @@ def _v012_offline_contract_checks(config: IntegrationConfig, repo_root: Path) ->
         and set(EXPECTED_PINNED_SKILLS).issubset(set(curator_profile.get("pinned_skills") or [])),
         "approval_hooks_declared": set(EXPECTED_V012_HOOKS).issubset(set(plugin_hooks.get("required_hooks") or [])),
         "dashboard_surfaces_declared": set(EXPECTED_DASHBOARD_SURFACES).issubset(set(workspace_doc.get("dashboard_surfaces") or []))
-        and plugin_manifest.get("name") == MISSION_CONTROL_DASHBOARD_PLUGIN
-        and plugin_manifest.get("tab", {}).get("path") == "/mission-control",
+        and workspace_doc.get("custom_dashboard_plugin") is False,
         "dashboard_offline_mockable": workspace_doc.get("offline_mockable") is True,
         "repo_root_available": repo_root.is_dir(),
     }
@@ -1661,6 +1654,8 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
         "optimizer_snapshot_command": _command_string(config, "--optimizer-snapshot", repo_root),
         "harness_candidate_command": _command_string(config, "--analyze-harness-candidates", repo_root),
         "dashboard_surfaces": list(EXPECTED_DASHBOARD_SURFACES),
+        "dashboard_mode": "hermes_native",
+        "custom_dashboard_plugin": False,
         "offline_mockable": True,
     }
     local_provider_doc = {
@@ -1707,7 +1702,7 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
         "5. Run the evidence factory and inspect the replay readiness report.",
         "6. Confirm the task-loop and research-cron proofs pass.",
         "7. If Hermes is installed, run readiness and verify Hermes v0.12.0+, `hermes -z`, LM Studio/local-provider doctor, approval hooks, Curator report-first state, and live profile/config surface.",
-        "8. Open the Hermes dashboard and confirm Models, Chat, Plugins, Mission Control, gates, traces, quarantine review, replay readiness, runtime halt state, and milestone health are visible.",
+        "8. Open the Hermes native dashboard and confirm Models, Chat, Plugins, Kanban, Agent Profiles, Analytics, gates, traces, quarantine review, replay readiness, runtime halt state, and milestone health are visible.",
     ]
     _write_json_yaml(_runtime_network_controls_path(config), network_doc)
     _write_json_yaml(_runtime_proxy_allowlist_path(config), proxy_doc)
@@ -1809,34 +1804,6 @@ def _symlink_skill_directory(source: Path, dest: Path) -> None:
         raise
 
 
-def _install_mission_control_dashboard_plugin(config: IntegrationConfig, repo_root: Path) -> Path:
-    source = repo_root / "hermes_plugins" / MISSION_CONTROL_DASHBOARD_PLUGIN
-    if not source.is_dir():
-        fallback = _repo_root() / "hermes_plugins" / MISSION_CONTROL_DASHBOARD_PLUGIN
-        source = fallback if fallback.is_dir() else source
-    if not source.is_dir():
-        raise FileNotFoundError(f"Missing dashboard plugin source: {source}")
-    plugin_dir = _runtime_dashboard_plugin_dir(config)
-    plugin_dir.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source, plugin_dir, dirs_exist_ok=True)
-    runtime_config = {
-        "repo_root": str(repo_root),
-        "data_dir": config.data_dir,
-        "profile_name": config.profile_name,
-        "interaction_channel": "hermes_dashboard",
-        "gate_actions_enabled": False,
-        "notes": [
-            "Installed by skills.runtime --install-profile.",
-            "Gate actions remain read-only until dashboard auth/audit validation passes.",
-        ],
-    }
-    (plugin_dir / "runtime_config.json").write_text(
-        f"{json.dumps(runtime_config, indent=2, sort_keys=True)}\n",
-        encoding="utf-8",
-    )
-    return plugin_dir
-
-
 def _next_contract_harness_base_time(immune_db_path: Path, guard_hours: int) -> datetime.datetime:
     base_time = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
     if not immune_db_path.is_file():
@@ -1878,7 +1845,6 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
         link_path = linked_skills_dir / skill_dir.name
         _symlink_skill_directory(skill_dir, link_path)
         linked_skill_paths.append(str(link_path))
-    dashboard_plugin_dir = _install_mission_control_dashboard_plugin(resolved, root)
 
     manifest = {
         "profile_name": resolved.profile_name,
@@ -1901,15 +1867,10 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
         "optimizer_snapshot_path": str(_runtime_optimizer_snapshot_path(resolved)),
         "harness_candidate_report_path": str(_runtime_harness_candidate_report_path(resolved)),
         "mac_studio_day_one_handoff_path": str(_runtime_mac_studio_day_one_handoff_path(resolved)),
-        "dashboard_plugins": {
-            MISSION_CONTROL_DASHBOARD_PLUGIN: {
-                "path": str(dashboard_plugin_dir),
-                "manifest": str(dashboard_plugin_dir / "dashboard" / "manifest.json"),
-                "route": "/mission-control",
-                "api_base": f"/api/plugins/{MISSION_CONTROL_DASHBOARD_PLUGIN}",
-                "gate_actions_enabled": False,
-                "page_scoped_slots": ["models", "chat", "plugins"],
-            }
+        "dashboard": {
+            "mode": "hermes_native",
+            "custom_plugin": False,
+            "surfaces": list(EXPECTED_DASHBOARD_SURFACES),
         },
         "data_dir": resolved.data_dir,
         "skills_dir": resolved.skills_dir,
@@ -1938,7 +1899,6 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
             "mac_studio_day_one": _command_string(resolved, "--mac-studio-day-one", root),
             "milestone_status": _command_string(resolved, "--milestone-status", root),
             "workspace_overview": _command_string(resolved, "--workspace-overview", root),
-            "mission_control": _command_string(resolved, "--mission-control", root),
         },
     }
     manifest_path = _runtime_profile_manifest_path(resolved)
@@ -1977,7 +1937,6 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
     _write_launcher(launcher_paths["mac_studio_day_one"], resolved, root, "--mac-studio-day-one")
     _write_launcher(launcher_paths["milestone_status"], resolved, root, "--milestone-status")
     _write_launcher(launcher_paths["workspace_overview"], resolved, root, "--workspace-overview")
-    _write_launcher(launcher_paths["mission_control"], resolved, root, "--mission-control")
     _write_launcher(launcher_paths["operator_checklist"], resolved, root, "--operator-checklist")
     _write_env_launcher(
         launcher_paths["start_proxy"],
@@ -2016,7 +1975,6 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
         profile_config_path=str(_runtime_profile_config_path(resolved)),
         spec_profile_path=str(_runtime_spec_profile_path(resolved)),
         profile_manifest_path=str(manifest_path),
-        dashboard_plugin_path=str(dashboard_plugin_dir),
         launcher_paths={name: str(path) for name, path in launcher_paths.items()},
         linked_skill_paths=linked_skill_paths,
     )
@@ -2100,9 +2058,6 @@ def doctor_runtime(
         "proxy_allowlist": _runtime_proxy_allowlist_path(resolved).is_file(),
         "gateway_manifest": _runtime_gateway_manifest_path(resolved).is_file(),
         "workspace_manifest": _runtime_workspace_manifest_path(resolved).is_file(),
-        "mission_control_dashboard_plugin": (
-            _runtime_dashboard_plugin_dir(resolved) / "dashboard" / "manifest.json"
-        ).is_file(),
         "local_provider_doctor": _runtime_local_provider_doctor_path(resolved).is_file(),
         "curator_readiness": _runtime_curator_readiness_path(resolved).is_file(),
         "operator_validation_checklist": _runtime_operator_validation_checklist_path(resolved).is_file(),
@@ -4182,7 +4137,7 @@ def run_flywheel_drill(
     tool_registry: HermesToolRegistry | None = None,
     report_limit: int = DEFAULT_REPLAY_REPORT_LIMIT,
 ) -> FlywheelDrillResult:
-    """Run one bounded CLI-first flywheel proof without requiring Mission Control."""
+    """Run one bounded CLI-first flywheel proof without requiring a custom dashboard."""
     resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
     root = Path(repo_root).expanduser().resolve() if repo_root else _repo_root()
     registry = tool_registry or MockHermesRuntime(data_dir=resolved.data_dir)
@@ -5302,11 +5257,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mac-studio-day-one", action="store_true", help="Generate the one-command Mac Studio rehearsal and handoff package")
     parser.add_argument("--milestone-status", action="store_true", help="Print machine-readable milestone build/proof status")
     parser.add_argument("--workspace-overview", action="store_true", help="Print a Hermes Workspace-oriented operator snapshot")
-    parser.add_argument("--mission-control", action="store_true", help="Run the local Mission Control operator web UI")
-    parser.add_argument("--mission-control-demo", action="store_true", help="Seed a lightweight demo dataset before starting Mission Control")
     parser.add_argument("--operator-checklist", action="store_true", help="Print the operator validation checklist path")
-    parser.add_argument("--mission-control-host", default="127.0.0.1", help="Bind host for --mission-control")
-    parser.add_argument("--mission-control-port", type=int, default=8765, help="Bind port for --mission-control")
     parser.add_argument("--data-dir", default="~/.hermes/data/")
     parser.add_argument("--skills-dir", default="~/.hermes/skills/hybrid-autonomous-ai/")
     parser.add_argument("--checkpoints-dir", default="~/.hermes/skills/hybrid-autonomous-ai/checkpoints/")
@@ -5362,7 +5313,6 @@ def _main_impl(
         print(f"profile_dir={result.profile_dir}")
         print(f"profile_config={result.profile_config_path}")
         print(f"spec_profile={result.spec_profile_path}")
-        print(f"dashboard_plugin={result.dashboard_plugin_path}")
         print(f"launchers={','.join(sorted(result.launcher_paths.values()))}")
         print(f"linked_skills={len(result.linked_skill_paths)}")
         return 0
@@ -5370,23 +5320,6 @@ def _main_impl(
     if args.operator_checklist:
         result = install_runtime_profile(config, repo_root=args.repo_root)
         print(f"operator_validation_checklist={_runtime_operator_validation_checklist_path(result.config)}")
-        return 0
-
-    if args.mission_control:
-        from skills.mission_control import run_mission_control_server, seed_demo_state
-
-        resolved = _normalize_runtime_layout(config).resolve_paths()
-        prepare_runtime_directories(resolved)
-        require_runtime_databases(resolved)
-        install_runtime_profile(resolved, repo_root=args.repo_root)
-        if args.mission_control_demo:
-            seed_result = seed_demo_state(resolved.data_dir)
-            print(f"mission_control_demo={json.dumps(seed_result, sort_keys=True)}")
-        run_mission_control_server(
-            resolved.data_dir,
-            host=args.mission_control_host,
-            port=args.mission_control_port,
-        )
         return 0
 
     if args.doctor:
