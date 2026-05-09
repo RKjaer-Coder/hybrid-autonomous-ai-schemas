@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -78,8 +77,11 @@ def restore_kernel_backup(
     tmp_restore = restore_db.with_name(f".{restore_db.name}.restore-tmp")
     if tmp_restore.exists():
         tmp_restore.unlink()
-    shutil.copy2(backup_db, tmp_restore)
     try:
+        with sqlite3.connect(backup_db) as source, sqlite3.connect(tmp_restore) as dest:
+            source.execute("PRAGMA wal_checkpoint(FULL);")
+            source.backup(dest)
+            dest.commit()
         verify_kernel_backup(tmp_restore, expected)
         if restore_db.exists():
             restore_db.unlink()

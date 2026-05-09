@@ -185,6 +185,32 @@ class KernelFoundationTests(unittest.TestCase):
             )
         )
 
+    def test_workers_cannot_mint_capability_grants(self):
+        for worker in ("agent", "model", "tool"):
+            with self.subTest(worker=worker):
+                grant = CapabilityGrant(
+                    grant_id=new_id(),
+                    task_id=new_id(),
+                    subject_type="agent",
+                    subject_id=f"{worker}-worker",
+                    capability_type="network",
+                    actions=["fetch"],
+                    resource={"domain": "example.com"},
+                    scope={},
+                    conditions={},
+                    expires_at=future(),
+                    policy_version=KERNEL_POLICY_VERSION,
+                )
+                with self.assertRaisesRegex(PermissionError, "workers cannot mint capability grants"):
+                    self.store.issue_capability_grant(
+                        command("grant.issue", f"{worker}-grant-bypass", requested_by=worker),
+                        grant,
+                    )
+
+        self.assertEqual(self.count("events"), 0)
+        self.assertEqual(self.count("commands"), 0)
+        self.assertEqual(self.count("capability_grants"), 0)
+
     def test_budget_reservation_updates_event_and_state_once(self):
         budget = Budget(
             budget_id=new_id(),
@@ -255,6 +281,55 @@ class KernelFoundationTests(unittest.TestCase):
             replay.inspection_tasks,
             [{"intent_id": intent.intent_id, "reason": "timeout", "replay_action": "inspect_or_compensate"}],
         )
+
+    def test_workers_cannot_prepare_side_effects_directly(self):
+        grant = CapabilityGrant(
+            grant_id=new_id(),
+            task_id=new_id(),
+            subject_type="adapter",
+            subject_id="side_effect_broker",
+            capability_type="side_effect",
+            actions=["prepare"],
+            resource={"kind": "message"},
+            scope={},
+            conditions={},
+            expires_at=future(),
+            policy_version=KERNEL_POLICY_VERSION,
+            max_uses=1,
+        )
+        self.store.issue_capability_grant(command("grant.issue", "worker-side-grant"), grant)
+        intent = SideEffectIntent(
+            intent_id=new_id(),
+            task_id=grant.task_id,
+            side_effect_type="message",
+            target={"channel": "customer"},
+            payload_hash=payload_hash({"body": "hello"}),
+            required_authority="operator_gate",
+            grant_id=grant.grant_id,
+            timeout_policy="ask_operator",
+        )
+
+        for worker in ("agent", "model", "tool"):
+            with self.subTest(worker=worker):
+                with self.assertRaisesRegex(PermissionError, "workers cannot prepare side effects directly"):
+                    self.store.prepare_side_effect(
+                        command("side.prepare", f"{worker}-side-effect-bypass", requested_by=worker),
+                        intent,
+                    )
+
+        with self.store.connect() as conn:
+            grant_row = conn.execute(
+                "SELECT used_count, status FROM capability_grants WHERE grant_id=?",
+                (grant.grant_id,),
+            ).fetchone()
+            commands = [
+                row["idempotency_key"]
+                for row in conn.execute("SELECT idempotency_key FROM commands ORDER BY submitted_at").fetchall()
+            ]
+        self.assertEqual(grant_row["used_count"], 0)
+        self.assertEqual(grant_row["status"], "active")
+        self.assertEqual(commands, ["worker-side-grant"])
+        self.assertEqual(self.count("side_effect_intents"), 0)
 
     def test_artifact_refs_are_governed_records(self):
         artifact = ArtifactRef(

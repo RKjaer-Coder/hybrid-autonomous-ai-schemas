@@ -21,14 +21,24 @@ from skills.config import IntegrationConfig
 from skills.hermes_interfaces import MockHermesRuntime
 
 
-def command(command_type: str, key: str, payload: dict | None = None) -> Command:
+def command(
+    command_type: str,
+    key: str,
+    payload: dict | None = None,
+    *,
+    requested_by: str = "operator",
+    requester_id: str = "operator",
+    requested_authority: str | None = None,
+    target_entity_type: str = "runtime",
+) -> Command:
     return Command(
         command_type=command_type,
-        requested_by="operator",
-        requester_id="operator",
-        target_entity_type="runtime",
+        requested_by=requested_by,  # type: ignore[arg-type]
+        requester_id=requester_id,
+        target_entity_type=target_entity_type,
         idempotency_key=key,
         payload=payload or {"key": key},
+        requested_authority=requested_authority,  # type: ignore[arg-type]
     )
 
 
@@ -103,6 +113,43 @@ class KernelRuntimeTests(unittest.TestCase):
             session_id=generate_uuid_v7(),
         )
 
+    def assert_provider_prepare_rejected_without_persistence(
+        self,
+        command_to_reject: Command,
+        *,
+        endpoint: str = "https://api.example.com/v1/responses",
+        message: str | None = None,
+    ) -> None:
+        with self.assertRaises(PermissionError) as ctx:
+            self.runtime.prepare_provider_call(command_to_reject, self.request(endpoint))
+        if message is not None:
+            self.assertIn(message, str(ctx.exception))
+
+        with self.store.connect() as conn:
+            events = [
+                row["event_type"]
+                for row in conn.execute("SELECT event_type FROM events ORDER BY event_seq").fetchall()
+            ]
+            commands = [
+                row["idempotency_key"]
+                for row in conn.execute("SELECT idempotency_key FROM commands ORDER BY submitted_at").fetchall()
+            ]
+            budget = conn.execute(
+                "SELECT reserved_usd FROM budgets WHERE budget_id=?",
+                (self.budget.budget_id,),
+            ).fetchone()
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM side_effect_intents").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM budget_reservations").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM capability_grants").fetchone()[0], 0)
+
+        self.assertEqual(events, ["budget_created"])
+        self.assertEqual(commands, ["runtime-budget"])
+        self.assertEqual(budget["reserved_usd"], "0")
+        replay = self.store.replay_critical_state()
+        self.assertEqual(replay.budgets[self.budget.budget_id]["reserved_usd"], Decimal("0"))
+        self.assertEqual(replay.grants, {})
+        self.assertEqual(replay.side_effects, {})
+
     def test_prepare_provider_call_is_kernel_authoritative(self):
         prepared = self.runtime.prepare_provider_call(
             command("runtime.prepare_provider_call", "provider-call-1"),
@@ -149,18 +196,50 @@ class KernelRuntimeTests(unittest.TestCase):
         self.assertEqual(replay.budgets[self.budget.budget_id]["reserved_usd"], Decimal("0.2"))
 
     def test_proxy_allowlist_blocks_before_any_runtime_events_commit(self):
-        with self.assertRaises(PermissionError):
-            self.runtime.prepare_provider_call(
-                command("runtime.prepare_provider_call", "blocked-host"),
-                self.request("https://evil.example.net/v1/responses"),
-            )
+        self.assert_provider_prepare_rejected_without_persistence(
+            command("runtime.prepare_provider_call", "blocked-host"),
+            endpoint="https://evil.example.net/v1/responses",
+            message="provider endpoint host not allowed",
+        )
 
-        with self.store.connect() as conn:
-            events = [
-                row["event_type"]
-                for row in conn.execute("SELECT event_type FROM events ORDER BY event_seq").fetchall()
-            ]
-        self.assertEqual(events, ["budget_created"])
+    def test_worker_originated_provider_call_cannot_mint_runtime_authority(self):
+        for worker in ("agent", "model", "tool"):
+            with self.subTest(worker=worker):
+                self.assert_provider_prepare_rejected_without_persistence(
+                    command(
+                        "runtime.prepare_provider_call",
+                        f"{worker}-provider-bypass",
+                        requested_by=worker,
+                        requester_id="hermes-worker-1",
+                    ),
+                    message="workers cannot prepare provider calls",
+                )
+
+    def test_provider_call_broker_is_rule_bound(self):
+        self.assert_provider_prepare_rejected_without_persistence(
+            command(
+                "runtime.prepare_provider_call",
+                "operator-gated-provider-call",
+                requested_authority="operator_gate",
+            ),
+            message="rule-bound kernel broker action",
+        )
+
+    def test_provider_call_requires_runtime_broker_target(self):
+        self.assert_provider_prepare_rejected_without_persistence(
+            command(
+                "runtime.prepare_provider_call",
+                "wrong-target-provider-call",
+                target_entity_type="agent",
+            ),
+            message="must target the kernel runtime broker",
+        )
+
+    def test_provider_call_requires_runtime_broker_command(self):
+        self.assert_provider_prepare_rejected_without_persistence(
+            command("model.invoke", "wrong-command-provider-call"),
+            message="requires the runtime broker command",
+        )
 
     def test_router_alone_remains_non_authoritative_helper(self):
         request = self.request()

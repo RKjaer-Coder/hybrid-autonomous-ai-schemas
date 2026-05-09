@@ -229,12 +229,15 @@ class KernelRuntime:
         self.immune_config = immune_config or ImmuneConfig()
 
     def prepare_provider_call(self, command: Command, request: ProviderCallRequest) -> PreparedProviderCall:
+        _validate_provider_broker_command(command)
+
         def handler(tx: KernelTransaction) -> PreparedProviderCall:
             return self._prepare_provider_call(tx, request)
 
         return self.store.execute_command(command, handler)
 
     def _prepare_provider_call(self, tx: KernelTransaction, request: ProviderCallRequest) -> PreparedProviderCall:
+        _validate_provider_broker_command(tx.command)
         proxy_config = ProxyServerConfig.from_payload(request.proxy_config)
         endpoint = _validated_proxy_endpoint(request.provider_endpoint, proxy_config)
         immune_config = _immune_config_for_endpoint(self.immune_config, endpoint["host"])
@@ -428,6 +431,17 @@ def _validated_proxy_endpoint(provider_endpoint: str, proxy_config: ProxyServerC
     if not _host_allowed(host, proxy_config.allowed_domains):
         raise PermissionError(f"provider endpoint host not allowed: {host}")
     return {"scheme": scheme, "host": host, "port": port}
+
+
+def _validate_provider_broker_command(command: Command) -> None:
+    if command.command_type != "runtime.prepare_provider_call":
+        raise PermissionError("provider-call preparation requires the runtime broker command")
+    if command.target_entity_type != "runtime":
+        raise PermissionError("provider-call preparation must target the kernel runtime broker")
+    if command.requested_by in {"agent", "model", "tool"}:
+        raise PermissionError("workers cannot prepare provider calls or mint runtime grants")
+    if command.requested_authority not in {None, "rule"}:
+        raise PermissionError("provider-call preparation is a rule-bound kernel broker action")
 
 
 def _immune_config_for_endpoint(base: ImmuneConfig, host: str) -> ImmuneConfig:
