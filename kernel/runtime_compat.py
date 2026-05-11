@@ -55,7 +55,11 @@ from kernel.runtime import (
     require_runtime_databases as _kernel_require_runtime_databases,
     verify_runtime_databases as _kernel_verify_runtime_databases,
 )
-from kernel import Command, KernelStore
+from kernel import Command, KernelStore, MigrationReadinessRecord
+from kernel.projections import (
+    apply_operator_digest_projection_outbox,
+    compare_operator_digest_migration_readiness_projection,
+)
 from migrate import LEGACY_SCHEMAS as SCHEMAS, apply_schema, verify_database
 from runtime_control import RuntimeControlManager
 from skills.bootstrap import BootstrapOrchestrator
@@ -477,6 +481,7 @@ from kernel.runtime_paths import (
     _runtime_local_provider_doctor_path,
     _runtime_logs_dir,
     _runtime_mac_studio_day_one_handoff_path,
+    _runtime_migration_readiness_path,
     _runtime_network_controls_path,
     _runtime_operator_validation_checklist_path,
     _runtime_optimizer_snapshot_path,
@@ -1188,6 +1193,386 @@ def latest_hermes_adapter_readiness(config: IntegrationConfig | None = None) -> 
     }
 
 
+def _write_migration_readiness_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
+    artifact = dict(payload)
+    artifact.setdefault("artifact_path", str(_runtime_migration_readiness_path(config)))
+    artifact.setdefault("live_controls_enabled", False)
+    _write_json_yaml(_runtime_migration_readiness_path(config), artifact)
+
+
+def _migration_record_payloads(config: IntegrationConfig, repo_root: Path, as_of: str) -> list[dict[str, Any]]:
+    data_dir = Path(config.data_dir)
+    spec_migration_ref = "spec:s09_decisions_risks#ADR-009 Migration Map Before Rewrite"
+    spec_deployment_ref = "spec:s08_operator_deployment#Pre-Hermes Build Baseline"
+    kernel_db_ref = f"file:{data_dir / 'kernel.db'}"
+    schema_refs = {
+        "kernel": f"file:{repo_root / 'schemas/kernel.sql'}",
+        **{
+        db_name: f"file:{repo_root / schema_rel}"
+        for db_name, schema_rel in SCHEMAS.items()
+        },
+    }
+
+    def action(action_name: str, reason: str, refs: list[str]) -> dict[str, Any]:
+        return {
+            "action": action_name,
+            "required_authority": "operator_gate",
+            "reason": reason,
+            "refs": refs,
+        }
+
+    def blocker(blocker_id: str, severity: str, reason: str, refs: list[str]) -> dict[str, Any]:
+        return {
+            "blocker": blocker_id,
+            "severity": severity,
+            "reason": reason,
+            "refs": refs,
+        }
+
+    legacy_projection_blocker = blocker(
+        "projection_feed_not_promoted",
+        "medium",
+        "Legacy database remains a verified compatibility surface until a kernel outbox/projection writer owns the feed.",
+        [spec_deployment_ref],
+    )
+    module_adapt_blocker = blocker(
+        "kernel_contract_not_fully_native",
+        "medium",
+        "Useful legacy behavior exists, but ownership still needs a kernel-native contract or broker boundary before live Hermes activation.",
+        [spec_migration_ref],
+    )
+    live_hermes_blocker = blocker(
+        "live_hermes_validation_gated",
+        "high",
+        "Target-machine Hermes validation is intentionally unavailable in the pre-Hermes substrate.",
+        ["spec:s08_operator_deployment#Live-Gated Activation"],
+    )
+
+    records = [
+        {
+            "surface_ref": "kernel/",
+            "component_type": "module",
+            "ownership_action": "adopt",
+            "owner_domain": "control_kernel",
+            "summary": "Kernel modules are the v3.1 authority for state, events, grants, spend, replay, recovery, artifacts, model seeds, and commercial substrate.",
+            "blockers": [],
+            "evidence_refs": [kernel_db_ref, "file:kernel/", spec_deployment_ref],
+            "next_operator_actions": [],
+            "readiness_status": "ready",
+        },
+        {
+            "surface_ref": "kernel.db",
+            "component_type": "database",
+            "ownership_action": "adopt",
+            "owner_domain": "control_kernel",
+            "summary": "Kernel DB is the authoritative pre-Hermes transaction boundary.",
+            "blockers": [],
+            "evidence_refs": [kernel_db_ref, schema_refs["kernel"]],
+            "next_operator_actions": [],
+            "readiness_status": "ready",
+        },
+        {
+            "surface_ref": "immune/",
+            "component_type": "module",
+            "ownership_action": "adapt",
+            "owner_domain": "security_broker",
+            "summary": "Immune checks remain useful validation and broker-bypass detection, subordinate to kernel policy and grants.",
+            "blockers": [module_adapt_blocker],
+            "evidence_refs": ["file:immune/", "file:tests/test_kernel_runtime.py", spec_migration_ref],
+            "next_operator_actions": [action("finish_kernel_native_security_boundary", "Promote only the enforcement semantics that remain useful after adapter reconciliation.", ["file:immune/"])],
+            "readiness_status": "action_required",
+        },
+        {
+            "surface_ref": "financial_router/",
+            "component_type": "module",
+            "ownership_action": "adapt",
+            "owner_domain": "budget_broker",
+            "summary": "Routing remains a helper; durable budget grants and paid-call side effects stay kernel-owned.",
+            "blockers": [module_adapt_blocker],
+            "evidence_refs": ["file:financial_router/", "file:kernel/runtime.py", spec_migration_ref],
+            "next_operator_actions": [action("keep_router_subordinate_to_budget_records", "Do not let route helpers mint spend or provider authority outside kernel commands.", ["file:kernel/runtime.py"])],
+            "readiness_status": "action_required",
+        },
+        {
+            "surface_ref": "skills/local_forward_proxy.py",
+            "component_type": "module",
+            "ownership_action": "adapt",
+            "owner_domain": "capability_broker",
+            "summary": "Local proxy is the provider/network enforcement path behind kernel grants and audit logs.",
+            "blockers": [live_hermes_blocker],
+            "evidence_refs": ["file:skills/local_forward_proxy.py", "file:tests/test_local_forward_proxy.py"],
+            "next_operator_actions": [action("prove_proxy_under_live_hermes", "Run target-machine adapter proof before treating provider/network paths as active substrate.", ["file:skills/local_forward_proxy.py"])],
+            "readiness_status": "action_required",
+        },
+        {
+            "surface_ref": "council/",
+            "component_type": "module",
+            "ownership_action": "adapt",
+            "owner_domain": "decision_recommendation",
+            "summary": "Council remains recommendation machinery; kernel Decision records own authority and gate status.",
+            "blockers": [],
+            "evidence_refs": ["file:council/", "file:kernel/store_research.py", spec_migration_ref],
+            "next_operator_actions": [],
+            "readiness_status": "ready",
+        },
+        {
+            "surface_ref": "eval/",
+            "component_type": "module",
+            "ownership_action": "adapt",
+            "owner_domain": "model_intelligence",
+            "summary": "Eval harnesses are evidence generators for kernel-owned model routing and promotion decisions.",
+            "blockers": [module_adapt_blocker],
+            "evidence_refs": ["file:eval/", "file:kernel/store_model_intelligence.py"],
+            "next_operator_actions": [action("bind_eval_outputs_to_model_records", "Keep eval outputs as evidence for kernel Model Intelligence records, not direct promotion authority.", ["file:kernel/store_model_intelligence.py"])],
+            "readiness_status": "action_required",
+        },
+        {
+            "surface_ref": "harness_variants.py",
+            "component_type": "module",
+            "ownership_action": "adapt",
+            "owner_domain": "replay_eval",
+            "summary": "Harness variants remain replay/eval substrate behind kernel-governed improvement decisions.",
+            "blockers": [module_adapt_blocker],
+            "evidence_refs": ["file:harness_variants.py", "file:tests/test_harness_variants.py"],
+            "next_operator_actions": [action("keep_harness_mutation_gated", "Use harness candidates only as proposals until kernel decisions and replay evidence approve them.", ["file:harness_variants.py"])],
+            "readiness_status": "action_required",
+        },
+        {
+            "surface_ref": "kernel/runtime_compat.py",
+            "component_type": "runtime_path",
+            "ownership_action": "wrap",
+            "owner_domain": "runtime_compatibility",
+            "summary": "Runtime compatibility exposes read-only proof and operator surfaces while kernel modules own authority.",
+            "blockers": [],
+            "evidence_refs": ["file:kernel/runtime_compat.py", "file:tests/test_skills/test_runtime.py"],
+            "next_operator_actions": [],
+            "readiness_status": "ready",
+        },
+        {
+            "surface_ref": "skills/runtime.py",
+            "component_type": "runtime_path",
+            "ownership_action": "wrap",
+            "owner_domain": "runtime_compatibility",
+            "summary": "Skills runtime is a thin compatibility entrypoint over kernel.runtime_compat.",
+            "blockers": [],
+            "evidence_refs": ["file:skills/runtime.py", "file:kernel/runtime_compat.py"],
+            "next_operator_actions": [],
+            "readiness_status": "ready",
+        },
+        {
+            "surface_ref": "runtime_control.py",
+            "component_type": "runtime_path",
+            "ownership_action": "adapt",
+            "owner_domain": "operator_recovery",
+            "summary": "Runtime halt/restart compatibility remains local operator state until kernel recovery and adapter paths fully absorb it.",
+            "blockers": [module_adapt_blocker],
+            "evidence_refs": ["file:runtime_control.py", "file:schemas/operator_digest.sql"],
+            "next_operator_actions": [action("preserve_local_halt_semantics", "Keep halt/restart local and durable; do not grant dashboard mutation authority.", ["file:runtime_control.py"])],
+            "readiness_status": "action_required",
+        },
+        {
+            "surface_ref": "hermes_adapter_readiness.json",
+            "component_type": "artifact",
+            "ownership_action": "wrap",
+            "owner_domain": "deployment_adapter",
+            "summary": "Hermes adapter readiness is exposed as read-only proof state, not live Hermes activation.",
+            "blockers": [live_hermes_blocker],
+            "evidence_refs": [f"file:{_runtime_hermes_adapter_readiness_path(config)}", "spec:s08_operator_deployment#Hermes v0.13 Adapter Proofs"],
+            "next_operator_actions": [action("run_live_adapter_proof_on_target_machine", "Attach live Hermes only after target-machine adapter checks pass.", ["spec:s08_operator_deployment#Hermes v0.13 Adapter Proofs"])],
+            "readiness_status": "action_required",
+        },
+        {
+            "surface_ref": "custom_mission_control_dashboard",
+            "component_type": "artifact",
+            "ownership_action": "retire",
+            "owner_domain": "operator_surface",
+            "summary": "Repo-maintained Mission Control dashboard is retired; Hermes-native dashboard remains read-only until adapter authority is proven.",
+            "blockers": [],
+            "evidence_refs": ["file:README.md", spec_deployment_ref],
+            "next_operator_actions": [],
+            "readiness_status": "retired",
+        },
+    ]
+
+    for db_name in ("strategic_memory", "telemetry", "immune_system", "financial_ledger", "operator_digest"):
+        records.append(
+            {
+                "surface_ref": f"{db_name}.db",
+                "component_type": "database",
+                "ownership_action": "convert-to-projection",
+                "owner_domain": "legacy_projection",
+                "summary": f"{db_name}.db is structurally verified but non-authoritative; keep it as projection or compatibility state.",
+                "blockers": [legacy_projection_blocker],
+                "evidence_refs": [f"file:{data_dir / f'{db_name}.db'}", schema_refs[db_name], spec_migration_ref],
+                "next_operator_actions": [action("define_projection_feed", "Add or preserve only deterministic kernel-fed projection writes before relying on this DB for operator views.", [schema_refs[db_name]])],
+                "readiness_status": "action_required",
+            }
+        )
+
+    return [
+        {
+            **record,
+            "record_id": f"migration:{record['surface_ref']}",
+            "created_at": as_of,
+            "live_controls_enabled": False,
+        }
+        for record in records
+    ]
+
+
+def _migration_readiness_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
+    status_counts: dict[str, int] = {}
+    action_counts: dict[str, int] = {}
+    component_counts: dict[str, int] = {}
+    blockers: list[dict[str, Any]] = []
+    next_actions: list[dict[str, Any]] = []
+    for record in records:
+        status_counts[record["readiness_status"]] = status_counts.get(record["readiness_status"], 0) + 1
+        action_counts[record["ownership_action"]] = action_counts.get(record["ownership_action"], 0) + 1
+        component_counts[record["component_type"]] = component_counts.get(record["component_type"], 0) + 1
+        blockers.extend(record["blockers"])
+        next_actions.extend(record["next_operator_actions"])
+    return {
+        "total_records": len(records),
+        "status_counts": status_counts,
+        "ownership_action_counts": action_counts,
+        "component_type_counts": component_counts,
+        "blocker_count": len(blockers),
+        "next_operator_action_count": len(next_actions),
+    }
+
+
+def _migration_readiness_rows(config: IntegrationConfig) -> list[dict[str, Any]]:
+    db_path = _kernel_db_path(config)
+    if not db_path.is_file():
+        return []
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute("SELECT * FROM migration_readiness_records ORDER BY surface_ref").fetchall()
+        except sqlite3.OperationalError:
+            return []
+    records: list[dict[str, Any]] = []
+    for row in rows:
+        records.append(
+            {
+                "record_id": row["record_id"],
+                "surface_ref": row["surface_ref"],
+                "component_type": row["component_type"],
+                "ownership_action": row["ownership_action"],
+                "owner_domain": row["owner_domain"],
+                "summary": row["summary"],
+                "blockers": json.loads(row["blockers_json"]),
+                "evidence_refs": json.loads(row["evidence_refs_json"]),
+                "next_operator_actions": json.loads(row["next_operator_actions_json"]),
+                "readiness_status": row["readiness_status"],
+                "live_controls_enabled": bool(row["live_controls_enabled"]),
+                "created_at": row["created_at"],
+            }
+        )
+    return records
+
+
+def migration_readiness(
+    config: IntegrationConfig | None = None,
+    *,
+    repo_root: str | None = None,
+    as_of: str | None = None,
+) -> dict[str, Any]:
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    install = install_runtime_profile(resolved, repo_root=repo_root)
+    require_runtime_databases(resolved)
+    timestamp = as_of or _utc_now()
+    repo_root_path = Path(install.repo_root)
+    store = KernelStore(_kernel_db_path(resolved))
+    record_payloads = _migration_record_payloads(resolved, repo_root_path, timestamp)
+    record_ids = []
+    for payload in record_payloads:
+        record = MigrationReadinessRecord(
+            record_id=payload["record_id"],
+            surface_ref=payload["surface_ref"],
+            component_type=payload["component_type"],
+            ownership_action=payload["ownership_action"],
+            owner_domain=payload["owner_domain"],
+            summary=payload["summary"],
+            blockers=payload["blockers"],
+            evidence_refs=payload["evidence_refs"],
+            next_operator_actions=payload["next_operator_actions"],
+            readiness_status=payload["readiness_status"],
+            live_controls_enabled=False,
+            created_at=payload["created_at"],
+        )
+        record_ids.append(
+            store.record_migration_readiness(
+                _kernel_command("migration.readiness_record", f"{timestamp}:{record.surface_ref}"),
+                record,
+            )
+        )
+    operator_projection = apply_operator_digest_projection_outbox(
+        _kernel_db_path(resolved),
+        Path(resolved.data_dir) / "operator_digest.db",
+    )
+    operator_projection_comparison = compare_operator_digest_migration_readiness_projection(
+        _kernel_db_path(resolved),
+        Path(resolved.data_dir) / "operator_digest.db",
+    )
+    comparison = store.compare_migration_readiness_replay_to_projection(
+        _kernel_command("migration.readiness_compare", f"{timestamp}:projection"),
+        "legacy_repo",
+    )
+    records = _migration_readiness_rows(resolved)
+    payload = {
+        "available": True,
+        "as_of": timestamp,
+        "summary": _migration_readiness_summary(records),
+        "records": records,
+        "record_ids": record_ids,
+        "comparison": asdict(comparison),
+        "operator_projection": operator_projection,
+        "operator_projection_comparison": operator_projection_comparison,
+        "kernel_db_path": str(_kernel_db_path(resolved)),
+        "artifact_path": str(_runtime_migration_readiness_path(resolved)),
+        "live_controls_enabled": False,
+        "disabled_live_controls": [
+            "live_hermes_attachment",
+            "dashboard_write_controls",
+            "customer_commitments",
+            "provider_calls",
+            "provider_plugin_mutation",
+        ],
+    }
+    _write_migration_readiness_artifact(resolved, payload)
+    return payload
+
+
+def latest_migration_readiness(config: IntegrationConfig | None = None) -> dict[str, Any]:
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    records = _migration_readiness_rows(resolved)
+    if records:
+        operator_projection_comparison = compare_operator_digest_migration_readiness_projection(
+            _kernel_db_path(resolved),
+            Path(resolved.data_dir) / "operator_digest.db",
+        )
+        return {
+            "available": True,
+            "summary": _migration_readiness_summary(records),
+            "records": records,
+            "kernel_db_path": str(_kernel_db_path(resolved)),
+            "artifact_path": str(_runtime_migration_readiness_path(resolved)),
+            "operator_projection_comparison": operator_projection_comparison,
+            "live_controls_enabled": False,
+        }
+    artifact = _read_json_yaml(_runtime_migration_readiness_path(resolved))
+    if artifact is not None:
+        return artifact
+    return {
+        "available": False,
+        "status": "NOT_RUN",
+        "artifact_path": str(_runtime_migration_readiness_path(resolved)),
+        "live_controls_enabled": False,
+    }
+
+
 def latest_recovery_readiness(config: IntegrationConfig | None = None) -> dict[str, Any]:
     resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
     latest = _latest_kernel_row(_kernel_db_path(resolved), "recovery_readiness_packets")
@@ -1653,12 +2038,18 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
         "optimizer_snapshot_command": _command_string(config, "--optimizer-snapshot", repo_root),
         "harness_candidate_command": _command_string(config, "--analyze-harness-candidates", repo_root),
         "hermes_adapter_readiness_command": _command_string(config, "--hermes-adapter-readiness", repo_root),
+        "migration_readiness_command": _command_string(config, "--migration-readiness", repo_root),
         "dashboard_surfaces": list(EXPECTED_DASHBOARD_SURFACES),
         "dashboard_mode": "hermes_native",
         "custom_dashboard_plugin": False,
         "offline_mockable": True,
         "live_controls_enabled": False,
-        "read_only_readiness_surfaces": ["replay_readiness", "recovery_readiness", "hermes_adapter_readiness"],
+        "read_only_readiness_surfaces": [
+            "replay_readiness",
+            "recovery_readiness",
+            "hermes_adapter_readiness",
+            "migration_readiness",
+        ],
     }
     local_provider_doc = {
         **contract.local_provider_mapping(),
@@ -1794,6 +2185,15 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "live_controls_enabled": False,
         },
     )
+    _write_migration_readiness_artifact(
+        config,
+        {
+            "available": False,
+            "status": "NOT_RUN",
+            "command": _command_string(config, "--migration-readiness", repo_root),
+            "live_controls_enabled": False,
+        },
+    )
     _runtime_operator_validation_checklist_path(config).write_text(
         "\n".join(checklist_lines) + "\n",
         encoding="utf-8",
@@ -1880,6 +2280,7 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
         "harness_candidate_report_path": str(_runtime_harness_candidate_report_path(resolved)),
         "mac_studio_day_one_handoff_path": str(_runtime_mac_studio_day_one_handoff_path(resolved)),
         "hermes_adapter_readiness_path": str(_runtime_hermes_adapter_readiness_path(resolved)),
+        "migration_readiness_path": str(_runtime_migration_readiness_path(resolved)),
         "dashboard": {
             "mode": "hermes_native",
             "custom_plugin": False,
@@ -1912,6 +2313,7 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
             "propose_best_harness_candidate": _command_string(resolved, "--propose-best-harness-candidate", root),
             "mac_studio_day_one": _command_string(resolved, "--mac-studio-day-one", root),
             "hermes_adapter_readiness": _command_string(resolved, "--hermes-adapter-readiness", root),
+            "migration_readiness": _command_string(resolved, "--migration-readiness", root),
             "milestone_status": _command_string(resolved, "--milestone-status", root),
             "workspace_overview": _command_string(resolved, "--workspace-overview", root),
         },
@@ -1951,6 +2353,7 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
     )
     _write_launcher(launcher_paths["mac_studio_day_one"], resolved, root, "--mac-studio-day-one")
     _write_launcher(launcher_paths["hermes_adapter_readiness"], resolved, root, "--hermes-adapter-readiness")
+    _write_launcher(launcher_paths["migration_readiness"], resolved, root, "--migration-readiness")
     _write_launcher(launcher_paths["milestone_status"], resolved, root, "--milestone-status")
     _write_launcher(launcher_paths["workspace_overview"], resolved, root, "--workspace-overview")
     _write_launcher(launcher_paths["operator_checklist"], resolved, root, "--operator-checklist")
@@ -2082,6 +2485,7 @@ def doctor_runtime(
         "replay_readiness_report": _runtime_replay_readiness_report_path(resolved).is_file(),
         "mac_studio_day_one_handoff": _runtime_mac_studio_day_one_handoff_path(resolved).is_file(),
         "hermes_adapter_readiness": _runtime_hermes_adapter_readiness_path(resolved).is_file(),
+        "migration_readiness": _runtime_migration_readiness_path(resolved).is_file(),
         "bootstrap_launcher": launcher_paths["bootstrap"].is_file(),
         "bootstrap_stack_launcher": launcher_paths["bootstrap_stack"].is_file(),
         "doctor_launcher": launcher_paths["doctor"].is_file(),
@@ -2097,6 +2501,7 @@ def doctor_runtime(
         "replay_readiness_report_launcher": launcher_paths["replay_readiness_report"].is_file(),
         "mac_studio_day_one_launcher": launcher_paths["mac_studio_day_one"].is_file(),
         "hermes_adapter_readiness_launcher": launcher_paths["hermes_adapter_readiness"].is_file(),
+        "migration_readiness_launcher": launcher_paths["migration_readiness"].is_file(),
         "gateway_launcher": launcher_paths["gateway"].is_file(),
         "workspace_launcher": launcher_paths["workspace"].is_file(),
         "operator_checklist_launcher": launcher_paths["operator_checklist"].is_file(),
@@ -3016,8 +3421,10 @@ def workspace_overview(config: IntegrationConfig | None = None) -> dict[str, Any
         "replay_readiness": health["harness_variants"]["execution_traces"]["replay_readiness"],
         "recovery_readiness": latest_recovery_readiness(resolved),
         "hermes_adapter_readiness": latest_hermes_adapter_readiness(resolved),
+        "migration_readiness": latest_migration_readiness(resolved),
         "replay_readiness_report_path": str(_runtime_replay_readiness_report_path(resolved)),
         "hermes_adapter_readiness_path": str(_runtime_hermes_adapter_readiness_path(resolved)),
+        "migration_readiness_path": str(_runtime_migration_readiness_path(resolved)),
         "replay_corpus_export_path": str(_runtime_replay_corpus_export_path(resolved)),
         "optimizer_snapshot_path": str(_runtime_optimizer_snapshot_path(resolved)),
         "harness_candidate_report_path": str(_runtime_harness_candidate_report_path(resolved)),
@@ -5277,6 +5684,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--propose-best-harness-candidate", action="store_true", help="Create one constrained harness proposal from the top replay candidate")
     parser.add_argument("--mac-studio-day-one", action="store_true", help="Generate the one-command Mac Studio rehearsal and handoff package")
     parser.add_argument("--hermes-adapter-readiness", action="store_true", help="Create or surface the read-only Hermes v0.13 adapter-readiness packet")
+    parser.add_argument("--migration-readiness", action="store_true", help="Create or surface the read-only repo migration-readiness map")
     parser.add_argument("--milestone-status", action="store_true", help="Print machine-readable milestone build/proof status")
     parser.add_argument("--workspace-overview", action="store_true", help="Print a Hermes Workspace-oriented operator snapshot")
     parser.add_argument("--operator-checklist", action="store_true", help="Print the operator validation checklist path")
@@ -5583,6 +5991,14 @@ def _main_impl(
             config=config,
             repo_root=args.repo_root,
             hermes_version=args.hermes_version,
+        )
+        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+        return 0
+
+    if args.migration_readiness:
+        payload = migration_readiness(
+            config=config,
+            repo_root=args.repo_root,
         )
         print(json.dumps(payload, indent=2, sort_keys=True, default=str))
         return 0

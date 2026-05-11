@@ -1051,6 +1051,31 @@ CREATE TABLE IF NOT EXISTS hermes_adapter_readiness_replay_projection_comparison
   created_at TEXT NOT NULL
 ) STRICT;
 
+CREATE TABLE IF NOT EXISTS migration_readiness_records (
+  record_id TEXT PRIMARY KEY,
+  surface_ref TEXT NOT NULL UNIQUE,
+  component_type TEXT NOT NULL CHECK (component_type IN ('module','database','runtime_path','schema','artifact')),
+  ownership_action TEXT NOT NULL CHECK (ownership_action IN ('adopt','adapt','wrap','convert-to-projection','retire')),
+  owner_domain TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  blockers_json TEXT NOT NULL CHECK (json_valid(blockers_json)),
+  evidence_refs_json TEXT NOT NULL CHECK (json_valid(evidence_refs_json)),
+  next_operator_actions_json TEXT NOT NULL CHECK (json_valid(next_operator_actions_json)),
+  readiness_status TEXT NOT NULL CHECK (readiness_status IN ('ready','action_required','blocked','retired')),
+  live_controls_enabled INTEGER NOT NULL CHECK (live_controls_enabled = 0),
+  created_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS migration_readiness_replay_projection_comparisons (
+  comparison_id TEXT PRIMARY KEY,
+  scope TEXT NOT NULL,
+  replay_records_json TEXT NOT NULL CHECK (json_valid(replay_records_json)),
+  projection_records_json TEXT NOT NULL CHECK (json_valid(projection_records_json)),
+  matches INTEGER NOT NULL CHECK (matches IN (0, 1)),
+  mismatches_json TEXT NOT NULL CHECK (json_valid(mismatches_json)),
+  created_at TEXT NOT NULL
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS side_effect_intents (
   intent_id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL,
@@ -1173,6 +1198,8 @@ CREATE INDEX IF NOT EXISTS idx_recovery_readiness_packets_scope_status ON recove
 CREATE INDEX IF NOT EXISTS idx_recovery_readiness_replay_projection_packet ON recovery_readiness_replay_projection_comparisons(packet_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_hermes_adapter_readiness_packets_adapter_status ON hermes_adapter_readiness_packets(adapter_name, hermes_version, readiness_status, created_at);
 CREATE INDEX IF NOT EXISTS idx_hermes_adapter_readiness_replay_projection_packet ON hermes_adapter_readiness_replay_projection_comparisons(packet_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_migration_readiness_records_action_status ON migration_readiness_records(ownership_action, readiness_status, component_type);
+CREATE INDEX IF NOT EXISTS idx_migration_readiness_replay_projection_scope ON migration_readiness_replay_projection_comparisons(scope, created_at);
 CREATE INDEX IF NOT EXISTS idx_side_effect_intents_status ON side_effect_intents(status, side_effect_type);
 CREATE INDEX IF NOT EXISTS idx_side_effect_receipts_intent ON side_effect_receipts(intent_id, recorded_at);
 CREATE INDEX IF NOT EXISTS idx_projection_outbox_status ON projection_outbox(status, created_at);

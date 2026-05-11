@@ -32,6 +32,9 @@ RecoveryChecklistStatus = Literal["accepted", "rejected"]
 RecoveryVerificationStatus = Literal["verified", "failed", "blocked"]
 RecoveryReadinessStatus = Literal["ready", "action_required", "fail_closed"]
 HermesAdapterReadinessStatus = Literal["ready", "action_required", "fail_closed"]
+MigrationOwnershipAction = Literal["adopt", "adapt", "wrap", "convert-to-projection", "retire"]
+MigrationComponentType = Literal["module", "database", "runtime_path", "schema", "artifact"]
+MigrationReadinessStatus = Literal["ready", "action_required", "blocked", "retired"]
 RiskLevel = Literal["low", "medium", "high", "critical"]
 AutonomyClass = Literal["A0", "A1", "A2", "A3", "A4", "A5"]
 DecisionType = Literal[
@@ -586,6 +589,33 @@ class HermesAdapterReadinessReplayProjectionComparison:
     packet_id: str
     replay_packet: JsonObject
     projection_packet: JsonObject
+    matches: bool
+    mismatches: list[str]
+    comparison_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class MigrationReadinessRecord:
+    surface_ref: str
+    component_type: MigrationComponentType
+    ownership_action: MigrationOwnershipAction
+    owner_domain: str
+    summary: str
+    blockers: list[JsonObject]
+    evidence_refs: list[str]
+    next_operator_actions: list[JsonObject]
+    readiness_status: MigrationReadinessStatus
+    live_controls_enabled: bool = False
+    record_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class MigrationReadinessReplayProjectionComparison:
+    scope: str
+    replay_records: dict[str, JsonObject]
+    projection_records: dict[str, JsonObject]
     matches: bool
     mismatches: list[str]
     comparison_id: str = field(default_factory=new_id)

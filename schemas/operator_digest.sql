@@ -116,6 +116,27 @@ CREATE INDEX IF NOT EXISTS idx_operator_manual_tasks_status_priority
 CREATE INDEX IF NOT EXISTS idx_operator_manual_tasks_project_status
   ON operator_manual_tasks(project_id, status);
 
+CREATE TABLE IF NOT EXISTS kernel_migration_readiness_projection (
+  surface_ref TEXT PRIMARY KEY,
+  record_id TEXT NOT NULL,
+  component_type TEXT NOT NULL CHECK (component_type IN ('module', 'database', 'runtime_path', 'schema', 'artifact')),
+  ownership_action TEXT NOT NULL CHECK (ownership_action IN ('adopt', 'adapt', 'wrap', 'convert-to-projection', 'retire')),
+  owner_domain TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  blockers_json TEXT NOT NULL CHECK (json_valid(blockers_json)),
+  evidence_refs_json TEXT NOT NULL CHECK (json_valid(evidence_refs_json)),
+  next_operator_actions_json TEXT NOT NULL CHECK (json_valid(next_operator_actions_json)),
+  readiness_status TEXT NOT NULL CHECK (readiness_status IN ('ready', 'action_required', 'blocked', 'retired')),
+  live_controls_enabled INTEGER NOT NULL DEFAULT 0 CHECK (live_controls_enabled = 0),
+  authoritative_source TEXT NOT NULL DEFAULT 'kernel.events' CHECK (authoritative_source = 'kernel.events'),
+  projection_event_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  projected_at TEXT NOT NULL
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_kernel_migration_projection_action_status
+  ON kernel_migration_readiness_projection(ownership_action, readiness_status, component_type);
+
 CREATE TABLE IF NOT EXISTS runtime_control_state (
   state_id TEXT PRIMARY KEY CHECK (state_id = 'runtime'),
   lifecycle_state TEXT NOT NULL CHECK (lifecycle_state IN ('ACTIVE', 'HALTED')),

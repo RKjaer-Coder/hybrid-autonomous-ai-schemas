@@ -127,8 +127,11 @@ schema contract.
 
 The commercial loop, artifact lifecycle, backup/restore path, recovery
 readiness packets, encrypted payload descriptors, and model-routing seed records
-are kernel-owned deterministic state. Live workers, real customer integrations,
-revenue webhooks, and Hermes-native dashboard authority remain future-gated.
+are kernel-owned deterministic state. The legacy module/database migration map
+is also kernel-owned and replay-checked, with a deterministic outbox-fed
+operator digest projection for read-only inspection. Live workers, real
+customer integrations, revenue webhooks, and Hermes-native dashboard authority
+remain future-gated.
 
 Run the full test suite:
 
@@ -172,6 +175,12 @@ repo-local proof inputs:
 
 ```bash
 python3 -m skills.runtime --hermes-adapter-readiness
+```
+
+Create or surface the read-only legacy module/database migration-readiness map:
+
+```bash
+python3 -m skills.runtime --migration-readiness
 ```
 
 Export activation-relevant replay traces for offline harness work:

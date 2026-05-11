@@ -26,6 +26,7 @@ from skills.runtime import (
     install_runtime_profile,
     make_session_context,
     main as runtime_main,
+    migration_readiness,
     migrate_runtime_databases,
     optimizer_snapshot,
     prepare_runtime_directories,
@@ -973,6 +974,58 @@ def test_hermes_adapter_readiness_links_latest_recovery_packet_when_available(tm
     assert adapter["packet"]["recovery_readiness_packet_id"] == "recovery-ready-runtime"
     assert adapter["recovery_readiness"]["packet_id"] == "recovery-ready-runtime"
     assert adapter["live_controls_enabled"] is False
+
+
+def test_migration_readiness_creates_kernel_map_and_workspace_surface(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+
+    payload = migration_readiness(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of="2026-05-12T00:00:00+00:00",
+    )
+
+    assert payload["available"] is True
+    assert payload["live_controls_enabled"] is False
+    assert "provider_calls" in payload["disabled_live_controls"]
+    assert payload["comparison"]["matches"] is True
+    assert payload["operator_projection"]["applied"] == payload["summary"]["total_records"]
+    assert payload["operator_projection"]["live_controls_enabled"] is False
+    assert payload["operator_projection_comparison"]["matches"] is True
+    assert payload["summary"]["ownership_action_counts"]["adopt"] >= 1
+    assert payload["summary"]["ownership_action_counts"]["convert-to-projection"] >= 5
+    assert Path(payload["artifact_path"]).is_file()
+    by_surface = {record["surface_ref"]: record for record in payload["records"]}
+    assert by_surface["kernel.db"]["ownership_action"] == "adopt"
+    assert by_surface["strategic_memory.db"]["ownership_action"] == "convert-to-projection"
+    assert by_surface["custom_mission_control_dashboard"]["readiness_status"] == "retired"
+    assert by_surface["hermes_adapter_readiness.json"]["readiness_status"] == "action_required"
+    assert by_surface["strategic_memory.db"]["next_operator_actions"]
+
+    overview = workspace_overview(cfg)
+    migration = overview["migration_readiness"]
+    assert migration["available"] is True
+    assert migration["summary"]["total_records"] == payload["summary"]["total_records"]
+    assert migration["operator_projection_comparison"]["matches"] is True
+    assert migration["live_controls_enabled"] is False
+    assert overview["migration_readiness_path"] == payload["artifact_path"]
+    with sqlite3.connect(Path(cfg.data_dir) / "operator_digest.db") as conn:
+        conn.row_factory = sqlite3.Row
+        projected = conn.execute(
+            """
+            SELECT *
+            FROM kernel_migration_readiness_projection
+            WHERE surface_ref='operator_digest.db'
+            """
+        ).fetchone()
+    assert projected is not None
+    assert projected["authoritative_source"] == "kernel.events"
+    assert projected["live_controls_enabled"] == 0
 
 
 def test_run_evidence_factory_generates_cross_skill_evidence(tmp_path):

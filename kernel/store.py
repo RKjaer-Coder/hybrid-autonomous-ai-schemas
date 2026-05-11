@@ -28,6 +28,8 @@ from .records import (
     HoldoutPolicy,
     HoldoutUseRecord,
     LocalOffloadEvalSet,
+    MigrationReadinessRecord,
+    MigrationReadinessReplayProjectionComparison,
     ModelCandidate,
     ModelDemotionRecord,
     ModelEvalRun,
@@ -93,6 +95,7 @@ from .store_research import ResearchKernelTransactionMixin
 from .store_common import (
     _loads,
 )
+from .store_migration import MigrationKernelTransactionMixin
 
 
 class KernelStore:
@@ -376,6 +379,22 @@ class KernelStore:
     ) -> HermesAdapterReadinessReplayProjectionComparison:
         def handler(tx: KernelTransaction) -> HermesAdapterReadinessReplayProjectionComparison:
             return tx.compare_hermes_adapter_readiness_replay_to_projection(packet_id)
+
+        return self.execute_command(command, handler)
+
+    def record_migration_readiness(self, command: Command, record: MigrationReadinessRecord) -> str:
+        def handler(tx: KernelTransaction) -> str:
+            return tx.record_migration_readiness(record)
+
+        return self.execute_command(command, handler)
+
+    def compare_migration_readiness_replay_to_projection(
+        self,
+        command: Command,
+        scope: str = "legacy_repo",
+    ) -> MigrationReadinessReplayProjectionComparison:
+        def handler(tx: KernelTransaction) -> MigrationReadinessReplayProjectionComparison:
+            return tx.compare_migration_readiness_replay_to_projection(scope)
 
         return self.execute_command(command, handler)
 
@@ -1030,6 +1049,7 @@ class KernelStore:
 class KernelTransaction(
     ArtifactKernelTransactionMixin,
     RecoveryKernelTransactionMixin,
+    MigrationKernelTransactionMixin,
     ResearchKernelTransactionMixin,
     CommercialKernelTransactionMixin,
     ModelIntelligenceKernelTransactionMixin,

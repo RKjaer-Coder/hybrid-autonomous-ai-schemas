@@ -18,6 +18,7 @@ from kernel import (
     EncryptedStorageDescriptor,
     EncryptedStorageKeyRotationRecord,
     KernelStore,
+    MigrationReadinessRecord,
     PayloadAccessReceipt,
     RecoveryChecklistReceipt,
     RecoveryVerificationState,
@@ -29,6 +30,10 @@ from kernel import (
     verify_kernel_backup,
 )
 from kernel.records import new_id, payload_hash, sha256_text
+from kernel.projections import (
+    apply_operator_digest_projection_outbox,
+    compare_operator_digest_migration_readiness_projection,
+)
 from kernel.store import KERNEL_POLICY_VERSION
 
 
@@ -1371,6 +1376,157 @@ class KernelFoundationTests(unittest.TestCase):
                 recovery_readiness_packet_id=recovery.packet_id,
             )
 
+    def test_migration_readiness_records_are_kernel_owned_and_replayable(self):
+        record = MigrationReadinessRecord(
+            surface_ref="strategic_memory.db",
+            component_type="database",
+            ownership_action="convert-to-projection",
+            owner_domain="legacy_projection",
+            summary="Strategic memory remains a compatibility projection.",
+            blockers=[
+                {
+                    "blocker": "projection_feed_not_promoted",
+                    "severity": "medium",
+                    "reason": "Kernel outbox projection feed is not yet the sole writer.",
+                    "refs": ["spec:s09_decisions_risks#ADR-009 Migration Map Before Rewrite"],
+                }
+            ],
+            evidence_refs=["file:schemas/strategic_memory.sql", "file:README.md"],
+            next_operator_actions=[
+                {
+                    "action": "define_projection_feed",
+                    "required_authority": "operator_gate",
+                    "reason": "Keep the legacy DB as derived state until replay/projection writes are deterministic.",
+                    "refs": ["file:schemas/strategic_memory.sql"],
+                }
+            ],
+            readiness_status="action_required",
+        )
+
+        record_id = self.store.record_migration_readiness(
+            command("migration.readiness_record", "migration-strategic", requested_by="kernel"),
+            record,
+        )
+
+        replay = self.store.replay_critical_state()
+        self.assertEqual(record_id, record.record_id)
+        self.assertEqual(
+            replay.migration_readiness_records["strategic_memory.db"]["ownership_action"],
+            "convert-to-projection",
+        )
+        self.assertFalse(replay.migration_readiness_records["strategic_memory.db"]["live_controls_enabled"])
+
+        comparison = self.store.compare_migration_readiness_replay_to_projection(
+            command("migration.readiness_compare", "migration-compare", requested_by="kernel"),
+        )
+        self.assertTrue(comparison.matches)
+
+        with self.store.connect() as conn:
+            conn.execute(
+                "UPDATE migration_readiness_records SET readiness_status='ready' WHERE record_id=?",
+                (record_id,),
+            )
+        drift = self.store.compare_migration_readiness_replay_to_projection(
+            command("migration.readiness_compare", "migration-drift", requested_by="kernel"),
+        )
+        self.assertFalse(drift.matches)
+        self.assertIn("migration_readiness_records", drift.mismatches)
+
+    def test_migration_readiness_records_block_worker_and_live_control_mutation(self):
+        record = MigrationReadinessRecord(
+            surface_ref="dashboard",
+            component_type="artifact",
+            ownership_action="retire",
+            owner_domain="operator_surface",
+            summary="Dashboard is retired.",
+            blockers=[],
+            evidence_refs=["file:README.md"],
+            next_operator_actions=[],
+            readiness_status="retired",
+        )
+        with self.assertRaises(PermissionError):
+            self.store.record_migration_readiness(
+                command("migration.readiness_record", "agent-migration", requested_by="agent"),
+                record,
+            )
+        with self.assertRaises(PermissionError):
+            self.store.record_migration_readiness(
+                command("migration.readiness_record", "live-control-migration", requested_by="kernel"),
+                MigrationReadinessRecord(
+                    surface_ref="bad-live-control",
+                    component_type="runtime_path",
+                    ownership_action="wrap",
+                    owner_domain="runtime",
+                    summary="Invalid live-control record.",
+                    blockers=[],
+                    evidence_refs=[],
+                    next_operator_actions=[],
+                    readiness_status="blocked",
+                    live_controls_enabled=True,
+                ),
+            )
+
+    def test_migration_readiness_outbox_feeds_operator_digest_projection(self):
+        operator_db = Path(self.tmp.name) / "operator_digest.db"
+        with sqlite3.connect(operator_db) as conn:
+            conn.executescript(Path("schemas/operator_digest.sql").read_text(encoding="utf-8"))
+        record = MigrationReadinessRecord(
+            record_id="migration:operator_digest.db",
+            surface_ref="operator_digest.db",
+            component_type="database",
+            ownership_action="convert-to-projection",
+            owner_domain="legacy_projection",
+            summary="Operator digest remains an inspectable projection.",
+            blockers=[
+                {
+                    "blocker": "projection_feed_not_promoted",
+                    "severity": "medium",
+                    "reason": "Projection feed must be deterministic before the DB is trusted for inspection.",
+                    "refs": ["spec:s09_decisions_risks#ADR-009 Migration Map Before Rewrite"],
+                }
+            ],
+            evidence_refs=["file:schemas/operator_digest.sql"],
+            next_operator_actions=[
+                {
+                    "action": "inspect_projection_only",
+                    "required_authority": "operator_gate",
+                    "reason": "Use the row for inspection; do not mutate kernel authority from operator_digest.db.",
+                    "refs": ["file:schemas/operator_digest.sql"],
+                }
+            ],
+            readiness_status="action_required",
+            created_at="2026-05-12T00:00:00Z",
+        )
+
+        self.store.record_migration_readiness(
+            command("migration.readiness_record", "migration-operator-projection", requested_by="kernel"),
+            record,
+        )
+        applied = apply_operator_digest_projection_outbox(self.db_path, operator_db)
+
+        self.assertEqual(applied["applied"], 1)
+        self.assertFalse(applied["live_controls_enabled"])
+        with sqlite3.connect(operator_db) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM kernel_migration_readiness_projection WHERE surface_ref='operator_digest.db'"
+            ).fetchone()
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(row["ownership_action"], "convert-to-projection")
+        self.assertEqual(row["authoritative_source"], "kernel.events")
+        self.assertEqual(row["live_controls_enabled"], 0)
+        comparison = compare_operator_digest_migration_readiness_projection(self.db_path, operator_db)
+        self.assertTrue(comparison["matches"])
+
+        with sqlite3.connect(operator_db) as conn:
+            conn.execute(
+                "UPDATE kernel_migration_readiness_projection SET readiness_status='ready' WHERE surface_ref='operator_digest.db'"
+            )
+        drift = compare_operator_digest_migration_readiness_projection(self.db_path, operator_db)
+        self.assertFalse(drift["matches"])
+        self.assertIn("changed_operator_projection_records", drift["mismatches"])
+
     def test_kernel_backup_manifest_and_restore_preserve_audit_and_governed_records(self):
         grant = CapabilityGrant(
             grant_id=new_id(),
@@ -1559,6 +1715,10 @@ class KernelFoundationTests(unittest.TestCase):
         self.assertIn("recovery_replay_projection_comparisons", tables)
         self.assertIn("recovery_readiness_packets", tables)
         self.assertIn("recovery_readiness_replay_projection_comparisons", tables)
+        self.assertIn("hermes_adapter_readiness_packets", tables)
+        self.assertIn("hermes_adapter_readiness_replay_projection_comparisons", tables)
+        self.assertIn("migration_readiness_records", tables)
+        self.assertIn("migration_readiness_replay_projection_comparisons", tables)
         self.assertNotIn("research_tasks", tables)
 
     def test_schema_contains_authoritative_placeholders(self):
