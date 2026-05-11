@@ -31,6 +31,7 @@ RestoreDrillStatus = Literal["queued", "verified", "failed", "blocked"]
 RecoveryChecklistStatus = Literal["accepted", "rejected"]
 RecoveryVerificationStatus = Literal["verified", "failed", "blocked"]
 RecoveryReadinessStatus = Literal["ready", "action_required", "fail_closed"]
+HermesAdapterReadinessStatus = Literal["ready", "action_required", "fail_closed"]
 RiskLevel = Literal["low", "medium", "high", "critical"]
 AutonomyClass = Literal["A0", "A1", "A2", "A3", "A4", "A5"]
 DecisionType = Literal[
@@ -555,6 +556,33 @@ class RecoveryReadinessPacket:
 
 @dataclass(frozen=True)
 class RecoveryReadinessReplayProjectionComparison:
+    packet_id: str
+    replay_packet: JsonObject
+    projection_packet: JsonObject
+    matches: bool
+    mismatches: list[str]
+    comparison_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class HermesAdapterReadinessPacket:
+    adapter_name: str
+    hermes_version: str
+    as_of: str
+    surface_checks: list[JsonObject]
+    reconciliation_checks: list[JsonObject]
+    recovery_readiness_packet_id: str | None
+    next_operator_actions: list[JsonObject]
+    readiness_status: HermesAdapterReadinessStatus
+    evidence_refs: list[str]
+    live_controls_enabled: bool = False
+    packet_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class HermesAdapterReadinessReplayProjectionComparison:
     packet_id: str
     replay_packet: JsonObject
     projection_packet: JsonObject

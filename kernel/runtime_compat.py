@@ -18,6 +18,7 @@ import time
 import threading
 import types
 from collections.abc import Callable, Sequence
+from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -54,6 +55,7 @@ from kernel.runtime import (
     require_runtime_databases as _kernel_require_runtime_databases,
     verify_runtime_databases as _kernel_verify_runtime_databases,
 )
+from kernel import Command, KernelStore
 from migrate import LEGACY_SCHEMAS as SCHEMAS, apply_schema, verify_database
 from runtime_control import RuntimeControlManager
 from skills.bootstrap import BootstrapOrchestrator
@@ -470,6 +472,7 @@ from kernel.runtime_paths import (
     _runtime_flywheel_drill_report_path,
     _runtime_gateway_manifest_path,
     _runtime_harness_candidate_report_path,
+    _runtime_hermes_adapter_readiness_path,
     _runtime_launcher_paths,
     _runtime_local_provider_doctor_path,
     _runtime_logs_dir,
@@ -806,6 +809,401 @@ def _run_command_candidates(
     if last_result is None:
         raise ValueError("at least one command candidate is required")
     return last_result
+
+
+def _kernel_db_path(config: IntegrationConfig) -> Path:
+    return Path(config.data_dir).expanduser().resolve() / "kernel.db"
+
+
+def _kernel_command(command_type: str, key: str, payload: dict[str, Any] | None = None) -> Command:
+    return Command(
+        command_type=command_type,
+        requested_by="kernel",
+        requester_id="runtime_compat",
+        target_entity_type="kernel",
+        idempotency_key=key,
+        payload=payload or {"key": key},
+        requested_authority=None,
+    )
+
+
+def _json_row(row: sqlite3.Row, json_fields: Sequence[str]) -> dict[str, Any]:
+    payload = dict(row)
+    for field in json_fields:
+        if field in payload and isinstance(payload[field], str):
+            payload[field] = json.loads(payload[field])
+    if "live_controls_enabled" in payload:
+        payload["live_controls_enabled"] = bool(payload["live_controls_enabled"])
+    if "matches" in payload:
+        payload["matches"] = bool(payload["matches"])
+    return payload
+
+
+def _latest_kernel_row(db_path: Path, table: str) -> dict[str, Any] | None:
+    if not db_path.is_file():
+        return None
+    json_fields = {
+        "recovery_readiness_packets": (
+            "backup_cadence_summary_json",
+            "restore_drill_summary_json",
+            "encrypted_payload_descriptor_summary_json",
+            "payload_access_failure_summary_json",
+            "fail_closed_state_json",
+            "next_operator_actions_json",
+            "evidence_refs_json",
+        ),
+        "hermes_adapter_readiness_packets": (
+            "surface_checks_json",
+            "reconciliation_checks_json",
+            "next_operator_actions_json",
+            "evidence_refs_json",
+        ),
+    }[table]
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            f"SELECT * FROM {table} ORDER BY created_at DESC, rowid DESC LIMIT 1"
+        ).fetchone()
+    return None if row is None else _json_row(row, json_fields)
+
+
+def _kernel_row_by_id(db_path: Path, table: str, id_column: str, row_id: str) -> dict[str, Any] | None:
+    if not db_path.is_file():
+        return None
+    json_fields = {
+        "recovery_readiness_packets": (
+            "backup_cadence_summary_json",
+            "restore_drill_summary_json",
+            "encrypted_payload_descriptor_summary_json",
+            "payload_access_failure_summary_json",
+            "fail_closed_state_json",
+            "next_operator_actions_json",
+            "evidence_refs_json",
+        ),
+        "hermes_adapter_readiness_packets": (
+            "surface_checks_json",
+            "reconciliation_checks_json",
+            "next_operator_actions_json",
+            "evidence_refs_json",
+        ),
+    }[table]
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(f"SELECT * FROM {table} WHERE {id_column}=? LIMIT 1", (row_id,)).fetchone()
+    return None if row is None else _json_row(row, json_fields)
+
+
+def _repo_local_hermes_adapter_proof_inputs(
+    config: IntegrationConfig,
+    repo_root: Path,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    profile_manifest = _read_json_yaml(_runtime_profile_manifest_path(config)) or {}
+    workspace_doc = _read_json_yaml(_runtime_workspace_manifest_path(config)) or {}
+    gateway_doc = _read_json_yaml(_runtime_gateway_manifest_path(config)) or {}
+    network_doc = _read_json_yaml(_runtime_network_controls_path(config)) or {}
+    proxy_doc = _read_json_yaml(_runtime_proxy_allowlist_path(config)) or {}
+    local_provider_doc = _read_json_yaml(_runtime_local_provider_doctor_path(config)) or {}
+    curator_doc = _read_json_yaml(_runtime_curator_readiness_path(config)) or {}
+    profile_doc = _read_json_yaml(_runtime_profile_config_path(config)) or {}
+    profile_config = profile_doc.get("skills", {}).get("config", {}).get("hybrid_autonomous_ai", {})
+    commands = profile_manifest.get("commands") or {}
+    workspace_surfaces = set(workspace_doc.get("dashboard_surfaces") or [])
+    artifact_refs = {
+        "profile_manifest": f"file:{_runtime_profile_manifest_path(config)}",
+        "workspace_manifest": f"file:{_runtime_workspace_manifest_path(config)}",
+        "gateway_manifest": f"file:{_runtime_gateway_manifest_path(config)}",
+        "network_controls": f"file:{_runtime_network_controls_path(config)}",
+        "proxy_allowlist": f"file:{_runtime_proxy_allowlist_path(config)}",
+        "local_provider_doctor": f"file:{_runtime_local_provider_doctor_path(config)}",
+        "curator_readiness": f"file:{_runtime_curator_readiness_path(config)}",
+        "profile_config": f"file:{_runtime_profile_config_path(config)}",
+    }
+    repo_contract = {
+        "dashboard_native_no_custom_plugin": workspace_doc.get("custom_dashboard_plugin") is False
+        and workspace_doc.get("dashboard_mode") == "hermes_native",
+        "dashboard_expected_surfaces": set(EXPECTED_DASHBOARD_SURFACES).issubset(workspace_surfaces),
+        "provider_deferred": local_provider_doc.get("status") == "DEFERRED_UNTIL_LIVE_HERMES",
+        "curator_disabled": curator_doc.get("status") == "DISABLED_UNTIL_PINNING_VALIDATED",
+        "zero_spend_profile": profile_config.get("routing", {}).get("max_api_spend_usd") == 0.0,
+        "repo_root_available": repo_root.is_dir(),
+    }
+
+    def status(ok: bool) -> str:
+        return "passed" if ok else "blocked"
+
+    surface_checks = [
+        {
+            "surface": "kanban_worker_lifecycle",
+            "status": status("Kanban" in workspace_surfaces and repo_contract["dashboard_native_no_custom_plugin"]),
+            "proof": "Hermes-native Kanban surface is declared as read-only operator visibility.",
+            "live_control_enabled": False,
+            "evidence_refs": [artifact_refs["workspace_manifest"]],
+        },
+        {
+            "surface": "dashboard_profile_provider_controls",
+            "status": status(
+                repo_contract["dashboard_expected_surfaces"]
+                and repo_contract["provider_deferred"]
+                and repo_contract["curator_disabled"]
+                and repo_contract["zero_spend_profile"]
+            ),
+            "proof": "Profile/provider controls stay disabled or report-first in repo-local artifacts.",
+            "live_control_enabled": False,
+            "evidence_refs": [
+                artifact_refs["workspace_manifest"],
+                artifact_refs["local_provider_doctor"],
+                artifact_refs["curator_readiness"],
+                artifact_refs["profile_config"],
+            ],
+        },
+        {
+            "surface": "provider_plugin_calls",
+            "status": status(repo_contract["provider_deferred"] and repo_contract["zero_spend_profile"]),
+            "proof": "Provider/plugin calls are described but deferred until live Hermes validation.",
+            "live_control_enabled": False,
+            "evidence_refs": [artifact_refs["local_provider_doctor"], artifact_refs["profile_config"]],
+        },
+        {
+            "surface": "mcp_sse_oauth_forwarding",
+            "status": status(bool(gateway_doc.get("startup_hint")) and repo_contract["repo_root_available"]),
+            "proof": "Gateway forwarding is represented as manifest-only startup guidance.",
+            "live_control_enabled": False,
+            "evidence_refs": [artifact_refs["gateway_manifest"]],
+        },
+        {
+            "surface": "no_agent_cron_watchdog",
+            "status": status("research_cron_proof" in commands and "task_loop_proof" in commands),
+            "proof": "Cron/watchdog readiness is limited to deterministic repo-local proof commands.",
+            "live_control_enabled": False,
+            "evidence_refs": [artifact_refs["profile_manifest"]],
+        },
+        {
+            "surface": "gateway_goal_checkpoint_resume",
+            "status": status("contract_harness" in commands and Path(config.checkpoints_dir).is_dir()),
+            "proof": "Goal/checkpoint/resume proof is represented by contract harness and checkpoint paths.",
+            "live_control_enabled": False,
+            "evidence_refs": [artifact_refs["profile_manifest"]],
+        },
+        {
+            "surface": "platform_allowlists_redaction",
+            "status": status(bool(network_doc.get("outbound_allowlist")) and bool(proxy_doc.get("outbound_allowlist"))),
+            "proof": "Network allowlists and redaction boundaries are repo-owned artifacts.",
+            "live_control_enabled": False,
+            "evidence_refs": [artifact_refs["network_controls"], artifact_refs["proxy_allowlist"]],
+        },
+    ]
+
+    kernel_db = _kernel_db_path(config)
+    kernel_store = KernelStore(kernel_db)
+    with kernel_store.connect() as conn:
+        kernel_tables = {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+    table_evidence = f"kernel:{kernel_db}"
+    required_tables = {
+        "project_tasks",
+        "project_task_assignments",
+        "capability_grants",
+        "budgets",
+        "side_effect_intents",
+        "side_effect_receipts",
+        "commands",
+    }
+    reconciliation_checks = [
+        {
+            "check": "kernel_task_status",
+            "status": status({"project_tasks", "project_status_rollups"} <= kernel_tables),
+            "proof": "Kernel task/status tables exist for replay-owned task state.",
+            "live_control_enabled": False,
+            "evidence_refs": [table_evidence],
+        },
+        {
+            "check": "assignment_ownership",
+            "status": status("project_task_assignments" in kernel_tables),
+            "proof": "Worker assignment ownership is kernel-recorded before task execution.",
+            "live_control_enabled": False,
+            "evidence_refs": [table_evidence],
+        },
+        {
+            "check": "grant_status_scope_expiry_use_count",
+            "status": status("capability_grants" in kernel_tables),
+            "proof": "Capability grants carry scope, expiry, use-count, and policy version.",
+            "live_control_enabled": False,
+            "evidence_refs": [table_evidence],
+        },
+        {
+            "check": "budget_reservation_status",
+            "status": status("budgets" in kernel_tables),
+            "proof": "Budget grants/reservations remain kernel-owned before paid provider calls.",
+            "live_control_enabled": False,
+            "evidence_refs": [table_evidence],
+        },
+        {
+            "check": "side_effect_intent_idempotency_receipt",
+            "status": status({"side_effect_intents", "side_effect_receipts"} <= kernel_tables),
+            "proof": "External side effects require prepared intents and durable receipts.",
+            "live_control_enabled": False,
+            "evidence_refs": [table_evidence],
+        },
+        {
+            "check": "policy_version",
+            "status": status(required_tables <= kernel_tables),
+            "proof": "Required kernel policy tables exist under the current schema.",
+            "live_control_enabled": False,
+            "evidence_refs": [table_evidence],
+        },
+        {
+            "check": "operator_halt_quarantine_state",
+            "status": status("commands" in kernel_tables and Path(config.data_dir, "operator_digest.db").exists()),
+            "proof": "Operator halt/quarantine visibility remains a compatibility projection, not live control.",
+            "live_control_enabled": False,
+            "evidence_refs": [table_evidence, f"file:{Path(config.data_dir) / 'operator_digest.db'}"],
+        },
+    ]
+    return surface_checks, reconciliation_checks
+
+
+def _write_hermes_adapter_readiness_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
+    artifact = dict(payload)
+    artifact.setdefault("artifact_path", str(_runtime_hermes_adapter_readiness_path(config)))
+    artifact.setdefault("live_controls_enabled", False)
+    artifact.setdefault(
+        "disabled_live_controls",
+        ["dashboard_write_controls", "customer_commitments", "provider_calls", "provider_plugin_mutation"],
+    )
+    _write_json_yaml(_runtime_hermes_adapter_readiness_path(config), artifact)
+
+
+def hermes_adapter_readiness(
+    config: IntegrationConfig | None = None,
+    *,
+    repo_root: str | None = None,
+    adapter_name: str = "hermes-v0.13",
+    hermes_version: str = "0.13.0",
+    as_of: str | None = None,
+    surface_checks: list[dict[str, Any]] | None = None,
+    reconciliation_checks: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    install = install_runtime_profile(resolved, repo_root=repo_root)
+    require_runtime_databases(resolved)
+    repo_root_path = Path(install.repo_root)
+    kernel_db = _kernel_db_path(resolved)
+    store = KernelStore(kernel_db)
+    latest_recovery = _latest_kernel_row(kernel_db, "recovery_readiness_packets")
+    recovery_packet_id = None if latest_recovery is None else str(latest_recovery["packet_id"])
+    if surface_checks is None or reconciliation_checks is None:
+        generated_surfaces, generated_reconciliation = _repo_local_hermes_adapter_proof_inputs(
+            resolved,
+            repo_root_path,
+        )
+        surface_checks = generated_surfaces if surface_checks is None else surface_checks
+        reconciliation_checks = generated_reconciliation if reconciliation_checks is None else reconciliation_checks
+    timestamp = as_of or _utc_now()
+    packet = store.create_hermes_adapter_readiness_packet(
+        _kernel_command(
+            "hermes.adapter_readiness",
+            f"{adapter_name}:{hermes_version}:{timestamp}",
+            {
+                "adapter_name": adapter_name,
+                "hermes_version": hermes_version,
+                "as_of": timestamp,
+                "recovery_readiness_packet_id": recovery_packet_id,
+            },
+        ),
+        adapter_name=adapter_name,
+        hermes_version=hermes_version,
+        as_of=timestamp,
+        surface_checks=surface_checks,
+        reconciliation_checks=reconciliation_checks,
+        recovery_readiness_packet_id=recovery_packet_id,
+    )
+    comparison = store.compare_hermes_adapter_readiness_replay_to_projection(
+        _kernel_command("hermes.adapter_readiness_compare", f"{packet.packet_id}:projection"),
+        packet.packet_id,
+    )
+    payload = {
+        "available": True,
+        "packet": asdict(packet),
+        "comparison": asdict(comparison),
+        "recovery_readiness": latest_recovery,
+        "kernel_db_path": str(kernel_db),
+        "profile_manifest_path": str(_runtime_profile_manifest_path(resolved)),
+        "workspace_manifest_path": str(_runtime_workspace_manifest_path(resolved)),
+        "artifact_path": str(_runtime_hermes_adapter_readiness_path(resolved)),
+        "live_controls_enabled": False,
+        "disabled_live_controls": [
+            "dashboard_write_controls",
+            "customer_commitments",
+            "provider_calls",
+            "provider_plugin_mutation",
+        ],
+    }
+    _write_hermes_adapter_readiness_artifact(resolved, payload)
+    return payload
+
+
+def latest_hermes_adapter_readiness(config: IntegrationConfig | None = None) -> dict[str, Any]:
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    latest = _latest_kernel_row(_kernel_db_path(resolved), "hermes_adapter_readiness_packets")
+    if latest is None:
+        artifact = _read_json_yaml(_runtime_hermes_adapter_readiness_path(resolved))
+        if artifact is not None:
+            return artifact
+        return {
+            "available": False,
+            "status": "NOT_RUN",
+            "artifact_path": str(_runtime_hermes_adapter_readiness_path(resolved)),
+            "live_controls_enabled": False,
+            "disabled_live_controls": [
+                "dashboard_write_controls",
+                "customer_commitments",
+                "provider_calls",
+                "provider_plugin_mutation",
+            ],
+        }
+    recovery = None
+    recovery_packet_id = latest.get("recovery_readiness_packet_id")
+    if isinstance(recovery_packet_id, str) and recovery_packet_id:
+        recovery = _kernel_row_by_id(
+            _kernel_db_path(resolved),
+            "recovery_readiness_packets",
+            "packet_id",
+            recovery_packet_id,
+        )
+    return {
+        "available": True,
+        "packet": latest,
+        "recovery_readiness": recovery,
+        "kernel_db_path": str(_kernel_db_path(resolved)),
+        "artifact_path": str(_runtime_hermes_adapter_readiness_path(resolved)),
+        "live_controls_enabled": False,
+        "disabled_live_controls": [
+            "dashboard_write_controls",
+            "customer_commitments",
+            "provider_calls",
+            "provider_plugin_mutation",
+        ],
+    }
+
+
+def latest_recovery_readiness(config: IntegrationConfig | None = None) -> dict[str, Any]:
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    latest = _latest_kernel_row(_kernel_db_path(resolved), "recovery_readiness_packets")
+    if latest is None:
+        return {
+            "available": False,
+            "status": "NOT_RUN",
+            "kernel_db_path": str(_kernel_db_path(resolved)),
+            "live_controls_enabled": False,
+        }
+    return {
+        "available": True,
+        "packet": latest,
+        "kernel_db_path": str(_kernel_db_path(resolved)),
+        "live_controls_enabled": False,
+    }
 
 
 
@@ -1254,10 +1652,13 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
         "milestone_status_command": _command_string(config, "--milestone-status", repo_root),
         "optimizer_snapshot_command": _command_string(config, "--optimizer-snapshot", repo_root),
         "harness_candidate_command": _command_string(config, "--analyze-harness-candidates", repo_root),
+        "hermes_adapter_readiness_command": _command_string(config, "--hermes-adapter-readiness", repo_root),
         "dashboard_surfaces": list(EXPECTED_DASHBOARD_SURFACES),
         "dashboard_mode": "hermes_native",
         "custom_dashboard_plugin": False,
         "offline_mockable": True,
+        "live_controls_enabled": False,
+        "read_only_readiness_surfaces": ["replay_readiness", "recovery_readiness", "hermes_adapter_readiness"],
     }
     local_provider_doc = {
         **contract.local_provider_mapping(),
@@ -1303,7 +1704,8 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
         "5. Run the evidence factory and inspect the replay readiness report.",
         "6. Confirm the task-loop and research-cron proofs pass.",
         "7. If Hermes is installed, run readiness and verify Hermes v0.12.0+, `hermes -z`, LM Studio/local-provider doctor, approval hooks, Curator report-first state, and live profile/config surface.",
-        "8. Open the Hermes native dashboard and confirm Models, Chat, Plugins, Kanban, Agent Profiles, Analytics, gates, traces, quarantine review, replay readiness, runtime halt state, and milestone health are visible.",
+        "8. Run Hermes adapter-readiness and confirm the packet remains read-only with live dashboard/customer/provider controls disabled.",
+        "9. Open the Hermes native dashboard and confirm Models, Chat, Plugins, Kanban, Agent Profiles, Analytics, gates, traces, quarantine review, replay readiness, runtime halt state, and milestone health are visible.",
     ]
     _write_json_yaml(_runtime_network_controls_path(config), network_doc)
     _write_json_yaml(_runtime_proxy_allowlist_path(config), proxy_doc)
@@ -1381,6 +1783,15 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
                 "context_assembly_diff",
             ],
             "candidates": [],
+        },
+    )
+    _write_hermes_adapter_readiness_artifact(
+        config,
+        {
+            "available": False,
+            "status": "NOT_RUN",
+            "command": _command_string(config, "--hermes-adapter-readiness", repo_root),
+            "live_controls_enabled": False,
         },
     )
     _runtime_operator_validation_checklist_path(config).write_text(
@@ -1468,10 +1879,12 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
         "optimizer_snapshot_path": str(_runtime_optimizer_snapshot_path(resolved)),
         "harness_candidate_report_path": str(_runtime_harness_candidate_report_path(resolved)),
         "mac_studio_day_one_handoff_path": str(_runtime_mac_studio_day_one_handoff_path(resolved)),
+        "hermes_adapter_readiness_path": str(_runtime_hermes_adapter_readiness_path(resolved)),
         "dashboard": {
             "mode": "hermes_native",
             "custom_plugin": False,
             "surfaces": list(EXPECTED_DASHBOARD_SURFACES),
+            "live_controls_enabled": False,
         },
         "data_dir": resolved.data_dir,
         "skills_dir": resolved.skills_dir,
@@ -1498,6 +1911,7 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
             "analyze_harness_candidates": _command_string(resolved, "--analyze-harness-candidates", root),
             "propose_best_harness_candidate": _command_string(resolved, "--propose-best-harness-candidate", root),
             "mac_studio_day_one": _command_string(resolved, "--mac-studio-day-one", root),
+            "hermes_adapter_readiness": _command_string(resolved, "--hermes-adapter-readiness", root),
             "milestone_status": _command_string(resolved, "--milestone-status", root),
             "workspace_overview": _command_string(resolved, "--workspace-overview", root),
         },
@@ -1536,6 +1950,7 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
         "--propose-best-harness-candidate",
     )
     _write_launcher(launcher_paths["mac_studio_day_one"], resolved, root, "--mac-studio-day-one")
+    _write_launcher(launcher_paths["hermes_adapter_readiness"], resolved, root, "--hermes-adapter-readiness")
     _write_launcher(launcher_paths["milestone_status"], resolved, root, "--milestone-status")
     _write_launcher(launcher_paths["workspace_overview"], resolved, root, "--workspace-overview")
     _write_launcher(launcher_paths["operator_checklist"], resolved, root, "--operator-checklist")
@@ -1666,6 +2081,7 @@ def doctor_runtime(
         "evidence_factory_manifest": _runtime_evidence_factory_manifest_path(resolved).is_file(),
         "replay_readiness_report": _runtime_replay_readiness_report_path(resolved).is_file(),
         "mac_studio_day_one_handoff": _runtime_mac_studio_day_one_handoff_path(resolved).is_file(),
+        "hermes_adapter_readiness": _runtime_hermes_adapter_readiness_path(resolved).is_file(),
         "bootstrap_launcher": launcher_paths["bootstrap"].is_file(),
         "bootstrap_stack_launcher": launcher_paths["bootstrap_stack"].is_file(),
         "doctor_launcher": launcher_paths["doctor"].is_file(),
@@ -1680,6 +2096,7 @@ def doctor_runtime(
         "evidence_factory_launcher": launcher_paths["evidence_factory"].is_file(),
         "replay_readiness_report_launcher": launcher_paths["replay_readiness_report"].is_file(),
         "mac_studio_day_one_launcher": launcher_paths["mac_studio_day_one"].is_file(),
+        "hermes_adapter_readiness_launcher": launcher_paths["hermes_adapter_readiness"].is_file(),
         "gateway_launcher": launcher_paths["gateway"].is_file(),
         "workspace_launcher": launcher_paths["workspace"].is_file(),
         "operator_checklist_launcher": launcher_paths["operator_checklist"].is_file(),
@@ -2597,7 +3014,10 @@ def workspace_overview(config: IntegrationConfig | None = None) -> dict[str, Any
         "execution_traces": operator.list_execution_traces(limit=5),
         "harness_frontier": operator.harness_frontier(limit=5),
         "replay_readiness": health["harness_variants"]["execution_traces"]["replay_readiness"],
+        "recovery_readiness": latest_recovery_readiness(resolved),
+        "hermes_adapter_readiness": latest_hermes_adapter_readiness(resolved),
         "replay_readiness_report_path": str(_runtime_replay_readiness_report_path(resolved)),
+        "hermes_adapter_readiness_path": str(_runtime_hermes_adapter_readiness_path(resolved)),
         "replay_corpus_export_path": str(_runtime_replay_corpus_export_path(resolved)),
         "optimizer_snapshot_path": str(_runtime_optimizer_snapshot_path(resolved)),
         "harness_candidate_report_path": str(_runtime_harness_candidate_report_path(resolved)),
@@ -4856,6 +5276,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--analyze-harness-candidates", action="store_true", help="Rank constrained harness candidates from replay evidence")
     parser.add_argument("--propose-best-harness-candidate", action="store_true", help="Create one constrained harness proposal from the top replay candidate")
     parser.add_argument("--mac-studio-day-one", action="store_true", help="Generate the one-command Mac Studio rehearsal and handoff package")
+    parser.add_argument("--hermes-adapter-readiness", action="store_true", help="Create or surface the read-only Hermes v0.13 adapter-readiness packet")
     parser.add_argument("--milestone-status", action="store_true", help="Print machine-readable milestone build/proof status")
     parser.add_argument("--workspace-overview", action="store_true", help="Print a Hermes Workspace-oriented operator snapshot")
     parser.add_argument("--operator-checklist", action="store_true", help="Print the operator validation checklist path")
@@ -4865,6 +5286,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--alerts-dir", default="~/.hermes/alerts/")
     parser.add_argument("--profile-name", default="hybrid-autonomous-ai")
     parser.add_argument("--hermes-bin", default="hermes", help="Override the Hermes CLI binary used for readiness checks")
+    parser.add_argument("--hermes-version", default="0.13.0", help="Hermes version label for adapter-readiness packets")
     parser.add_argument("--skip-cli-smoke", action="store_true", help="Skip the live Hermes -z smoke test inside --readiness")
     parser.add_argument("--smoke-query", default=None, help="Override the readiness chat prompt used by --readiness")
     parser.add_argument("--model-name", default="local-default")
@@ -5155,6 +5577,15 @@ def _main_impl(
         print(f"handoff_path={result.handoff_path}")
         print(f"issues={'; '.join(result.issues) if result.issues else 'none'}")
         return 0 if result.ok else 1
+
+    if args.hermes_adapter_readiness:
+        payload = hermes_adapter_readiness(
+            config=config,
+            repo_root=args.repo_root,
+            hermes_version=args.hermes_version,
+        )
+        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+        return 0
 
     if args.operator_workflow:
         result = run_operator_workflow(

@@ -23,6 +23,8 @@ from .records import (
     EncryptedStorageReplayProjectionComparison,
     EvidenceBundle,
     Event,
+    HermesAdapterReadinessPacket,
+    HermesAdapterReadinessReplayProjectionComparison,
     HoldoutPolicy,
     HoldoutUseRecord,
     LocalOffloadEvalSet,
@@ -341,6 +343,39 @@ class KernelStore:
     ) -> RecoveryReadinessReplayProjectionComparison:
         def handler(tx: KernelTransaction) -> RecoveryReadinessReplayProjectionComparison:
             return tx.compare_recovery_readiness_replay_to_projection(packet_id)
+
+        return self.execute_command(command, handler)
+
+    def create_hermes_adapter_readiness_packet(
+        self,
+        command: Command,
+        *,
+        adapter_name: str,
+        hermes_version: str,
+        as_of: str,
+        surface_checks: list[dict[str, Any]],
+        reconciliation_checks: list[dict[str, Any]],
+        recovery_readiness_packet_id: str | None = None,
+    ) -> HermesAdapterReadinessPacket:
+        def handler(tx: KernelTransaction) -> HermesAdapterReadinessPacket:
+            return tx.create_hermes_adapter_readiness_packet(
+                adapter_name=adapter_name,
+                hermes_version=hermes_version,
+                as_of=as_of,
+                surface_checks=surface_checks,
+                reconciliation_checks=reconciliation_checks,
+                recovery_readiness_packet_id=recovery_readiness_packet_id,
+            )
+
+        return self.execute_command(command, handler)
+
+    def compare_hermes_adapter_readiness_replay_to_projection(
+        self,
+        command: Command,
+        packet_id: str,
+    ) -> HermesAdapterReadinessReplayProjectionComparison:
+        def handler(tx: KernelTransaction) -> HermesAdapterReadinessReplayProjectionComparison:
+            return tx.compare_hermes_adapter_readiness_replay_to_projection(packet_id)
 
         return self.execute_command(command, handler)
 

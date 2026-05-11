@@ -22,6 +22,8 @@ from .records import (
     EncryptedStorageReplayProjectionComparison,
     EvidenceBundle,
     Event,
+    HermesAdapterReadinessPacket,
+    HermesAdapterReadinessReplayProjectionComparison,
     HoldoutPolicy,
     HoldoutUseRecord,
     LocalOffloadEvalSet,
@@ -595,6 +597,54 @@ def _recovery_readiness_packet_row_payload(row: sqlite3.Row) -> dict[str, Any]:
 
 def _recovery_readiness_replay_projection_comparison_payload(
     comparison: RecoveryReadinessReplayProjectionComparison,
+) -> dict[str, Any]:
+    return {
+        "comparison_id": comparison.comparison_id,
+        "packet_id": comparison.packet_id,
+        "replay_packet": comparison.replay_packet,
+        "projection_packet": comparison.projection_packet,
+        "matches": comparison.matches,
+        "mismatches": comparison.mismatches,
+        "created_at": comparison.created_at,
+    }
+
+
+def _hermes_adapter_readiness_packet_payload(packet: HermesAdapterReadinessPacket) -> dict[str, Any]:
+    return {
+        "packet_id": packet.packet_id,
+        "adapter_name": packet.adapter_name,
+        "hermes_version": packet.hermes_version,
+        "as_of": packet.as_of,
+        "surface_checks": packet.surface_checks,
+        "reconciliation_checks": packet.reconciliation_checks,
+        "recovery_readiness_packet_id": packet.recovery_readiness_packet_id,
+        "next_operator_actions": packet.next_operator_actions,
+        "readiness_status": packet.readiness_status,
+        "evidence_refs": packet.evidence_refs,
+        "live_controls_enabled": packet.live_controls_enabled,
+        "created_at": packet.created_at,
+    }
+
+
+def _hermes_adapter_readiness_packet_row_payload(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "packet_id": row["packet_id"],
+        "adapter_name": row["adapter_name"],
+        "hermes_version": row["hermes_version"],
+        "as_of": row["as_of"],
+        "surface_checks": _loads(row["surface_checks_json"]),
+        "reconciliation_checks": _loads(row["reconciliation_checks_json"]),
+        "recovery_readiness_packet_id": row["recovery_readiness_packet_id"],
+        "next_operator_actions": _loads(row["next_operator_actions_json"]),
+        "readiness_status": row["readiness_status"],
+        "evidence_refs": _loads(row["evidence_refs_json"]),
+        "live_controls_enabled": bool(row["live_controls_enabled"]),
+        "created_at": row["created_at"],
+    }
+
+
+def _hermes_adapter_readiness_replay_projection_comparison_payload(
+    comparison: HermesAdapterReadinessReplayProjectionComparison,
 ) -> dict[str, Any]:
     return {
         "comparison_id": comparison.comparison_id,

@@ -22,6 +22,8 @@ from .records import (
     EncryptedStorageReplayProjectionComparison,
     EvidenceBundle,
     Event,
+    HermesAdapterReadinessPacket,
+    HermesAdapterReadinessReplayProjectionComparison,
     HoldoutPolicy,
     HoldoutUseRecord,
     LocalOffloadEvalSet,
@@ -89,10 +91,32 @@ from .store_common import (
     _recovery_readiness_replay_projection_comparison_payload,
     _recovery_readiness_actions,
     _recovery_readiness_evidence_refs,
+    _hermes_adapter_readiness_packet_payload,
+    _hermes_adapter_readiness_packet_row_payload,
+    _hermes_adapter_readiness_replay_projection_comparison_payload,
 )
 
 
 class RecoveryKernelTransactionMixin:
+    HERMES_V013_REQUIRED_SURFACES = (
+        "kanban_worker_lifecycle",
+        "dashboard_profile_provider_controls",
+        "provider_plugin_calls",
+        "mcp_sse_oauth_forwarding",
+        "no_agent_cron_watchdog",
+        "gateway_goal_checkpoint_resume",
+        "platform_allowlists_redaction",
+    )
+    HERMES_V013_REQUIRED_RECONCILIATION_CHECKS = (
+        "kernel_task_status",
+        "assignment_ownership",
+        "grant_status_scope_expiry_use_count",
+        "budget_reservation_status",
+        "side_effect_intent_idempotency_receipt",
+        "policy_version",
+        "operator_halt_quarantine_state",
+    )
+
     def record_backup_cadence(self, record: BackupCadenceRecord) -> str:
         if self.command.requested_by in {"agent", "model", "tool"}:
             raise PermissionError("backup cadence records are kernel-owned")
@@ -481,6 +505,246 @@ class RecoveryKernelTransactionMixin:
         self.enqueue_projection(event_id, "recovery_readiness_replay_projection_comparison_projection")
         return comparison
 
+    def create_hermes_adapter_readiness_packet(
+        self,
+        *,
+        adapter_name: str,
+        hermes_version: str,
+        as_of: str,
+        surface_checks: list[dict[str, Any]],
+        reconciliation_checks: list[dict[str, Any]],
+        recovery_readiness_packet_id: str | None = None,
+    ) -> HermesAdapterReadinessPacket:
+        if self.command.requested_by in {"agent", "model", "tool"}:
+            raise PermissionError("Hermes adapter readiness packets are kernel-owned read-only state")
+        if not adapter_name.strip() or not hermes_version.strip() or not as_of.strip():
+            raise ValueError("Hermes adapter readiness packets require adapter_name, hermes_version, and as_of")
+        if not surface_checks or not reconciliation_checks:
+            raise ValueError("Hermes adapter readiness packets require surface and reconciliation checks")
+        recovery_row = None
+        if recovery_readiness_packet_id is not None:
+            recovery_row = self.conn.execute(
+                "SELECT * FROM recovery_readiness_packets WHERE packet_id=?",
+                (recovery_readiness_packet_id,),
+            ).fetchone()
+            if recovery_row is None:
+                raise ValueError("Hermes adapter readiness requires an existing recovery readiness packet")
+
+        packet = self._build_hermes_adapter_readiness_packet(
+            adapter_name=adapter_name,
+            hermes_version=hermes_version,
+            as_of=as_of,
+            surface_checks=surface_checks,
+            reconciliation_checks=reconciliation_checks,
+            recovery_readiness_packet_id=recovery_readiness_packet_id,
+            recovery_readiness_status=None if recovery_row is None else recovery_row["readiness_status"],
+        )
+        if packet.live_controls_enabled:
+            raise PermissionError("Hermes adapter readiness packets cannot enable live controls")
+        payload = _hermes_adapter_readiness_packet_payload(packet)
+        event_id = self.append_event(
+            "hermes_adapter_readiness_packet_created",
+            "policy",
+            packet.packet_id,
+            payload,
+            "internal",
+        )
+        self.conn.execute(
+            """
+            INSERT INTO hermes_adapter_readiness_packets (
+              packet_id, adapter_name, hermes_version, as_of, surface_checks_json,
+              reconciliation_checks_json, recovery_readiness_packet_id,
+              next_operator_actions_json, readiness_status, evidence_refs_json,
+              live_controls_enabled, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                packet.packet_id,
+                packet.adapter_name,
+                packet.hermes_version,
+                packet.as_of,
+                canonical_json(packet.surface_checks),
+                canonical_json(packet.reconciliation_checks),
+                packet.recovery_readiness_packet_id,
+                canonical_json(packet.next_operator_actions),
+                packet.readiness_status,
+                canonical_json(packet.evidence_refs),
+                0,
+                packet.created_at,
+            ),
+        )
+        self.enqueue_projection(event_id, "hermes_adapter_readiness_packet_projection")
+        return packet
+
+    def compare_hermes_adapter_readiness_replay_to_projection(
+        self,
+        packet_id: str,
+    ) -> HermesAdapterReadinessReplayProjectionComparison:
+        projection_row = self.conn.execute(
+            "SELECT * FROM hermes_adapter_readiness_packets WHERE packet_id=?",
+            (packet_id,),
+        ).fetchone()
+        if projection_row is None:
+            raise ValueError("Hermes adapter readiness packet not found")
+        replay = self.__class__._replay_from_connection(self.conn)
+        replay_packet = replay.hermes_adapter_readiness_packets.get(packet_id, {})
+        projection_packet = _hermes_adapter_readiness_packet_row_payload(projection_row)
+        mismatches: list[str] = []
+        if replay_packet != projection_packet:
+            mismatches.append("hermes_adapter_readiness_packets")
+        comparison = HermesAdapterReadinessReplayProjectionComparison(
+            packet_id=packet_id,
+            replay_packet=replay_packet,
+            projection_packet=projection_packet,
+            matches=not mismatches,
+            mismatches=mismatches,
+        )
+        payload = _hermes_adapter_readiness_replay_projection_comparison_payload(comparison)
+        event_id = self.append_event(
+            "hermes_adapter_readiness_replay_projection_compared",
+            "policy",
+            comparison.comparison_id,
+            payload,
+            "internal",
+        )
+        self.conn.execute(
+            """
+            INSERT INTO hermes_adapter_readiness_replay_projection_comparisons (
+              comparison_id, packet_id, replay_packet_json, projection_packet_json,
+              matches, mismatches_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                comparison.comparison_id,
+                comparison.packet_id,
+                canonical_json(comparison.replay_packet),
+                canonical_json(comparison.projection_packet),
+                1 if comparison.matches else 0,
+                canonical_json(comparison.mismatches),
+                comparison.created_at,
+            ),
+        )
+        self.enqueue_projection(event_id, "hermes_adapter_readiness_replay_projection_comparison_projection")
+        return comparison
+
+    def _build_hermes_adapter_readiness_packet(
+        self,
+        *,
+        adapter_name: str,
+        hermes_version: str,
+        as_of: str,
+        surface_checks: list[dict[str, Any]],
+        reconciliation_checks: list[dict[str, Any]],
+        recovery_readiness_packet_id: str | None,
+        recovery_readiness_status: str | None,
+    ) -> HermesAdapterReadinessPacket:
+        surface_by_name = {str(check.get("surface", "")): check for check in surface_checks}
+        reconciliation_by_name = {str(check.get("check", "")): check for check in reconciliation_checks}
+        missing_surfaces = [
+            surface for surface in self.HERMES_V013_REQUIRED_SURFACES if surface not in surface_by_name
+        ]
+        missing_reconciliation = [
+            check for check in self.HERMES_V013_REQUIRED_RECONCILIATION_CHECKS if check not in reconciliation_by_name
+        ]
+        failing_surfaces = [
+            name for name, check in surface_by_name.items() if check.get("status") in {"failed", "blocked"}
+        ]
+        failing_reconciliation = [
+            name for name, check in reconciliation_by_name.items() if check.get("status") in {"failed", "blocked"}
+        ]
+        pending_surfaces = [
+            name for name, check in surface_by_name.items() if check.get("status") != "passed"
+        ]
+        pending_reconciliation = [
+            name for name, check in reconciliation_by_name.items() if check.get("status") != "passed"
+        ]
+
+        actions: list[dict[str, Any]] = []
+        if recovery_readiness_packet_id is None:
+            actions.append(
+                {
+                    "action": "create_recovery_readiness_packet",
+                    "required_authority": "operator_gate",
+                    "reason": "Hermes adapter readiness must be tied to current recovery readiness evidence.",
+                    "refs": [],
+                }
+            )
+        elif recovery_readiness_status != "ready":
+            actions.append(
+                {
+                    "action": "resolve_recovery_readiness",
+                    "required_authority": "operator_gate",
+                    "reason": "Hermes attachment remains blocked until recovery readiness is ready.",
+                    "refs": [f"kernel:recovery_readiness_packets/{recovery_readiness_packet_id}"],
+                }
+            )
+        if missing_surfaces:
+            actions.append(
+                {
+                    "action": "prove_hermes_adapter_surfaces",
+                    "required_authority": "operator_gate",
+                    "reason": "One or more Hermes v0.13 adapter surfaces have no proof record.",
+                    "refs": missing_surfaces,
+                }
+            )
+        if missing_reconciliation:
+            actions.append(
+                {
+                    "action": "prove_resume_reconciliation_checks",
+                    "required_authority": "operator_gate",
+                    "reason": "One or more resume/checkpoint reconciliation checks have no proof record.",
+                    "refs": missing_reconciliation,
+                }
+            )
+        if failing_surfaces or failing_reconciliation:
+            actions.append(
+                {
+                    "action": "block_live_hermes_attachment",
+                    "required_authority": "operator_gate",
+                    "reason": "Hermes adapter proof contains failed or blocked checks.",
+                    "refs": failing_surfaces + failing_reconciliation,
+                }
+            )
+        elif pending_surfaces or pending_reconciliation:
+            actions.append(
+                {
+                    "action": "complete_adapter_proof_checks",
+                    "required_authority": "operator_gate",
+                    "reason": "Hermes adapter proof has pending checks before live controls can be considered.",
+                    "refs": pending_surfaces + pending_reconciliation,
+                }
+            )
+
+        fail_closed = (
+            recovery_readiness_status == "fail_closed"
+            or bool(failing_surfaces)
+            or bool(failing_reconciliation)
+        )
+        readiness_status = "fail_closed" if fail_closed else ("action_required" if actions else "ready")
+        evidence_refs = [
+            "spec:s08_operator_deployment#Hermes v0.13 Adapter Proofs",
+            *[
+                str(ref)
+                for check in surface_checks + reconciliation_checks
+                for ref in check.get("evidence_refs", [])
+            ],
+        ]
+        if recovery_readiness_packet_id is not None:
+            evidence_refs.append(f"kernel:recovery_readiness_packets/{recovery_readiness_packet_id}")
+
+        return HermesAdapterReadinessPacket(
+            adapter_name=adapter_name,
+            hermes_version=hermes_version,
+            as_of=as_of,
+            surface_checks=surface_checks,
+            reconciliation_checks=reconciliation_checks,
+            recovery_readiness_packet_id=recovery_readiness_packet_id,
+            next_operator_actions=actions,
+            readiness_status=readiness_status,  # type: ignore[arg-type]
+            evidence_refs=sorted(set(evidence_refs)),
+            live_controls_enabled=False,
+        )
+
     def _build_recovery_readiness_packet(self, *, scope: str, as_of: str) -> RecoveryReadinessPacket:
         cadence_rows = self.conn.execute(
             "SELECT * FROM backup_cadence_records WHERE scope=? ORDER BY cadence_id",
@@ -607,4 +871,3 @@ class RecoveryKernelTransactionMixin:
             evidence_refs=evidence_refs,
             live_controls_enabled=False,
         )
-

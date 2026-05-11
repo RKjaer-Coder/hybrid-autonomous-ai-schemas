@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from harness_variants import HarnessVariantManager
+from kernel import KernelStore
 from runtime_control import RuntimeControlManager
 from skills.config import IntegrationConfig
 from skills.hermes_interfaces import HermesSessionContext, MockHermesRuntime
@@ -21,6 +22,7 @@ from skills.runtime import (
     doctor_runtime,
     export_replay_corpus,
     exercise_hermes_contract,
+    hermes_adapter_readiness,
     install_runtime_profile,
     make_session_context,
     main as runtime_main,
@@ -35,6 +37,7 @@ from skills.runtime import (
     run_proxy_self_test,
     run_task_loop_proof,
     run_operator_workflow,
+    workspace_overview,
 )
 
 
@@ -217,9 +220,11 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
     assert Path(manifest["optimizer_snapshot_path"]).is_file()
     assert Path(manifest["harness_candidate_report_path"]).is_file()
     assert Path(manifest["mac_studio_day_one_handoff_path"]).is_file()
+    assert Path(manifest["hermes_adapter_readiness_path"]).is_file()
     assert "dashboard_plugins" not in manifest
     assert manifest["dashboard"]["mode"] == "hermes_native"
     assert manifest["dashboard"]["custom_plugin"] is False
+    assert manifest["dashboard"]["live_controls_enabled"] is False
     assert manifest["dashboard"]["surfaces"] == [
         "Models",
         "Chat",
@@ -279,6 +284,7 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
     assert "analyze_harness_candidates" in manifest["commands"]
     assert "propose_best_harness_candidate" in manifest["commands"]
     assert "mac_studio_day_one" in manifest["commands"]
+    assert "hermes_adapter_readiness" in manifest["commands"]
     assert "milestone_status" in manifest["commands"]
     assert "mission_control" not in manifest["commands"]
     assert sorted(Path(path).name for path in result.linked_skill_paths) == ["immune_system", "strategic_memory"]
@@ -316,6 +322,8 @@ def test_doctor_runtime_reports_ready_runtime(tmp_path):
     assert result.path_status["evidence_factory_launcher"] is True
     assert result.path_status["replay_readiness_report_launcher"] is True
     assert result.path_status["mac_studio_day_one_launcher"] is True
+    assert result.path_status["hermes_adapter_readiness"] is True
+    assert result.path_status["hermes_adapter_readiness_launcher"] is True
 
 
 def test_run_proxy_self_test_exercises_real_allow_and_deny_paths(tmp_path):
@@ -863,6 +871,110 @@ def test_replay_readiness_report_writes_runtime_artifact(tmp_path):
     assert report["growth_plan"]["next_actions"]
 
 
+def test_hermes_adapter_readiness_creates_kernel_packet_and_workspace_surface(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+
+    payload = hermes_adapter_readiness(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of="2026-05-12T00:00:00+00:00",
+    )
+
+    assert payload["available"] is True
+    assert payload["packet"]["adapter_name"] == "hermes-v0.13"
+    assert payload["packet"]["hermes_version"] == "0.13.0"
+    assert payload["packet"]["readiness_status"] == "action_required"
+    assert payload["packet"]["recovery_readiness_packet_id"] is None
+    assert payload["packet"]["live_controls_enabled"] is False
+    assert payload["live_controls_enabled"] is False
+    assert "provider_calls" in payload["disabled_live_controls"]
+    assert payload["comparison"]["matches"] is True
+    assert Path(payload["artifact_path"]).is_file()
+    assert {check["surface"] for check in payload["packet"]["surface_checks"]} >= {
+        "kanban_worker_lifecycle",
+        "dashboard_profile_provider_controls",
+        "provider_plugin_calls",
+        "gateway_goal_checkpoint_resume",
+    }
+    assert {check["check"] for check in payload["packet"]["reconciliation_checks"]} >= {
+        "kernel_task_status",
+        "grant_status_scope_expiry_use_count",
+        "side_effect_intent_idempotency_receipt",
+    }
+
+    overview = workspace_overview(cfg)
+    adapter = overview["hermes_adapter_readiness"]
+    assert adapter["available"] is True
+    assert adapter["packet"]["packet_id"] == payload["packet"]["packet_id"]
+    assert adapter["recovery_readiness"] is None
+    assert adapter["live_controls_enabled"] is False
+    assert overview["hermes_adapter_readiness_path"] == payload["artifact_path"]
+    assert overview["recovery_readiness"]["available"] is False
+    assert overview["recovery_readiness"]["live_controls_enabled"] is False
+
+
+def test_hermes_adapter_readiness_links_latest_recovery_packet_when_available(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    ).resolve_paths()
+    Path(cfg.data_dir).mkdir(parents=True)
+    store = KernelStore(Path(cfg.data_dir) / "kernel.db")
+    with store.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO recovery_readiness_packets (
+              packet_id, scope, as_of, backup_cadence_summary_json,
+              restore_drill_summary_json, encrypted_payload_descriptor_summary_json,
+              payload_access_failure_summary_json, fail_closed_state_json,
+              next_operator_actions_json, readiness_status, evidence_refs_json,
+              live_controls_enabled, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "recovery-ready-runtime",
+                "kernel.db",
+                "2026-05-12T00:00:00+00:00",
+                "{}",
+                "{}",
+                "{}",
+                "{}",
+                "{}",
+                "[]",
+                "ready",
+                "[]",
+                0,
+                "2026-05-12T00:00:00+00:00",
+            ),
+        )
+
+    payload = hermes_adapter_readiness(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of="2026-05-12T00:01:00+00:00",
+    )
+
+    assert payload["packet"]["recovery_readiness_packet_id"] == "recovery-ready-runtime"
+    assert payload["packet"]["readiness_status"] == "ready"
+    assert payload["recovery_readiness"]["readiness_status"] == "ready"
+    assert payload["packet"]["live_controls_enabled"] is False
+
+    overview = workspace_overview(cfg)
+    assert overview["recovery_readiness"]["packet"]["packet_id"] == "recovery-ready-runtime"
+    assert overview["recovery_readiness"]["live_controls_enabled"] is False
+    adapter = overview["hermes_adapter_readiness"]
+    assert adapter["packet"]["recovery_readiness_packet_id"] == "recovery-ready-runtime"
+    assert adapter["recovery_readiness"]["packet_id"] == "recovery-ready-runtime"
+    assert adapter["live_controls_enabled"] is False
+
+
 def test_run_evidence_factory_generates_cross_skill_evidence(tmp_path):
     cfg = IntegrationConfig(
         data_dir=str(tmp_path / "data"),
@@ -1062,6 +1174,36 @@ def test_runtime_main_bootstrap_live_flag_executes_bootstrap(tmp_path, monkeypat
     assert exit_code == 0
     assert "bootstrap ok" in output
     assert "session_id=" in output
+
+
+def test_runtime_main_hermes_adapter_readiness_prints_json_without_live_controls(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "skills.runtime",
+            "--hermes-adapter-readiness",
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--skills-dir",
+            str(tmp_path / "skills"),
+            "--checkpoints-dir",
+            str(tmp_path / "skills" / "checkpoints"),
+            "--alerts-dir",
+            str(tmp_path / "alerts"),
+            "--repo-root",
+            str(Path.cwd()),
+        ],
+    )
+
+    exit_code = runtime_main()
+    output = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert output["packet"]["adapter_name"] == "hermes-v0.13"
+    assert output["packet"]["live_controls_enabled"] is False
+    assert output["live_controls_enabled"] is False
+    assert output["comparison"]["matches"] is True
 
 
 def test_runtime_main_reports_runtime_setup_failure_cleanly(tmp_path, monkeypatch, capsys):

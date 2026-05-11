@@ -56,6 +56,8 @@ class ReplayState:
     recovery_replay_projection_comparisons: dict[str, dict[str, Any]] = field(default_factory=dict)
     recovery_readiness_packets: dict[str, dict[str, Any]] = field(default_factory=dict)
     recovery_readiness_replay_projection_comparisons: dict[str, dict[str, Any]] = field(default_factory=dict)
+    hermes_adapter_readiness_packets: dict[str, dict[str, Any]] = field(default_factory=dict)
+    hermes_adapter_readiness_replay_projection_comparisons: dict[str, dict[str, Any]] = field(default_factory=dict)
     research_requests: dict[str, dict[str, Any]] = field(default_factory=dict)
     source_plans: dict[str, dict[str, Any]] = field(default_factory=dict)
     source_acquisition_checks: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -196,6 +198,10 @@ def apply_replay_event(state: ReplayState, event_type: str, entity_id: str, payl
         state.recovery_readiness_packets[entity_id] = dict(payload)
     elif event_type == "recovery_readiness_replay_projection_compared":
         state.recovery_readiness_replay_projection_comparisons[entity_id] = dict(payload)
+    elif event_type == "hermes_adapter_readiness_packet_created":
+        state.hermes_adapter_readiness_packets[entity_id] = dict(payload)
+    elif event_type == "hermes_adapter_readiness_replay_projection_compared":
+        state.hermes_adapter_readiness_replay_projection_comparisons[entity_id] = dict(payload)
     elif event_type == "research_request_created":
         state.research_requests[entity_id] = dict(payload)
     elif event_type == "research_request_transitioned":

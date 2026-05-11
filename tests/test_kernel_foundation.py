@@ -68,6 +68,81 @@ class KernelFoundationTests(unittest.TestCase):
         with self.store.connect() as conn:
             return int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
 
+    def create_ready_recovery_readiness_packet(self):
+        cadence = BackupCadenceRecord(
+            scope="kernel.db",
+            cadence="daily",
+            backup_target="artifact://local/encrypted-kernel-backups",
+            encryption_required=True,
+            retention_policy="retain-30d",
+            recovery_point_objective="24h",
+            next_due_at="2999-01-01T00:00:00Z",
+            evidence_refs=["spec:s08_operator_deployment"],
+        )
+        self.store.record_backup_cadence(command("backup.cadence", f"cadence-{cadence.cadence_id}", requested_by="kernel"), cadence)
+        drill = RestoreDrillPacket(
+            cadence_id=cadence.cadence_id,
+            backup_ref="artifact://local/encrypted-kernel-backups/kernel-ready",
+            backup_manifest_hash=sha256_text("ready manifest"),
+            drill_scope="kernel.db restore into isolated verification path",
+            scheduled_for="2026-05-09T01:00:00Z",
+            checklist_items=[{"id": "schema", "label": "Verify schema fidelity"}],
+            evidence_refs=[f"kernel:backup_cadence_records/{cadence.cadence_id}"],
+        )
+        self.store.create_restore_drill_packet(command("backup.drill", f"drill-{drill.drill_id}", requested_by="scheduler"), drill)
+        checklist = RecoveryChecklistReceipt(
+            drill_id=drill.drill_id,
+            operator_id="operator",
+            checklist_results=[{"id": "schema", "status": "pass"}],
+            receipt_ref="artifact://local/recovery-drills/ready-receipt",
+            receipt_hash=sha256_text("ready receipt"),
+            status="accepted",
+        )
+        self.store.record_recovery_checklist_receipt(
+            command("backup.recovery_receipt", f"checklist-{checklist.receipt_id}", requested_authority="operator_gate"),
+            checklist,
+        )
+        self.store.record_recovery_verification_state(
+            command("backup.recovery_verify", f"verified-{drill.drill_id}", requested_by="kernel"),
+            RecoveryVerificationState(
+                drill_id=drill.drill_id,
+                cadence_id=cadence.cadence_id,
+                receipt_id=checklist.receipt_id,
+                backup_manifest_hash=drill.backup_manifest_hash,
+                status="verified",
+                fail_closed=False,
+                verification_checks={"schema_fidelity": True, "event_hash_chain": True},
+                mismatch_summary=[],
+                evidence_refs=[f"kernel:restore_drill_packets/{drill.drill_id}"],
+            ),
+        )
+        self.store.record_encrypted_storage_descriptor(
+            command("storage.descriptor", f"descriptor-{drill.drill_id}", requested_by="kernel"),
+            EncryptedStorageDescriptor(
+                storage_scope="backup_payload",
+                owner_ref=drill.backup_ref,
+                descriptor_uri="storage://local/backups/kernel-ready",
+                storage_backend="local_encrypted_store",
+                local_path_ref="/var/lib/hai/backups/kernel-ready.ciphertext",
+                data_class="internal",
+                ciphertext_hash=sha256_text("ready ciphertext"),
+                plaintext_hash=sha256_text("ready plaintext"),
+                size_bytes=4096,
+                encryption_algorithm="xchacha20-poly1305",
+                key_ref="kms://local/backups/kernel-ready/key",
+                key_version="v1",
+                access_policy={"read": ["kernel"], "write": ["kernel"]},
+                retention_policy="retain-30d",
+                deletion_policy="crypto-shred",
+                evidence_refs=[f"kernel:restore_drill_packets/{drill.drill_id}"],
+            ),
+        )
+        return self.store.create_recovery_readiness_packet(
+            command("recovery.readiness", f"ready-{drill.drill_id}", requested_by="kernel"),
+            scope="kernel.db",
+            as_of="2026-05-10T00:00:00Z",
+        )
+
     def test_event_and_state_commit_atomically(self):
         budget = Budget(
             budget_id=new_id(),
@@ -1193,6 +1268,107 @@ class KernelFoundationTests(unittest.TestCase):
                 command("recovery.readiness", "agent-readiness", requested_by="agent"),
                 scope="kernel.db",
                 as_of="2026-05-10T00:00:00Z",
+            )
+
+    def test_hermes_adapter_readiness_packet_is_read_only_and_replayable(self):
+        recovery = self.create_ready_recovery_readiness_packet()
+        surface_checks = [
+            {"surface": surface, "status": "passed", "evidence_refs": [f"proof:{surface}"]}
+            for surface in (
+                "kanban_worker_lifecycle",
+                "dashboard_profile_provider_controls",
+                "provider_plugin_calls",
+                "mcp_sse_oauth_forwarding",
+                "no_agent_cron_watchdog",
+                "gateway_goal_checkpoint_resume",
+                "platform_allowlists_redaction",
+            )
+        ]
+        reconciliation_checks = [
+            {"check": check, "status": "passed", "evidence_refs": [f"proof:{check}"]}
+            for check in (
+                "kernel_task_status",
+                "assignment_ownership",
+                "grant_status_scope_expiry_use_count",
+                "budget_reservation_status",
+                "side_effect_intent_idempotency_receipt",
+                "policy_version",
+                "operator_halt_quarantine_state",
+            )
+        ]
+
+        packet = self.store.create_hermes_adapter_readiness_packet(
+            command("hermes.adapter_readiness", "hermes-ready", requested_by="kernel"),
+            adapter_name="hermes-v0.13",
+            hermes_version="0.13.0",
+            as_of="2026-05-10T00:00:00Z",
+            surface_checks=surface_checks,
+            reconciliation_checks=reconciliation_checks,
+            recovery_readiness_packet_id=recovery.packet_id,
+        )
+        self.assertEqual(packet.readiness_status, "ready")
+        self.assertFalse(packet.live_controls_enabled)
+        self.assertEqual(packet.next_operator_actions, [])
+        self.assertIn(f"kernel:recovery_readiness_packets/{recovery.packet_id}", packet.evidence_refs)
+        replay = self.store.replay_critical_state()
+        self.assertEqual(replay.hermes_adapter_readiness_packets[packet.packet_id]["readiness_status"], "ready")
+        comparison = self.store.compare_hermes_adapter_readiness_replay_to_projection(
+            command("hermes.adapter_readiness_compare", "hermes-ready-compare", requested_by="kernel"),
+            packet.packet_id,
+        )
+        self.assertTrue(comparison.matches)
+
+        with self.store.connect() as conn:
+            conn.execute(
+                "UPDATE hermes_adapter_readiness_packets SET readiness_status='fail_closed' WHERE packet_id=?",
+                (packet.packet_id,),
+            )
+        drift = self.store.compare_hermes_adapter_readiness_replay_to_projection(
+            command("hermes.adapter_readiness_compare", "hermes-ready-drift", requested_by="kernel"),
+            packet.packet_id,
+        )
+        self.assertFalse(drift.matches)
+        self.assertIn("hermes_adapter_readiness_packets", drift.mismatches)
+
+    def test_hermes_adapter_readiness_blocks_missing_and_failed_proofs(self):
+        recovery = self.create_ready_recovery_readiness_packet()
+        packet = self.store.create_hermes_adapter_readiness_packet(
+            command("hermes.adapter_readiness", "hermes-blocked", requested_by="kernel"),
+            adapter_name="hermes-v0.13",
+            hermes_version="0.13.0",
+            as_of="2026-05-10T00:00:00Z",
+            surface_checks=[
+                {
+                    "surface": "gateway_goal_checkpoint_resume",
+                    "status": "failed",
+                    "evidence_refs": ["proof:resume-side-effect-replay-failed"],
+                }
+            ],
+            reconciliation_checks=[
+                {
+                    "check": "side_effect_intent_idempotency_receipt",
+                    "status": "blocked",
+                    "evidence_refs": ["proof:receipt-revalidation-missing"],
+                }
+            ],
+            recovery_readiness_packet_id=recovery.packet_id,
+        )
+        self.assertEqual(packet.readiness_status, "fail_closed")
+        actions = [item["action"] for item in packet.next_operator_actions]
+        self.assertIn("prove_hermes_adapter_surfaces", actions)
+        self.assertIn("prove_resume_reconciliation_checks", actions)
+        self.assertIn("block_live_hermes_attachment", actions)
+        self.assertFalse(packet.live_controls_enabled)
+
+        with self.assertRaises(PermissionError):
+            self.store.create_hermes_adapter_readiness_packet(
+                command("hermes.adapter_readiness", "agent-hermes-readiness", requested_by="agent"),
+                adapter_name="hermes-v0.13",
+                hermes_version="0.13.0",
+                as_of="2026-05-10T00:00:00Z",
+                surface_checks=[{"surface": "kanban_worker_lifecycle", "status": "passed"}],
+                reconciliation_checks=[{"check": "kernel_task_status", "status": "passed"}],
+                recovery_readiness_packet_id=recovery.packet_id,
             )
 
     def test_kernel_backup_manifest_and_restore_preserve_audit_and_governed_records(self):

@@ -24,6 +24,7 @@ SUPPORT_ARTIFACT_FILENAMES = {
     "optimizer_snapshot": "optimizer_snapshot.json",
     "harness_candidate_report": "harness_candidate_report.json",
     "mac_studio_day_one_handoff": "mac_studio_day_one_handoff.md",
+    "hermes_adapter_readiness": "hermes_adapter_readiness.json",
 }
 
 
@@ -60,6 +61,7 @@ def _runtime_launcher_paths(config: IntegrationConfig) -> dict[str, Path]:
         "analyze_harness_candidates": bin_dir / "analyze_harness_candidates.sh",
         "propose_best_harness_candidate": bin_dir / "propose_best_harness_candidate.sh",
         "mac_studio_day_one": bin_dir / "mac_studio_day_one.sh",
+        "hermes_adapter_readiness": bin_dir / "hermes_adapter_readiness.sh",
         "gateway": bin_dir / "start_gateway.sh",
         "workspace": bin_dir / "start_workspace.sh",
         "operator_checklist": bin_dir / "operator_validation_checklist.sh",

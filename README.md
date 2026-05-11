@@ -167,6 +167,13 @@ Print the detailed replay-readiness coverage report:
 python3 -m skills.runtime --replay-readiness-report
 ```
 
+Create or surface the read-only Hermes v0.13 adapter-readiness packet from
+repo-local proof inputs:
+
+```bash
+python3 -m skills.runtime --hermes-adapter-readiness
+```
+
 Export activation-relevant replay traces for offline harness work:
 
 ```bash
@@ -216,9 +223,11 @@ python3 -m skills.runtime --readiness
 ```
 
 Readiness also requires the Council delegate isolation canary, the repo-local
-v0.12 approval-hook adapter contract, LM Studio/local-provider doctor readiness,
-and `hermes -z` one-shot smoke evidence before Council Tier 1 or paid-capable
-operation is treated as launch-safe.
+v0.12 approval-hook adapter contract, the read-only Hermes v0.13
+adapter-readiness packet, LM Studio/local-provider doctor readiness, and
+`hermes -z` one-shot smoke evidence before Council Tier 1 or paid-capable
+operation is treated as launch-safe. The adapter-readiness path never enables
+dashboard write controls, customer commitments, or provider/plugin calls.
 
 ## Useful Commands
 
