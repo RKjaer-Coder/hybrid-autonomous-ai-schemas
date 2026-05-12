@@ -44,6 +44,7 @@ def _runtime_launcher_paths(config: IntegrationConfig) -> dict[str, Path]:
         "analyze_harness_candidates": bin_dir / "analyze_harness_candidates.sh",
         "propose_best_harness_candidate": bin_dir / "propose_best_harness_candidate.sh",
         "mac_studio_day_one": bin_dir / "mac_studio_day_one.sh",
+        "recovery_readiness": bin_dir / "recovery_readiness.sh",
         "hermes_adapter_readiness": bin_dir / "hermes_adapter_readiness.sh",
         "migration_readiness": bin_dir / "migration_readiness.sh",
         "pre_hermes_readiness": bin_dir / "pre_hermes_readiness.sh",
@@ -142,6 +143,10 @@ def _runtime_harness_candidate_report_path(config: IntegrationConfig) -> Path:
 
 def _runtime_mac_studio_day_one_handoff_path(config: IntegrationConfig) -> Path:
     return runtime_support_artifact_paths(config)["mac_studio_day_one_handoff"]
+
+
+def _runtime_recovery_readiness_path(config: IntegrationConfig) -> Path:
+    return runtime_support_artifact_paths(config)["recovery_readiness"]
 
 
 def _runtime_hermes_adapter_readiness_path(config: IntegrationConfig) -> Path:

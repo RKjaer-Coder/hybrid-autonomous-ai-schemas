@@ -492,6 +492,7 @@ from kernel.runtime_paths import (
     _runtime_profile_validation_repo_root,
     _runtime_proxy_allowlist_path,
     _runtime_proxy_audit_log_path,
+    _runtime_recovery_readiness_path,
     _runtime_replay_corpus_export_path,
     _runtime_replay_readiness_report_path,
     _runtime_root,
@@ -1081,6 +1082,64 @@ def _write_hermes_adapter_readiness_artifact(config: IntegrationConfig, payload:
     _write_json_yaml(_runtime_hermes_adapter_readiness_path(config), artifact)
 
 
+def _write_recovery_readiness_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
+    artifact = dict(payload)
+    artifact.setdefault("artifact_path", str(_runtime_recovery_readiness_path(config)))
+    artifact.setdefault("live_controls_enabled", False)
+    artifact.setdefault(
+        "disabled_live_controls",
+        ["live_hermes_attachment", "dashboard_write_controls", "provider_calls", "payload_file_access"],
+    )
+    _write_json_yaml(_runtime_recovery_readiness_path(config), artifact)
+
+
+def recovery_readiness(
+    config: IntegrationConfig | None = None,
+    *,
+    repo_root: str | None = None,
+    scope: str = "kernel.db",
+    as_of: str | None = None,
+) -> dict[str, Any]:
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    install_runtime_profile(resolved, repo_root=repo_root)
+    require_runtime_databases(resolved)
+    timestamp = as_of or _utc_now()
+    kernel_db = _kernel_db_path(resolved)
+    store = KernelStore(kernel_db)
+    packet = store.create_recovery_readiness_packet(
+        _kernel_command(
+            "recovery.readiness",
+            f"{scope}:{timestamp}",
+            {"scope": scope, "as_of": timestamp, "operator_gate_required": True},
+        ),
+        scope=scope,
+        as_of=timestamp,
+    )
+    comparison = store.compare_recovery_readiness_replay_to_projection(
+        _kernel_command("recovery.readiness_compare", f"{packet.packet_id}:projection"),
+        packet.packet_id,
+    )
+    payload = {
+        "available": True,
+        "packet": asdict(packet),
+        "comparison": asdict(comparison),
+        "kernel_db_path": str(kernel_db),
+        "profile_manifest_path": str(_runtime_profile_manifest_path(resolved)),
+        "workspace_manifest_path": str(_runtime_workspace_manifest_path(resolved)),
+        "artifact_path": str(_runtime_recovery_readiness_path(resolved)),
+        "required_authority": "operator_gate",
+        "live_controls_enabled": False,
+        "disabled_live_controls": [
+            "live_hermes_attachment",
+            "dashboard_write_controls",
+            "provider_calls",
+            "payload_file_access",
+        ],
+    }
+    _write_recovery_readiness_artifact(resolved, payload)
+    return payload
+
+
 def hermes_adapter_readiness(
     config: IntegrationConfig | None = None,
     *,
@@ -1097,7 +1156,13 @@ def hermes_adapter_readiness(
     repo_root_path = Path(install.repo_root)
     kernel_db = _kernel_db_path(resolved)
     store = KernelStore(kernel_db)
-    latest_recovery = _latest_kernel_row(kernel_db, "recovery_readiness_packets")
+    recovery_payload = recovery_readiness(
+        resolved,
+        repo_root=str(repo_root_path),
+        scope="kernel.db",
+        as_of=as_of,
+    )
+    latest_recovery = recovery_payload["packet"]
     recovery_packet_id = None if latest_recovery is None else str(latest_recovery["packet_id"])
     if surface_checks is None or reconciliation_checks is None:
         generated_surfaces, generated_reconciliation = _repo_local_hermes_adapter_proof_inputs(
@@ -1134,6 +1199,7 @@ def hermes_adapter_readiness(
         "packet": asdict(packet),
         "comparison": asdict(comparison),
         "recovery_readiness": latest_recovery,
+        "recovery_readiness_artifact_path": recovery_payload["artifact_path"],
         "kernel_db_path": str(kernel_db),
         "profile_manifest_path": str(_runtime_profile_manifest_path(resolved)),
         "workspace_manifest_path": str(_runtime_workspace_manifest_path(resolved)),
@@ -1749,16 +1815,21 @@ def latest_recovery_readiness(config: IntegrationConfig | None = None) -> dict[s
     resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
     latest = _latest_kernel_row(_kernel_db_path(resolved), "recovery_readiness_packets")
     if latest is None:
+        artifact = _read_json_yaml(_runtime_recovery_readiness_path(resolved))
+        if artifact is not None:
+            return artifact
         return {
             "available": False,
             "status": "NOT_RUN",
             "kernel_db_path": str(_kernel_db_path(resolved)),
+            "artifact_path": str(_runtime_recovery_readiness_path(resolved)),
             "live_controls_enabled": False,
         }
     return {
         "available": True,
         "packet": latest,
         "kernel_db_path": str(_kernel_db_path(resolved)),
+        "artifact_path": str(_runtime_recovery_readiness_path(resolved)),
         "live_controls_enabled": False,
     }
 
@@ -2209,6 +2280,7 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
         "milestone_status_command": _command_string(config, "--milestone-status", repo_root),
         "optimizer_snapshot_command": _command_string(config, "--optimizer-snapshot", repo_root),
         "harness_candidate_command": _command_string(config, "--analyze-harness-candidates", repo_root),
+        "recovery_readiness_command": _command_string(config, "--recovery-readiness", repo_root),
         "hermes_adapter_readiness_command": _command_string(config, "--hermes-adapter-readiness", repo_root),
         "migration_readiness_command": _command_string(config, "--migration-readiness", repo_root),
         "pre_hermes_readiness_command": _command_string(config, "--pre-hermes-readiness", repo_root),
@@ -2269,8 +2341,9 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
         "5. Run the evidence factory and inspect the replay readiness report.",
         "6. Confirm the task-loop and research-cron proofs pass.",
         "7. If Hermes is installed, run readiness and verify Hermes v0.12.0+, `hermes -z`, LM Studio/local-provider doctor, approval hooks, Curator report-first state, and live profile/config surface.",
-        "8. Run Hermes adapter-readiness and confirm the packet remains read-only with live dashboard/customer/provider controls disabled.",
-        "9. Open the Hermes native dashboard and confirm Models, Chat, Plugins, Kanban, Agent Profiles, Analytics, gates, traces, quarantine review, replay readiness, runtime halt state, and milestone health are visible.",
+        "8. Run recovery-readiness and confirm the packet remains read-only with live Hermes, dashboard, provider, and payload controls disabled.",
+        "9. Run Hermes adapter-readiness and confirm it links to the latest recovery packet while live dashboard/customer/provider controls stay disabled.",
+        "10. Open the Hermes native dashboard and confirm Models, Chat, Plugins, Kanban, Agent Profiles, Analytics, gates, traces, quarantine review, replay readiness, runtime halt state, and milestone health are visible.",
     ]
     _write_json_yaml(_runtime_network_controls_path(config), network_doc)
     _write_json_yaml(_runtime_proxy_allowlist_path(config), proxy_doc)
@@ -2348,6 +2421,15 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
                 "context_assembly_diff",
             ],
             "candidates": [],
+        },
+    )
+    _write_recovery_readiness_artifact(
+        config,
+        {
+            "available": False,
+            "status": "NOT_RUN",
+            "command": _command_string(config, "--recovery-readiness", repo_root),
+            "live_controls_enabled": False,
         },
     )
     _write_hermes_adapter_readiness_artifact(
@@ -2462,6 +2544,7 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
         "optimizer_snapshot_path": str(_runtime_optimizer_snapshot_path(resolved)),
         "harness_candidate_report_path": str(_runtime_harness_candidate_report_path(resolved)),
         "mac_studio_day_one_handoff_path": str(_runtime_mac_studio_day_one_handoff_path(resolved)),
+        "recovery_readiness_path": str(_runtime_recovery_readiness_path(resolved)),
         "hermes_adapter_readiness_path": str(_runtime_hermes_adapter_readiness_path(resolved)),
         "migration_readiness_path": str(_runtime_migration_readiness_path(resolved)),
         "pre_hermes_readiness_path": str(_runtime_pre_hermes_readiness_path(resolved)),
@@ -2496,6 +2579,7 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
             "analyze_harness_candidates": _command_string(resolved, "--analyze-harness-candidates", root),
             "propose_best_harness_candidate": _command_string(resolved, "--propose-best-harness-candidate", root),
             "mac_studio_day_one": _command_string(resolved, "--mac-studio-day-one", root),
+            "recovery_readiness": _command_string(resolved, "--recovery-readiness", root),
             "hermes_adapter_readiness": _command_string(resolved, "--hermes-adapter-readiness", root),
             "migration_readiness": _command_string(resolved, "--migration-readiness", root),
             "pre_hermes_readiness": _command_string(resolved, "--pre-hermes-readiness", root),
@@ -2537,6 +2621,7 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
         "--propose-best-harness-candidate",
     )
     _write_launcher(launcher_paths["mac_studio_day_one"], resolved, root, "--mac-studio-day-one")
+    _write_launcher(launcher_paths["recovery_readiness"], resolved, root, "--recovery-readiness")
     _write_launcher(launcher_paths["hermes_adapter_readiness"], resolved, root, "--hermes-adapter-readiness")
     _write_launcher(launcher_paths["migration_readiness"], resolved, root, "--migration-readiness")
     _write_launcher(launcher_paths["pre_hermes_readiness"], resolved, root, "--pre-hermes-readiness")
@@ -2670,6 +2755,7 @@ def doctor_runtime(
         "evidence_factory_manifest": _runtime_evidence_factory_manifest_path(resolved).is_file(),
         "replay_readiness_report": _runtime_replay_readiness_report_path(resolved).is_file(),
         "mac_studio_day_one_handoff": _runtime_mac_studio_day_one_handoff_path(resolved).is_file(),
+        "recovery_readiness": _runtime_recovery_readiness_path(resolved).is_file(),
         "hermes_adapter_readiness": _runtime_hermes_adapter_readiness_path(resolved).is_file(),
         "migration_readiness": _runtime_migration_readiness_path(resolved).is_file(),
         "pre_hermes_readiness": _runtime_pre_hermes_readiness_path(resolved).is_file(),
@@ -2687,6 +2773,7 @@ def doctor_runtime(
         "evidence_factory_launcher": launcher_paths["evidence_factory"].is_file(),
         "replay_readiness_report_launcher": launcher_paths["replay_readiness_report"].is_file(),
         "mac_studio_day_one_launcher": launcher_paths["mac_studio_day_one"].is_file(),
+        "recovery_readiness_launcher": launcher_paths["recovery_readiness"].is_file(),
         "hermes_adapter_readiness_launcher": launcher_paths["hermes_adapter_readiness"].is_file(),
         "migration_readiness_launcher": launcher_paths["migration_readiness"].is_file(),
         "pre_hermes_readiness_launcher": launcher_paths["pre_hermes_readiness"].is_file(),
@@ -3612,6 +3699,7 @@ def workspace_overview(config: IntegrationConfig | None = None) -> dict[str, Any
         "migration_readiness": latest_migration_readiness(resolved),
         "pre_hermes_readiness": latest_pre_hermes_readiness(resolved),
         "replay_readiness_report_path": str(_runtime_replay_readiness_report_path(resolved)),
+        "recovery_readiness_path": str(_runtime_recovery_readiness_path(resolved)),
         "hermes_adapter_readiness_path": str(_runtime_hermes_adapter_readiness_path(resolved)),
         "migration_readiness_path": str(_runtime_migration_readiness_path(resolved)),
         "pre_hermes_readiness_path": str(_runtime_pre_hermes_readiness_path(resolved)),
@@ -5873,6 +5961,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--analyze-harness-candidates", action="store_true", help="Rank constrained harness candidates from replay evidence")
     parser.add_argument("--propose-best-harness-candidate", action="store_true", help="Create one constrained harness proposal from the top replay candidate")
     parser.add_argument("--mac-studio-day-one", action="store_true", help="Generate the one-command Mac Studio rehearsal and handoff package")
+    parser.add_argument("--recovery-readiness", action="store_true", help="Create or surface the read-only recovery-readiness packet")
     parser.add_argument("--hermes-adapter-readiness", action="store_true", help="Create or surface the read-only Hermes v0.13 adapter-readiness packet")
     parser.add_argument("--migration-readiness", action="store_true", help="Create or surface the read-only repo migration-readiness map")
     parser.add_argument("--pre-hermes-readiness", action="store_true", help="Create or surface the read-only pre-Hermes readiness summary")
@@ -6176,6 +6265,14 @@ def _main_impl(
         print(f"handoff_path={result.handoff_path}")
         print(f"issues={'; '.join(result.issues) if result.issues else 'none'}")
         return 0 if result.ok else 1
+
+    if args.recovery_readiness:
+        payload = recovery_readiness(
+            config=config,
+            repo_root=args.repo_root,
+        )
+        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+        return 0
 
     if args.hermes_adapter_readiness:
         payload = hermes_adapter_readiness(

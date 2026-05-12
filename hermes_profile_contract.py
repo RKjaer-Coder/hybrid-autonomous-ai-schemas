@@ -102,6 +102,7 @@ class HermesProfileContract:
                 "execution_traces",
                 "quarantines",
                 "replay_readiness",
+                "recovery_readiness",
                 "runtime_halt_state",
                 "milestone_health",
             ],
