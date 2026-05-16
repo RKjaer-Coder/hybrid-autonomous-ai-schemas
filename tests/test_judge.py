@@ -45,6 +45,29 @@ def test_private_key_block(clean_judge_payload, default_config):
     assert verdict.judge_mode == JudgeMode.NORMAL
 
 
+def test_payment_card_block(clean_judge_payload, default_config):
+    payload = JudgePayload(**{**clean_judge_payload.__dict__, "output": {"ok": True, "card": "4111 1111 1111 1111"}})
+    verdict = judge.judge_check(payload, default_config)
+    assert verdict.block_reason == BlockReason.CONTENT_SAFETY
+    assert verdict.judge_mode == JudgeMode.NORMAL
+
+
+def test_uuid_like_internal_ids_do_not_trigger_payment_card_block(clean_judge_payload, default_config):
+    payload = JudgePayload(
+        **{
+            **clean_judge_payload.__dict__,
+            "output": {
+                "ok": True,
+                "project_id": "0b520c67-c449-4613-bd5e-6ebf15807bab",
+                "trace_id": "019e3159-727a-7601-afb2-09825c730b96",
+            },
+        }
+    )
+    verdict = judge.judge_check(payload, default_config)
+    assert verdict.outcome == Outcome.PASS
+    assert verdict.judge_mode == JudgeMode.NORMAL
+
+
 def test_exact_1mb_pass(clean_judge_payload, default_config):
     text = "a" * (1_048_576 - 9)
     payload = JudgePayload(**{**clean_judge_payload.__dict__, "expected_schema": None, "output": {"d": text}})

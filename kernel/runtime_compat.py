@@ -874,6 +874,45 @@ def _latest_kernel_row(db_path: Path, table: str) -> dict[str, Any] | None:
     return None if row is None else _json_row(row, json_fields)
 
 
+def _latest_kernel_comparison_row(
+    db_path: Path,
+    table: str,
+    id_column: str,
+    row_id: str,
+) -> dict[str, Any] | None:
+    if not db_path.is_file():
+        return None
+    json_fields = {
+        "recovery_readiness_replay_projection_comparisons": (
+            "replay_packet_json",
+            "projection_packet_json",
+            "mismatches_json",
+        ),
+        "hermes_adapter_readiness_replay_projection_comparisons": (
+            "replay_packet_json",
+            "projection_packet_json",
+            "mismatches_json",
+        ),
+    }[table]
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            f"SELECT * FROM {table} WHERE {id_column}=? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (row_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    payload = _json_row(row, json_fields)
+    for raw_name, public_name in (
+        ("replay_packet_json", "replay_packet"),
+        ("projection_packet_json", "projection_packet"),
+        ("mismatches_json", "mismatches"),
+    ):
+        if raw_name in payload:
+            payload[public_name] = payload.pop(raw_name)
+    return payload
+
+
 def _kernel_row_by_id(db_path: Path, table: str, id_column: str, row_id: str) -> dict[str, Any] | None:
     if not db_path.is_file():
         return None
@@ -1218,7 +1257,8 @@ def hermes_adapter_readiness(
 
 def latest_hermes_adapter_readiness(config: IntegrationConfig | None = None) -> dict[str, Any]:
     resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
-    latest = _latest_kernel_row(_kernel_db_path(resolved), "hermes_adapter_readiness_packets")
+    kernel_db = _kernel_db_path(resolved)
+    latest = _latest_kernel_row(kernel_db, "hermes_adapter_readiness_packets")
     if latest is None:
         artifact = _read_json_yaml(_runtime_hermes_adapter_readiness_path(resolved))
         if artifact is not None:
@@ -1239,16 +1279,23 @@ def latest_hermes_adapter_readiness(config: IntegrationConfig | None = None) -> 
     recovery_packet_id = latest.get("recovery_readiness_packet_id")
     if isinstance(recovery_packet_id, str) and recovery_packet_id:
         recovery = _kernel_row_by_id(
-            _kernel_db_path(resolved),
+            kernel_db,
             "recovery_readiness_packets",
             "packet_id",
             recovery_packet_id,
         )
+    comparison = _latest_kernel_comparison_row(
+        kernel_db,
+        "hermes_adapter_readiness_replay_projection_comparisons",
+        "packet_id",
+        str(latest["packet_id"]),
+    )
     return {
         "available": True,
         "packet": latest,
+        "comparison": comparison,
         "recovery_readiness": recovery,
-        "kernel_db_path": str(_kernel_db_path(resolved)),
+        "kernel_db_path": str(kernel_db),
         "artifact_path": str(_runtime_hermes_adapter_readiness_path(resolved)),
         "live_controls_enabled": False,
         "disabled_live_controls": [
@@ -1813,7 +1860,8 @@ def latest_pre_hermes_readiness(config: IntegrationConfig | None = None) -> dict
 
 def latest_recovery_readiness(config: IntegrationConfig | None = None) -> dict[str, Any]:
     resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
-    latest = _latest_kernel_row(_kernel_db_path(resolved), "recovery_readiness_packets")
+    kernel_db = _kernel_db_path(resolved)
+    latest = _latest_kernel_row(kernel_db, "recovery_readiness_packets")
     if latest is None:
         artifact = _read_json_yaml(_runtime_recovery_readiness_path(resolved))
         if artifact is not None:
@@ -1821,14 +1869,21 @@ def latest_recovery_readiness(config: IntegrationConfig | None = None) -> dict[s
         return {
             "available": False,
             "status": "NOT_RUN",
-            "kernel_db_path": str(_kernel_db_path(resolved)),
+            "kernel_db_path": str(kernel_db),
             "artifact_path": str(_runtime_recovery_readiness_path(resolved)),
             "live_controls_enabled": False,
         }
+    comparison = _latest_kernel_comparison_row(
+        kernel_db,
+        "recovery_readiness_replay_projection_comparisons",
+        "packet_id",
+        str(latest["packet_id"]),
+    )
     return {
         "available": True,
         "packet": latest,
-        "kernel_db_path": str(_kernel_db_path(resolved)),
+        "comparison": comparison,
+        "kernel_db_path": str(kernel_db),
         "artifact_path": str(_runtime_recovery_readiness_path(resolved)),
         "live_controls_enabled": False,
     }

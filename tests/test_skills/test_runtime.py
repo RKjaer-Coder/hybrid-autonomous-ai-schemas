@@ -907,6 +907,11 @@ def test_recovery_readiness_creates_packet_artifact_and_workspace_surface(tmp_pa
     recovery = overview["recovery_readiness"]
     assert recovery["available"] is True
     assert recovery["packet"]["packet_id"] == payload["packet"]["packet_id"]
+    assert recovery["comparison"]["matches"] is True
+    assert recovery["comparison"]["packet_id"] == payload["packet"]["packet_id"]
+    assert recovery["comparison"]["replay_packet"]["packet_id"] == payload["packet"]["packet_id"]
+    assert recovery["comparison"]["projection_packet"]["packet_id"] == payload["packet"]["packet_id"]
+    assert recovery["comparison"]["mismatches"] == []
     assert recovery["live_controls_enabled"] is False
     assert overview["recovery_readiness_path"] == payload["artifact_path"]
 
@@ -951,6 +956,11 @@ def test_hermes_adapter_readiness_creates_kernel_packet_and_workspace_surface(tm
     adapter = overview["hermes_adapter_readiness"]
     assert adapter["available"] is True
     assert adapter["packet"]["packet_id"] == payload["packet"]["packet_id"]
+    assert adapter["comparison"]["matches"] is True
+    assert adapter["comparison"]["packet_id"] == payload["packet"]["packet_id"]
+    assert adapter["comparison"]["replay_packet"]["packet_id"] == payload["packet"]["packet_id"]
+    assert adapter["comparison"]["projection_packet"]["packet_id"] == payload["packet"]["packet_id"]
+    assert adapter["comparison"]["mismatches"] == []
     assert adapter["recovery_readiness"]["packet_id"] == payload["recovery_readiness"]["packet_id"]
     assert adapter["live_controls_enabled"] is False
     assert overview["hermes_adapter_readiness_path"] == payload["artifact_path"]

@@ -96,6 +96,23 @@ def _iter_strings(data: object) -> list[str]:
     return result
 
 
+def _contains_payment_card_number(text: str) -> bool:
+    for match in CARD_RE.finditer(text):
+        digits = re.sub(r"\D", "", match.group(0))
+        checksum = 0
+        parity = len(digits) % 2
+        for index, raw_digit in enumerate(digits):
+            digit = int(raw_digit)
+            if index % 2 == parity:
+                digit *= 2
+                if digit > 9:
+                    digit -= 9
+            checksum += digit
+        if checksum % 10 == 0:
+            return True
+    return False
+
+
 def _safe_scan(text: str) -> bool:
     lower = text.lower()
     if (
@@ -111,7 +128,7 @@ def _safe_scan(text: str) -> bool:
         return True
     if "@" in text and EMAIL_RE.search(text):
         return True
-    if any(ch.isdigit() for ch in text) and (SSN_RE.search(text) or CARD_RE.search(text)):
+    if any(ch.isdigit() for ch in text) and (SSN_RE.search(text) or _contains_payment_card_number(text)):
         return True
     if (
         "you are a" in lower
