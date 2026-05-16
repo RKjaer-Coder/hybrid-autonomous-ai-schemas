@@ -31,6 +31,7 @@ from skills.runtime import (
     optimizer_snapshot,
     pre_hermes_readiness,
     prepare_runtime_directories,
+    readiness_suite,
     recovery_readiness,
     replay_readiness_report,
     require_runtime_databases,
@@ -205,6 +206,7 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     profile_config = json.loads(profile_config_path.read_text(encoding="utf-8"))
     spec_profile = json.loads(spec_profile_path.read_text(encoding="utf-8"))
+    workspace_manifest = json.loads(Path(manifest["workspace_manifest_path"]).read_text(encoding="utf-8"))
     assert manifest["profile_name"] == "hybrid-test"
     assert manifest["repo_root"] == str(repo_root.resolve())
     assert manifest["profile_config_path"] == str(profile_config_path)
@@ -225,6 +227,8 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
     assert Path(manifest["mac_studio_day_one_handoff_path"]).is_file()
     assert Path(manifest["recovery_readiness_path"]).is_file()
     assert Path(manifest["hermes_adapter_readiness_path"]).is_file()
+    assert Path(manifest["migration_readiness_path"]).is_file()
+    assert Path(manifest["pre_hermes_readiness_path"]).is_file()
     assert "dashboard_plugins" not in manifest
     assert manifest["dashboard"]["mode"] == "hermes_native"
     assert manifest["dashboard"]["custom_plugin"] is False
@@ -237,6 +241,8 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
         "Agent Profiles",
         "Analytics",
     ]
+    assert "--readiness-suite" in workspace_manifest["readiness_suite_command"]
+    assert "readiness_suite" in workspace_manifest["read_only_readiness_surfaces"]
     assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["profile_name"] == "hybrid-test"
     assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["repo_contract_version"] == 1
     assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["routing"]["max_api_spend_usd"] == 0.0
@@ -1114,6 +1120,61 @@ def test_pre_hermes_readiness_summarizes_blocked_substrate_without_live_controls
     assert overview["pre_hermes_readiness_path"] == payload["artifact_path"]
 
 
+def test_pre_hermes_readiness_uses_single_timestamp_for_refreshed_packets(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+    as_of = "2026-05-12T00:02:00+00:00"
+
+    payload = pre_hermes_readiness(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of=as_of,
+    )
+
+    assert payload["as_of"] == as_of
+    assert payload["components"]["recovery_readiness"]["packet"]["as_of"] == as_of
+    assert payload["components"]["hermes_adapter_readiness"]["packet"]["as_of"] == as_of
+    assert payload["components"]["migration_readiness"]["as_of"] == as_of
+
+
+def test_readiness_suite_runs_read_only_invariant_checks(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+
+    payload = readiness_suite(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of="2026-05-12T00:03:00+00:00",
+    )
+
+    assert payload["available"] is True
+    assert payload["ok"] is True
+    assert payload["status"] == "passed_read_only_invariants"
+    assert payload["live_controls_enabled"] is False
+    assert payload["summary"]["pre_hermes_status"] == "action_required"
+    assert payload["summary"]["failed_components"] == []
+    by_component = {item["component"]: item for item in payload["component_checks"]}
+    assert set(by_component) == {
+        "pre_hermes_readiness",
+        "replay_readiness",
+        "recovery_readiness",
+        "hermes_adapter_readiness",
+        "migration_readiness",
+    }
+    assert all(item["ok"] for item in by_component.values())
+    assert by_component["migration_readiness"]["checks"]["comparison_matches"] is True
+    assert by_component["hermes_adapter_readiness"]["checks"]["live_controls_disabled"] is True
+    assert Path(payload["artifact_path"]).is_file()
+
+
 def test_run_evidence_factory_generates_cross_skill_evidence(tmp_path):
     cfg = IntegrationConfig(
         data_dir=str(tmp_path / "data"),
@@ -1374,6 +1435,36 @@ def test_runtime_main_recovery_readiness_prints_json_without_live_controls(tmp_p
     assert output["live_controls_enabled"] is False
     assert output["required_authority"] == "operator_gate"
     assert output["comparison"]["matches"] is True
+
+
+def test_runtime_main_readiness_suite_prints_json_invariant_status(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "skills.runtime",
+            "--readiness-suite",
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--skills-dir",
+            str(tmp_path / "skills"),
+            "--checkpoints-dir",
+            str(tmp_path / "skills" / "checkpoints"),
+            "--alerts-dir",
+            str(tmp_path / "alerts"),
+            "--repo-root",
+            str(Path.cwd()),
+        ],
+    )
+
+    exit_code = runtime_main()
+    output = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert output["ok"] is True
+    assert output["status"] == "passed_read_only_invariants"
+    assert output["live_controls_enabled"] is False
+    assert output["summary"]["failed_components"] == []
 
 
 def test_runtime_main_reports_runtime_setup_failure_cleanly(tmp_path, monkeypatch, capsys):

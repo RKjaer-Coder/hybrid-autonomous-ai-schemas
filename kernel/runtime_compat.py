@@ -1755,6 +1755,110 @@ def _pre_hermes_readiness_summary(components: dict[str, dict[str, Any]]) -> dict
     }
 
 
+def _readiness_artifact_exists(payload: dict[str, Any]) -> bool:
+    artifact_path = payload.get("artifact_path")
+    return isinstance(artifact_path, str) and Path(artifact_path).is_file()
+
+
+def _readiness_comparison_matches(payload: dict[str, Any], *, include_operator_projection: bool = False) -> bool:
+    comparison = payload.get("comparison")
+    if isinstance(comparison, dict) and comparison.get("matches") is not True:
+        return False
+    if include_operator_projection:
+        operator_comparison = payload.get("operator_projection_comparison")
+        if isinstance(operator_comparison, dict) and operator_comparison.get("matches") is not True:
+            return False
+    return True
+
+
+def _readiness_live_controls_disabled(payload: dict[str, Any]) -> bool:
+    if payload.get("live_controls_enabled") is not False:
+        return False
+    packet = payload.get("packet")
+    if isinstance(packet, dict) and packet.get("live_controls_enabled") is not False:
+        return False
+    operator_projection = payload.get("operator_projection")
+    if isinstance(operator_projection, dict) and operator_projection.get("live_controls_enabled") is not False:
+        return False
+    return True
+
+
+def _readiness_component_check(
+    name: str,
+    payload: dict[str, Any],
+    *,
+    require_artifact: bool = True,
+    include_operator_projection: bool = False,
+) -> dict[str, Any]:
+    checks = {
+        "available": payload.get("available") is True,
+        "artifact_exists": _readiness_artifact_exists(payload) if require_artifact else True,
+        "live_controls_disabled": _readiness_live_controls_disabled(payload),
+        "comparison_matches": _readiness_comparison_matches(
+            payload,
+            include_operator_projection=include_operator_projection,
+        ),
+    }
+    return {
+        "component": name,
+        "ok": all(checks.values()),
+        "status": payload.get("status")
+        or payload.get("summary", {}).get("status")
+        or payload.get("packet", {}).get("readiness_status"),
+        "artifact_path": payload.get("artifact_path"),
+        "checks": checks,
+    }
+
+
+def readiness_suite(
+    config: IntegrationConfig | None = None,
+    *,
+    repo_root: str | None = None,
+    as_of: str | None = None,
+) -> dict[str, Any]:
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    timestamp = as_of or _utc_now()
+    pre_hermes = pre_hermes_readiness(
+        resolved,
+        repo_root=repo_root,
+        as_of=timestamp,
+        refresh=True,
+    )
+    components = pre_hermes["components"]
+    component_checks = [
+        _readiness_component_check("pre_hermes_readiness", pre_hermes),
+        _readiness_component_check("replay_readiness", components["replay_readiness"]),
+        _readiness_component_check("recovery_readiness", components["recovery_readiness"]),
+        _readiness_component_check("hermes_adapter_readiness", components["hermes_adapter_readiness"]),
+        _readiness_component_check(
+            "migration_readiness",
+            components["migration_readiness"],
+            include_operator_projection=True,
+        ),
+    ]
+    failed = [item for item in component_checks if not item["ok"]]
+    payload = {
+        "available": True,
+        "as_of": timestamp,
+        "ok": not failed,
+        "status": "passed_read_only_invariants" if not failed else "failed_read_only_invariants",
+        "summary": {
+            "pre_hermes_status": pre_hermes["summary"]["status"],
+            "component_status": pre_hermes["summary"]["component_status"],
+            "next_operator_action_count": pre_hermes["summary"]["next_operator_action_count"],
+            "checked_components": len(component_checks),
+            "failed_components": [item["component"] for item in failed],
+        },
+        "component_checks": component_checks,
+        "pre_hermes_readiness": pre_hermes,
+        "kernel_db_path": pre_hermes["kernel_db_path"],
+        "artifact_path": pre_hermes["artifact_path"],
+        "live_controls_enabled": False,
+        "disabled_live_controls": list(pre_hermes["disabled_live_controls"]),
+    }
+    return payload
+
+
 def pre_hermes_readiness(
     config: IntegrationConfig | None = None,
     *,
@@ -1779,7 +1883,7 @@ def pre_hermes_readiness(
     else:
         replay = {"available": True, **replay, "live_controls_enabled": False}
     hermes = (
-        hermes_adapter_readiness(resolved, repo_root=str(root))
+        hermes_adapter_readiness(resolved, repo_root=str(root), as_of=timestamp)
         if refresh
         else latest_hermes_adapter_readiness(resolved)
     )
@@ -2339,6 +2443,7 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
         "hermes_adapter_readiness_command": _command_string(config, "--hermes-adapter-readiness", repo_root),
         "migration_readiness_command": _command_string(config, "--migration-readiness", repo_root),
         "pre_hermes_readiness_command": _command_string(config, "--pre-hermes-readiness", repo_root),
+        "readiness_suite_command": _command_string(config, "--readiness-suite", repo_root),
         "dashboard_surfaces": list(EXPECTED_DASHBOARD_SURFACES),
         "dashboard_mode": "hermes_native",
         "custom_dashboard_plugin": False,
@@ -2350,6 +2455,7 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "hermes_adapter_readiness",
             "migration_readiness",
             "pre_hermes_readiness",
+            "readiness_suite",
         ],
     }
     local_provider_doc = {
@@ -6020,6 +6126,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hermes-adapter-readiness", action="store_true", help="Create or surface the read-only Hermes v0.13 adapter-readiness packet")
     parser.add_argument("--migration-readiness", action="store_true", help="Create or surface the read-only repo migration-readiness map")
     parser.add_argument("--pre-hermes-readiness", action="store_true", help="Create or surface the read-only pre-Hermes readiness summary")
+    parser.add_argument("--readiness-suite", action="store_true", help="Run all read-only pre-Hermes readiness checks and print invariant status")
     parser.add_argument("--milestone-status", action="store_true", help="Print machine-readable milestone build/proof status")
     parser.add_argument("--workspace-overview", action="store_true", help="Print a Hermes Workspace-oriented operator snapshot")
     parser.add_argument("--operator-checklist", action="store_true", help="Print the operator validation checklist path")
@@ -6353,6 +6460,14 @@ def _main_impl(
         )
         print(json.dumps(payload, indent=2, sort_keys=True, default=str))
         return 0
+
+    if args.readiness_suite:
+        payload = readiness_suite(
+            config=config,
+            repo_root=args.repo_root,
+        )
+        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+        return 0 if payload["ok"] else 1
 
     if args.operator_workflow:
         result = run_operator_workflow(

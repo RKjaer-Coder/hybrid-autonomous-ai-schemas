@@ -197,6 +197,13 @@ Create or surface the read-only pre-Hermes readiness summary:
 python3 -m skills.runtime --pre-hermes-readiness
 ```
 
+Run the full read-only pre-Hermes readiness suite and fail if packet artifacts,
+replay/projection comparisons, or disabled live-control invariants drift:
+
+```bash
+python3 -m skills.runtime --readiness-suite
+```
+
 Export activation-relevant replay traces for offline harness work:
 
 ```bash
@@ -267,6 +274,7 @@ python3 -m skills.runtime --optimizer-snapshot
 python3 -m skills.runtime --analyze-harness-candidates
 python3 -m skills.runtime --recovery-readiness
 python3 -m skills.runtime --pre-hermes-readiness
+python3 -m skills.runtime --readiness-suite
 python3 -m skills.runtime --bootstrap-live
 python3 -m skills.runtime --mac-studio-day-one
 ```
