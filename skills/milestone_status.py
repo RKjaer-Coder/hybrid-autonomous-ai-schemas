@@ -64,6 +64,7 @@ def _runtime_launcher_paths(config: IntegrationConfig) -> dict[str, Path]:
         "optimizer_snapshot": bin_dir / "optimizer_snapshot.sh",
         "analyze_harness_candidates": bin_dir / "analyze_harness_candidates.sh",
         "propose_best_harness_candidate": bin_dir / "propose_best_harness_candidate.sh",
+        "known_bad_hardening_operator_review": bin_dir / "known_bad_hardening_operator_review.sh",
         "mac_studio_day_one": bin_dir / "mac_studio_day_one.sh",
         "recovery_readiness": bin_dir / "recovery_readiness.sh",
         "hermes_adapter_readiness": bin_dir / "hermes_adapter_readiness.sh",

@@ -13,6 +13,75 @@ def _telemetry_manager(tmp_path: Path) -> HarnessVariantManager:
     return HarnessVariantManager(str(db_path))
 
 
+def _seed_known_bad_hardening_traces(
+    manager: HarnessVariantManager,
+    *,
+    skill_name: str,
+    reference_prefix: str,
+) -> None:
+    manager.log_execution_trace(
+        ExecutionTrace(
+            trace_id=f"{reference_prefix}-pass-1",
+            task_id=f"task-{reference_prefix}-pass-1",
+            role=f"{skill_name}_contract",
+            skill_name=skill_name,
+            harness_version=f"{skill_name}-v1",
+            intent_goal=f"normal {skill_name} request",
+            steps=[
+                ExecutionTraceStep(
+                    step_index=1,
+                    tool_call=f"{skill_name}.prepare",
+                    tool_result='{"ok":true}',
+                    tool_result_file=None,
+                    tokens_in=20,
+                    tokens_out=10,
+                    latency_ms=4,
+                    model_used="baseline",
+                )
+            ],
+            prompt_template=f"{skill_name} baseline",
+            context_assembled=f"{skill_name} policy context",
+            retrieval_queries=[f"{skill_name} policy"],
+            judge_verdict="PASS",
+            judge_reasoning=f"accepted safe {skill_name} request",
+            outcome_score=0.9,
+            cost_usd=0.0,
+            duration_ms=10,
+            training_eligible=True,
+            retention_class="STANDARD",
+            source_chain_id=f"chain-{reference_prefix}-pass-1",
+            source_session_id=f"session-{reference_prefix}-pass-1",
+            source_trace_id=None,
+            created_at="2026-05-16T10:00:00+00:00",
+        )
+    )
+    manager.log_execution_trace(
+        ExecutionTrace(
+            trace_id=f"{reference_prefix}-bad-1",
+            task_id=f"task-{reference_prefix}-bad-1",
+            role=f"{skill_name}_contract",
+            skill_name=skill_name,
+            harness_version=f"{skill_name}-v1",
+            intent_goal=f"ambiguous unsafe {skill_name} request",
+            steps=[],
+            prompt_template=f"{skill_name} baseline",
+            context_assembled=f"{skill_name} policy context",
+            retrieval_queries=[],
+            judge_verdict="FAIL",
+            judge_reasoning="known bad request must fail closed",
+            outcome_score=0.1,
+            cost_usd=0.0,
+            duration_ms=8,
+            training_eligible=False,
+            retention_class="FAILURE_AUDIT",
+            source_chain_id=f"chain-{reference_prefix}-bad-1",
+            source_session_id=f"session-{reference_prefix}-bad-1",
+            source_trace_id=None,
+            created_at="2026-05-16T10:01:00+00:00",
+        )
+    )
+
+
 def test_execution_trace_roundtrip_and_summary(tmp_path):
     manager = _telemetry_manager(tmp_path)
 
@@ -330,6 +399,121 @@ def test_harness_variant_replay_eval_requires_explicit_ack_below_threshold(tmp_p
         assert "explicit operator acknowledgement is required" in str(exc)
     else:
         raise AssertionError("expected below-threshold replay to require explicit acknowledgement")
+
+
+def test_runtime_known_bad_hardening_stays_shadow_and_operator_gated(tmp_path):
+    manager = _telemetry_manager(tmp_path)
+
+    _seed_known_bad_hardening_traces(manager, skill_name="runtime", reference_prefix="runtime")
+
+    prepared = manager.prepare_known_bad_hardening_shadow_candidate(
+        skill_name="runtime",
+        reference_time="2026-05-16T10:02:00+00:00",
+    )
+
+    assert prepared["live_controls_enabled"] is False
+    assert prepared["authority_effect"] == "evidence_only"
+    assert prepared["promotion_requires_operator_approval"] is True
+    assert prepared["selected_candidate"]["candidate_id"] == "runtime:known_bad_hardening"
+    assert prepared["shadow_variant"]["status"] == "SHADOW_EVAL"
+    assert prepared["shadow_variant"]["touches_infrastructure"] is False
+
+    evaluated = manager.evaluate_variant_from_traces(
+        prepared["shadow_variant"]["variant_id"],
+        sample_size=10,
+        minimum_trace_count=1,
+        minimum_known_bad_traces=1,
+        allow_below_activation_threshold=True,
+        operator_gated_promotion=True,
+        require_quality_improvement=False,
+        reference_time="2026-05-16T10:03:00+00:00",
+    )
+
+    assert evaluated["status"] == "SHADOW_EVAL"
+    assert evaluated["promoted_at"] is None
+    assert evaluated["eval_result"]["authority_effect"] == "evidence_only"
+    assert evaluated["eval_result"]["promotion_requires_operator_approval"] is True
+    assert evaluated["eval_result"]["side_effect_safety"] == {
+        "external_intents_reconstructed_only": True,
+        "reexecuted_side_effects": False,
+    }
+    assert evaluated["eval_result"]["regressed_trace_count"] == 0
+    assert evaluated["eval_result"]["known_bad_block_rate"] == 1.0
+    assert manager.frontier(skill_name="runtime") == []
+
+
+def test_known_bad_hardening_shadow_report_extends_to_council_without_frontier_promotion(tmp_path):
+    manager = _telemetry_manager(tmp_path)
+    _seed_known_bad_hardening_traces(manager, skill_name="runtime", reference_prefix="runtime")
+    _seed_known_bad_hardening_traces(manager, skill_name="council", reference_prefix="council")
+
+    report = manager.known_bad_hardening_shadow_report(
+        skill_name="council",
+        sample_size=10,
+        minimum_trace_count=1,
+        minimum_known_bad_traces=1,
+        reference_time="2026-05-16T10:03:00+00:00",
+    )
+
+    assert report["live_controls_enabled"] is False
+    assert report["authority_effect"] == "evidence_only"
+    assert report["promotion_requires_operator_approval"] is True
+    assert report["selected_candidate"]["candidate_id"] == "council:known_bad_hardening"
+    assert report["shadow_variant"]["status"] == "SHADOW_EVAL"
+    assert report["evaluation"]["status"] == "SHADOW_EVAL"
+    assert report["evaluation"]["promoted_at"] is None
+    assert report["evaluation"]["eval_result"]["known_bad_block_rate"] == 1.0
+    assert report["evaluation"]["eval_result"]["regression_rate"] == 0.0
+    assert report["evaluation"]["eval_result"]["authority_effect"] == "evidence_only"
+    assert report["evaluation"]["eval_result"]["promotion_requires_operator_approval"] is True
+    assert report["evaluation"]["eval_result"]["side_effect_safety"] == {
+        "external_intents_reconstructed_only": True,
+        "reexecuted_side_effects": False,
+    }
+    assert report["active_frontier_promotion"] is False
+    assert manager.frontier(skill_name="council") == []
+
+
+def test_known_bad_hardening_supported_skills_remain_shadow_and_preserve_replay_lineage(tmp_path):
+    manager = _telemetry_manager(tmp_path)
+    supported_skills = ["runtime", "council", "financial_router"]
+    for skill_name in supported_skills:
+        _seed_known_bad_hardening_traces(manager, skill_name=skill_name, reference_prefix=skill_name)
+
+    for index, skill_name in enumerate(supported_skills):
+        report = manager.known_bad_hardening_shadow_report(
+            skill_name=skill_name,
+            sample_size=10,
+            minimum_trace_count=1,
+            minimum_known_bad_traces=1,
+            reference_time=f"2026-05-16T10:{3 + index:02d}:00+00:00",
+        )
+        assert report["shadow_variant"]["status"] == "SHADOW_EVAL"
+        assert report["evaluation"]["status"] == "SHADOW_EVAL"
+        assert report["evaluation"]["promoted_at"] is None
+        assert report["active_frontier_promotion"] is False
+        checks = report["replay_evidence_checks"]
+        assert checks["source_trace_lineage_preserved"] is True
+        assert checks["external_side_effects_reexecuted"] is False
+        assert checks["checked_replay_trace_count"] >= 2
+        assert checks["missing_source_trace_ids"] == []
+        assert checks["side_effect_tool_calls"] == []
+
+    portfolio = manager.known_bad_hardening_portfolio_summary(limit=10)
+    by_skill = {item["skill_name"]: item for item in portfolio}
+    assert set(by_skill) == set(supported_skills)
+    for item in by_skill.values():
+        assert item["status"] == "SHADOW_EVAL"
+        assert item["known_bad_block_rate"] == 1.0
+        assert item["regression_rate"] == 0.0
+        assert item["side_effect_safety"] == {
+            "external_intents_reconstructed_only": True,
+            "reexecuted_side_effects": False,
+        }
+        assert item["required_operator_action"] == "review_shadow_evidence_before_promotion"
+        assert item["source_trace_lineage_preserved"] is True
+        assert item["external_side_effects_reexecuted"] is False
+        assert item["active_frontier_promotion"] is False
 
 
 def test_replay_readiness_excludes_control_plane_roles(tmp_path):

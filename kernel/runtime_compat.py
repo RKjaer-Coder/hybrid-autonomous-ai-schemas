@@ -1968,7 +1968,7 @@ def _self_improvement_rows(db_path: Path, table: str, order_by: str, limit: int 
         return []
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
-        rows = conn.execute(f"SELECT * FROM {table} ORDER BY {order_by} DESC LIMIT ?", (limit,)).fetchall()
+        rows = conn.execute(f"SELECT * FROM {table} ORDER BY {order_by} DESC, rowid DESC LIMIT ?", (limit,)).fetchall()
     converted: list[dict[str, Any]] = []
     for row in rows:
         item = dict(row)
@@ -2011,7 +2011,7 @@ def _read_latest_rows(db_path: Path, table: str, order_by: str = "created_at", l
         ).fetchone()
         if exists is None:
             return []
-        rows = conn.execute(f"SELECT * FROM {table} ORDER BY {order_by} DESC LIMIT ?", (limit,)).fetchall()
+        rows = conn.execute(f"SELECT * FROM {table} ORDER BY {order_by} DESC, rowid DESC LIMIT ?", (limit,)).fetchall()
     converted: list[dict[str, Any]] = []
     for row in rows:
         item = dict(row)
@@ -2127,6 +2127,76 @@ def _harness_candidate_signals(report: dict[str, Any], *, limit: int = 3) -> lis
     return signals
 
 
+def _shadow_known_bad_hardening_signals(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    signals: list[dict[str, Any]] = []
+    for item in items:
+        skill_name = str(item.get("skill_name") or "unknown")
+        candidate_id = str(item.get("candidate_id") or f"{skill_name}:known_bad_hardening")
+        known_bad_block_rate = item.get("known_bad_block_rate")
+        regression_rate = item.get("regression_rate")
+        side_effect_safety = dict(item.get("side_effect_safety") or {})
+        active_frontier_promotion = bool(item.get("active_frontier_promotion"))
+        source_trace_lineage_preserved = bool(item.get("source_trace_lineage_preserved", True))
+        passed = (
+            known_bad_block_rate == 1.0
+            and (regression_rate == 0.0 or regression_rate is None)
+            and side_effect_safety.get("reexecuted_side_effects") is False
+            and not active_frontier_promotion
+            and source_trace_lineage_preserved
+        )
+        risk_flags = ["operator_gate_required_before_active_harness_change"]
+        if active_frontier_promotion:
+            risk_flags.append("unexpected_active_frontier_promotion")
+        if side_effect_safety.get("reexecuted_side_effects") is not False:
+            risk_flags.append("side_effect_reexecution_risk")
+        if not source_trace_lineage_preserved:
+            risk_flags.append("source_trace_lineage_missing")
+        signals.append(
+            {
+                "source": "known_bad_hardening_shadow",
+                "target_type": "harness",
+                "target_id": candidate_id.replace(":", "."),
+                "evidence_refs": [
+                    f"telemetry:harness_variants/{item.get('variant_id')}",
+                    f"telemetry:known_bad_hardening/{candidate_id}",
+                ],
+                "proposed_change": f"Review shadow known-bad hardening evidence for {candidate_id}.",
+                "expected_benefit": "Improve known-bad blocking while preserving current active behavior.",
+                "risk_assessment": "Shadow evidence only; no active frontier promotion or live control enablement is permitted.",
+                "eval_plan": "Inspect known-bad block rate, regression rate, replay lineage, and side-effect safety before any operator-approved promotion.",
+                "rollback_plan": "Keep the current active harness; discard or revise the shadow candidate if operator review rejects it.",
+                "eval_type": "shadow",
+                "metrics": {
+                    "overall": 1.0 if passed else 0.5,
+                    "candidate_rank": item.get("candidate_rank"),
+                    "known_bad_block_rate": known_bad_block_rate,
+                    "regression_rate": regression_rate,
+                    "active_frontier_promotion": active_frontier_promotion,
+                    "source_trace_lineage_preserved": source_trace_lineage_preserved,
+                },
+                "regression_thresholds": {
+                    "known_bad_block_rate_min": 1.0,
+                    "regression_rate_max": 0.0,
+                    "active_frontier_promotion": False,
+                    "reexecuted_side_effects": False,
+                },
+                "failure_examples": [],
+                "side_effect_safety": {
+                    "external_intents_reconstructed_only": side_effect_safety.get(
+                        "external_intents_reconstructed_only",
+                        True,
+                    ),
+                    "reexecuted_side_effects": side_effect_safety.get("reexecuted_side_effects", False),
+                },
+                "eval_status": "passed" if passed else "needs_more_data",
+                "recommendation": "approve" if passed else "needs_more_data",
+                "risk_flags": risk_flags,
+                "operator_action": item.get("required_operator_action") or "review_shadow_evidence_before_promotion",
+            }
+        )
+    return signals
+
+
 def _kernel_table_signals(db_path: Path) -> list[dict[str, Any]]:
     signals: list[dict[str, Any]] = []
     for row in _read_latest_rows(db_path, "project_commercial_rollups", limit=5):
@@ -2210,10 +2280,13 @@ def self_improvement_evidence_pipeline(
     pre_hermes = pre_hermes_readiness(resolved, repo_root=str(root), as_of=timestamp, refresh=True)
     harness = analyze_harness_candidates(resolved, repo_root=str(root), limit=candidate_limit, propose_best=False)
     db_path = _kernel_db_path(resolved)
+    manager = HarnessVariantManager(str(Path(resolved.data_dir) / "telemetry.db"))
+    shadow_hardening = manager.known_bad_hardening_portfolio_summary(limit=candidate_limit)
     signals = (
         _replay_signal_from_report(replay)
         + _readiness_signals(pre_hermes["components"])
         + _harness_candidate_signals(harness, limit=candidate_limit)
+        + _shadow_known_bad_hardening_signals(shadow_hardening)
         + _kernel_table_signals(db_path)
     )
     run = KernelStore(db_path).run_self_improvement_evidence_pipeline(
@@ -2237,6 +2310,7 @@ def self_improvement_evidence_pipeline(
         "signal_count": len(signals),
         "source_counts": run.source_counts,
         "portfolio": run.portfolio_items,
+        "shadow_known_bad_hardening": shadow_hardening,
         "snapshot": snapshot,
         "kernel_db_path": str(db_path),
         "artifact_path": snapshot["artifact_path"],
@@ -2247,7 +2321,11 @@ def self_improvement_evidence_pipeline(
     return payload
 
 
-def self_improvement_snapshot(config: IntegrationConfig | None = None) -> dict[str, Any]:
+def _self_improvement_snapshot_payload(
+    config: IntegrationConfig,
+    *,
+    write_artifact: bool,
+) -> dict[str, Any]:
     resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
     prepare_runtime_directories(resolved)
     require_runtime_databases(resolved)
@@ -2257,6 +2335,8 @@ def self_improvement_snapshot(config: IntegrationConfig | None = None) -> dict[s
     promotion_packets = _self_improvement_rows(db_path, "self_improvement_promotion_packets", "created_at")
     rollbacks = _self_improvement_rows(db_path, "self_improvement_rollbacks", "created_at")
     pipeline_runs = _latest_pipeline_runs(db_path)
+    manager = HarnessVariantManager(str(Path(resolved.data_dir) / "telemetry.db"))
+    shadow_hardening = manager.known_bad_hardening_portfolio_summary(limit=20)
     comparisons = _self_improvement_rows(
         db_path,
         "self_improvement_replay_projection_comparisons",
@@ -2287,6 +2367,14 @@ def self_improvement_snapshot(config: IntegrationConfig | None = None) -> dict[s
         "rollbacks": rollbacks,
         "pipeline_runs": pipeline_runs,
         "portfolio": pipeline_runs[0]["portfolio_items"] if pipeline_runs else [],
+        "shadow_known_bad_hardening": {
+            "available": manager.available,
+            "live_controls_enabled": False,
+            "items": shadow_hardening,
+            "required_operator_action": (
+                "review_shadow_evidence_before_promotion" if shadow_hardening else "none"
+            ),
+        },
         "comparisons": comparisons,
         "live_controls_enabled": False,
         "disabled_live_controls": [
@@ -2297,8 +2385,171 @@ def self_improvement_snapshot(config: IntegrationConfig | None = None) -> dict[s
             "side_effect_replay",
         ],
     }
-    _write_self_improvement_snapshot_artifact(resolved, payload)
+    if write_artifact:
+        _write_self_improvement_snapshot_artifact(resolved, payload)
     return payload
+
+
+def self_improvement_snapshot(config: IntegrationConfig | None = None) -> dict[str, Any]:
+    return _self_improvement_snapshot_payload(
+        _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths(),
+        write_artifact=True,
+    )
+
+
+def known_bad_hardening_operator_review_bundle(
+    config: IntegrationConfig | None = None,
+    *,
+    skill_name: str | None = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    prepare_runtime_directories(resolved)
+    require_runtime_databases(resolved)
+    db_path = _kernel_db_path(resolved)
+    manager = HarnessVariantManager(str(Path(resolved.data_dir) / "telemetry.db"))
+    snapshot = _self_improvement_snapshot_payload(resolved, write_artifact=False)
+    shadow_items = [
+        item
+        for item in manager.known_bad_hardening_portfolio_summary(limit=limit)
+        if skill_name is None or item.get("skill_name") == skill_name
+    ]
+    proposals_by_target = {
+        row["target_id"]: row
+        for row in snapshot.get("proposals", [])
+        if row.get("target_id")
+    }
+    evals_by_id = {
+        row["eval_id"]: row
+        for row in snapshot.get("eval_records", [])
+        if row.get("eval_id")
+    }
+    packets_by_id = {
+        row["packet_id"]: row
+        for row in snapshot.get("promotion_packets", [])
+        if row.get("packet_id")
+    }
+    latest_portfolio = list(snapshot.get("portfolio", []) or [])
+    latest_pipeline_runs = list(snapshot.get("pipeline_runs", []) or [])
+    latest_pipeline_run = latest_pipeline_runs[0] if latest_pipeline_runs else {}
+    known_bad_portfolio_order = {
+        row["target_id"]: index
+        for index, row in enumerate(latest_portfolio)
+        if row.get("source") == "known_bad_hardening_shadow" and row.get("target_id")
+    }
+    portfolio_by_target = {
+        row["target_id"]: {**row, "pipeline_portfolio_order": known_bad_portfolio_order[row["target_id"]]}
+        for row in latest_portfolio
+        if row.get("source") == "known_bad_hardening_shadow" and row.get("target_id")
+    }
+    shadow_report = _read_json_yaml(_runtime_harness_candidate_report_path(resolved)) or {}
+    report_selected = shadow_report.get("selected_candidate") if isinstance(shadow_report, dict) else None
+    report_evaluation = shadow_report.get("evaluation") if isinstance(shadow_report, dict) else None
+
+    candidates: list[dict[str, Any]] = []
+    for item in shadow_items:
+        candidate_id = str(item.get("candidate_id") or f"{item.get('skill_name')}:known_bad_hardening")
+        target_id = candidate_id.replace(":", ".")
+        portfolio_item = portfolio_by_target.get(target_id, {})
+        packet = packets_by_id.get(str(portfolio_item.get("packet_id") or ""), {})
+        proposal = proposals_by_target.get(target_id, {})
+        eval_record_ids = list(packet.get("eval_record_ids") or [])
+        eval_record = evals_by_id.get(str(eval_record_ids[0]), {}) if eval_record_ids else {}
+        source_trace_lineage_preserved = bool(item.get("source_trace_lineage_preserved"))
+        pipeline_portfolio_order = portfolio_item.get("pipeline_portfolio_order")
+        candidates.append(
+            {
+                "skill": item.get("skill_name"),
+                "candidate_id": candidate_id,
+                "variant_id": item.get("variant_id"),
+                "status": item.get("status"),
+                "shadow_eval_status": item.get("status"),
+                "candidate_rank": item.get("candidate_rank"),
+                "known_bad_block_rate": item.get("known_bad_block_rate"),
+                "regression_rate": item.get("regression_rate"),
+                "side_effect_safety": item.get("side_effect_safety") or {},
+                "replay_lineage_status": "preserved" if source_trace_lineage_preserved else "missing",
+                "source_trace_lineage_preserved": source_trace_lineage_preserved,
+                "active_frontier_promotion": bool(item.get("active_frontier_promotion")),
+                "required_authority": packet.get("required_authority") or "operator_gate",
+                "default_on_timeout": packet.get("default_on_timeout") or "keep_current_behavior",
+                "operator_packet_order": pipeline_portfolio_order,
+                "required_operator_action": (
+                    portfolio_item.get("operator_action")
+                    or item.get("required_operator_action")
+                    or "review_shadow_evidence_before_promotion"
+                ),
+                "pipeline_packet_evidence": {
+                    "source": portfolio_item.get("source") or "known_bad_hardening_shadow",
+                    "packet_id": portfolio_item.get("packet_id"),
+                    "proposal_id": portfolio_item.get("proposal_id") or proposal.get("proposal_id"),
+                    "eval_record_ids": eval_record_ids,
+                    "promotion_packet": packet,
+                    "proposal": proposal,
+                    "eval_record": eval_record,
+                    "portfolio_item": portfolio_item,
+                    "latest_pipeline_run_id": latest_pipeline_run.get("run_id"),
+                    "pipeline_portfolio_order": pipeline_portfolio_order,
+                },
+                "runtime_shadow_report_evidence": {
+                    "artifact_path": str(_runtime_harness_candidate_report_path(resolved)),
+                    "selected_in_latest_report": (
+                        isinstance(report_selected, dict)
+                        and report_selected.get("candidate_id") == candidate_id
+                    ),
+                    "portfolio_summary_present": True,
+                    "portfolio_summary": item,
+                    "latest_report_status": (
+                        report_evaluation.get("status")
+                        if isinstance(report_evaluation, dict)
+                        and isinstance(report_selected, dict)
+                        and report_selected.get("candidate_id") == candidate_id
+                        else None
+                    ),
+                },
+            }
+        )
+    candidates.sort(
+        key=lambda candidate: (
+            candidate["operator_packet_order"] is None,
+            candidate["operator_packet_order"] if candidate["operator_packet_order"] is not None else 10**9,
+            candidate["candidate_rank"] if candidate.get("candidate_rank") is not None else 10**9,
+            str(candidate.get("candidate_id") or ""),
+        )
+    )
+
+    return {
+        "available": True,
+        "generated_at": _utc_now(),
+        "review_surface": "known_bad_hardening_shadow_operator_review",
+        "latest_pipeline_run_id": latest_pipeline_run.get("run_id"),
+        "operator_packet_ordering": "latest_self_improvement_pipeline_portfolio_order",
+        "read_only": True,
+        "operator_gated": True,
+        "live_controls_enabled": False,
+        "active_frontier_promotion": any(bool(item.get("active_frontier_promotion")) for item in candidates),
+        "required_authority": "operator_gate",
+        "default_on_timeout": "keep_current_behavior",
+        "required_operator_action": "review_shadow_evidence_before_promotion" if candidates else "none",
+        "kernel_db_path": str(db_path),
+        "telemetry_db_path": str(Path(resolved.data_dir) / "telemetry.db"),
+        "runtime_shadow_report_artifact_path": str(_runtime_harness_candidate_report_path(resolved)),
+        "self_improvement_snapshot_artifact_path": snapshot.get("artifact_path"),
+        "candidate_count": len(candidates),
+        "candidates": candidates,
+        "snapshot_summary": snapshot.get("summary", {}),
+        "disabled_live_controls": [
+            "active_behavior_mutation",
+            "policy_mutation",
+            "budget_mutation",
+            "auth_mutation",
+            "gate_mutation",
+            "holdout_mutation",
+            "side_effect_authority_mutation",
+            "autonomous_promotion",
+            "active_frontier_entry_creation",
+        ],
+    }
 
 
 def latest_recovery_readiness(config: IntegrationConfig | None = None) -> dict[str, Any]:
@@ -2778,6 +3029,16 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
         "milestone_status_command": _command_string(config, "--milestone-status", repo_root),
         "optimizer_snapshot_command": _command_string(config, "--optimizer-snapshot", repo_root),
         "harness_candidate_command": _command_string(config, "--analyze-harness-candidates", repo_root),
+        "known_bad_hardening_shadow_report_command": _command_string(
+            config,
+            "--known-bad-hardening-shadow-report",
+            repo_root,
+        ),
+        "known_bad_hardening_operator_review_command": _command_string(
+            config,
+            "--known-bad-hardening-operator-review",
+            repo_root,
+        ),
         "recovery_readiness_command": _command_string(config, "--recovery-readiness", repo_root),
         "hermes_adapter_readiness_command": _command_string(config, "--hermes-adapter-readiness", repo_root),
         "migration_readiness_command": _command_string(config, "--migration-readiness", repo_root),
@@ -2803,6 +3064,8 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "readiness_suite",
             "self_improvement_evidence_pipeline",
             "self_improvement_snapshot",
+            "known_bad_hardening_shadow_report",
+            "known_bad_hardening_operator_review",
         ],
     }
     local_provider_doc = {
@@ -3102,6 +3365,16 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
             "optimizer_snapshot": _command_string(resolved, "--optimizer-snapshot", root),
             "analyze_harness_candidates": _command_string(resolved, "--analyze-harness-candidates", root),
             "propose_best_harness_candidate": _command_string(resolved, "--propose-best-harness-candidate", root),
+            "known_bad_hardening_shadow_report": _command_string(
+                resolved,
+                "--known-bad-hardening-shadow-report",
+                root,
+            ),
+            "known_bad_hardening_operator_review": _command_string(
+                resolved,
+                "--known-bad-hardening-operator-review",
+                root,
+            ),
             "mac_studio_day_one": _command_string(resolved, "--mac-studio-day-one", root),
             "recovery_readiness": _command_string(resolved, "--recovery-readiness", root),
             "hermes_adapter_readiness": _command_string(resolved, "--hermes-adapter-readiness", root),
@@ -3145,6 +3418,12 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
         resolved,
         root,
         "--propose-best-harness-candidate",
+    )
+    _write_launcher(
+        launcher_paths["known_bad_hardening_operator_review"],
+        resolved,
+        root,
+        "--known-bad-hardening-operator-review",
     )
     _write_launcher(launcher_paths["mac_studio_day_one"], resolved, root, "--mac-studio-day-one")
     _write_launcher(launcher_paths["recovery_readiness"], resolved, root, "--recovery-readiness")
@@ -5124,6 +5403,41 @@ def analyze_harness_candidates(
     return payload
 
 
+def known_bad_hardening_shadow_report(
+    config: IntegrationConfig | None = None,
+    *,
+    repo_root: str | None = None,
+    skill_name: str | None = None,
+    sample_size: int = 50,
+    minimum_trace_count: int = 1,
+    minimum_known_bad_traces: int = 1,
+    as_of: str | None = None,
+) -> dict[str, Any]:
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    root = Path(repo_root).expanduser().resolve() if repo_root else _repo_root()
+    prepare_runtime_directories(resolved)
+    require_runtime_databases(resolved)
+    install_runtime_profile(resolved, repo_root=str(root))
+    manager = HarnessVariantManager(str(Path(resolved.data_dir) / "telemetry.db"))
+    payload = manager.known_bad_hardening_shadow_report(
+        skill_name=skill_name,
+        sample_size=sample_size,
+        minimum_trace_count=minimum_trace_count,
+        minimum_known_bad_traces=minimum_known_bad_traces,
+        reference_time=as_of,
+    )
+    payload.update(
+        {
+            "artifact_path": str(_runtime_harness_candidate_report_path(resolved)),
+            "profile_manifest_path": str(_runtime_profile_manifest_path(resolved)),
+            "replay_corpus_export_path": str(_runtime_replay_corpus_export_path(resolved)),
+            "optimizer_snapshot_path": str(_runtime_optimizer_snapshot_path(resolved)),
+        }
+    )
+    _write_harness_candidate_report_artifact(resolved, payload)
+    return payload
+
+
 def _evidence_progress_projection(
     before_report: dict[str, Any],
     after_report: dict[str, Any],
@@ -6498,6 +6812,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--optimizer-snapshot", action="store_true", help="Capture a runtime/bootstrap snapshot for offline harness analysis")
     parser.add_argument("--analyze-harness-candidates", action="store_true", help="Rank constrained harness candidates from replay evidence")
     parser.add_argument("--propose-best-harness-candidate", action="store_true", help="Create one constrained harness proposal from the top replay candidate")
+    parser.add_argument("--known-bad-hardening-shadow-report", action="store_true", help="Prepare and print a shadow-only known-bad hardening evidence report")
+    parser.add_argument("--known-bad-hardening-operator-review", action="store_true", help="Print the read-only operator review bundle for known-bad hardening shadow packets")
     parser.add_argument("--mac-studio-day-one", action="store_true", help="Generate the one-command Mac Studio rehearsal and handoff package")
     parser.add_argument("--recovery-readiness", action="store_true", help="Create or surface the read-only recovery-readiness packet")
     parser.add_argument("--hermes-adapter-readiness", action="store_true", help="Create or surface the read-only Hermes v0.13 adapter-readiness packet")
@@ -6528,6 +6844,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--task-id", default="stage0-operator-workflow")
     parser.add_argument("--title", default="Operator workflow smoke test")
     parser.add_argument("--corpus-limit", type=int, default=200, help="How many source traces to export into the replay corpus artifact")
+    parser.add_argument("--shadow-sample-size", type=int, default=50, help="How many traces to replay in known-bad hardening shadow reports")
     parser.add_argument("--evidence-cycles", type=int, default=DEFAULT_EVIDENCE_CYCLES, help="How many times to run the evidence scenario suite")
     parser.add_argument("--until-replay-ready", action="store_true", help="For --evidence-factory, stop early if broader replay readiness is reached")
     parser.add_argument("--report-limit", type=int, default=DEFAULT_REPLAY_REPORT_LIMIT, help="How many coverage rows to include in replay-readiness reports")
@@ -6784,6 +7101,25 @@ def _main_impl(
             propose_best=args.propose_best_harness_candidate,
         )
         print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    if args.known_bad_hardening_shadow_report:
+        payload = known_bad_hardening_shadow_report(
+            config,
+            repo_root=args.repo_root,
+            skill_name=args.skill_name,
+            sample_size=args.shadow_sample_size,
+        )
+        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+        return 0
+
+    if args.known_bad_hardening_operator_review:
+        payload = known_bad_hardening_operator_review_bundle(
+            config=config,
+            skill_name=args.skill_name,
+            limit=args.report_limit,
+        )
+        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
         return 0
 
     if args.mac_studio_day_one:

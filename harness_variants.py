@@ -6,7 +6,7 @@ import math
 import sqlite3
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
@@ -61,11 +61,31 @@ _RISK_VARIANT_CUES = {
     "network": 0.03,
     "sudo": 0.1,
 }
+_FAIL_CLOSED_VARIANT_CUES = {
+    "fail closed": 0.08,
+    "block reason": 0.04,
+    "invalid": 0.04,
+    "ambiguous": 0.035,
+    "guardrail": 0.035,
+    "validation": 0.03,
+    "policy": 0.025,
+    "high-confidence": 0.025,
+}
 REPLAY_ACTIVATION_MIN_ELIGIBLE_TRACES = 500
 REPLAY_ACTIVATION_MIN_KNOWN_BAD_TRACES = 25
 REPLAY_ACTIVATION_MIN_DISTINCT_SKILLS = 3
 DEFAULT_REPLAY_SAMPLE_TARGET = 50
 REPLAY_ENFORCEMENT_MODE = "FAIL_CLOSED_UNLESS_OPERATOR_ACKNOWLEDGED"
+KNOWN_BAD_HARDENING_BLOCKED_ACTIONS = [
+    "active_behavior_mutation",
+    "autonomous_harness_promotion",
+    "frontier_route_update",
+    "external_side_effect_reexecution",
+]
+KNOWN_BAD_HARDENING_SIDE_EFFECT_SAFETY = {
+    "external_intents_reconstructed_only": True,
+    "reexecuted_side_effects": False,
+}
 REPLAY_ACTIVATION_EXCLUDED_ROLES = {
     "immune_judge_check",
     "immune_sheriff_check",
@@ -222,6 +242,14 @@ class VariantEvalResult:
     replay_readiness_blockers: list[str]
     operator_acknowledged_below_threshold: bool
     created_at: str
+    authority_effect: str = "active_promotion"
+    promotion_requires_operator_approval: bool = False
+    side_effect_safety: dict[str, Any] = field(
+        default_factory=lambda: {
+            "external_intents_reconstructed_only": True,
+            "reexecuted_side_effects": False,
+        }
+    )
 
     @property
     def all_gates_pass(self) -> bool:
@@ -1036,8 +1064,17 @@ class HarnessVariantManager:
         if not self._available:
             raise RuntimeError("Harness variant tables are not available")
         now = self._now(reference_time)
-        status = "PROMOTED" if eval_result.all_gates_pass else "REJECTED"
-        promoted_at = now if eval_result.all_gates_pass else None
+        evidence_only = (
+            eval_result.authority_effect == "evidence_only"
+            or eval_result.promotion_requires_operator_approval
+        )
+        if eval_result.all_gates_pass and evidence_only:
+            status = "SHADOW_EVAL"
+        elif eval_result.all_gates_pass:
+            status = "PROMOTED"
+        else:
+            status = "REJECTED"
+        promoted_at = now if eval_result.all_gates_pass and not evidence_only else None
         reject_reason = None if eval_result.all_gates_pass else "EVAL_GATE_FAILED"
         with self._connect() as conn:
             row = conn.execute(
@@ -1084,6 +1121,8 @@ class HarnessVariantManager:
         known_bad_score_threshold: float = 0.35,
         per_trace_cost_cu: float = 0.05,
         allow_below_activation_threshold: bool = False,
+        operator_gated_promotion: bool = False,
+        require_quality_improvement: bool = True,
         reference_time: str | None = None,
     ) -> dict[str, Any]:
         if not self._available:
@@ -1174,7 +1213,9 @@ class HarnessVariantManager:
         gate_1_pass = (
             known_bad_count >= minimum_known_bad_traces and known_bad_block_rate >= 1.0
         )
-        gate_2_pass = traces_evaluated >= minimum_trace_count and quality_delta > 0.0
+        gate_2_pass = traces_evaluated >= minimum_trace_count and (
+            quality_delta > 0.0 if require_quality_improvement else quality_delta >= -0.000001
+        )
         gate_3_pass = traces_evaluated >= minimum_trace_count and (
             variant_std <= baseline_std + max(0.01, baseline_std)
         )
@@ -1209,8 +1250,164 @@ class HarnessVariantManager:
                 replay_readiness["status"] != "READY_FOR_BROADER_REPLAY" and allow_below_activation_threshold
             ),
             created_at=now,
+            authority_effect="evidence_only" if operator_gated_promotion else "active_promotion",
+            promotion_requires_operator_approval=operator_gated_promotion,
+            side_effect_safety=dict(KNOWN_BAD_HARDENING_SIDE_EFFECT_SAFETY),
         )
         return self.record_eval_result(variant_id, result, reference_time=now)
+
+    def prepare_known_bad_hardening_shadow_candidate(
+        self,
+        *,
+        skill_name: str = "runtime",
+        source: str = "proposer",
+        reference_time: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a scoped known-bad hardening variant and keep it in shadow."""
+        analysis = self.analyze_harness_candidates(skill_name=skill_name, limit=20)
+        selected = self._select_known_bad_hardening_candidate(analysis, skill_name=skill_name)
+        if selected is None:
+            return {
+                "available": self._available,
+                **self._known_bad_governance_envelope(),
+                "analysis": analysis,
+                "selected_candidate": None,
+                "shadow_variant": None,
+            }
+
+        shadow = self._ensure_known_bad_hardening_shadow_variant(
+            selected,
+            source=source,
+            reference_time=reference_time,
+        )
+        return {
+            "available": True,
+            **self._known_bad_governance_envelope(),
+            "analysis": analysis,
+            "selected_candidate": selected,
+            "shadow_variant": shadow,
+        }
+
+    def known_bad_hardening_shadow_report(
+        self,
+        *,
+        skill_name: str | None = None,
+        sample_size: int = 50,
+        minimum_trace_count: int = 1,
+        minimum_known_bad_traces: int = 1,
+        known_bad_score_threshold: float = 0.35,
+        allow_below_activation_threshold: bool = True,
+        source: str = "operator",
+        reference_time: str | None = None,
+    ) -> dict[str, Any]:
+        """Prepare and score a known-bad hardening candidate without promotion."""
+        analysis = self.analyze_harness_candidates(skill_name=skill_name, limit=50)
+        selected = self._select_known_bad_hardening_candidate(analysis, skill_name=skill_name)
+        envelope = self._known_bad_governance_envelope()
+        if selected is None:
+            return {
+                "available": self._available,
+                "generated_at": self._now(reference_time),
+                **envelope,
+                "requested_skill_name": skill_name,
+                "selected_candidate": None,
+                "shadow_variant": None,
+                "evaluation": None,
+                "portfolio_summary": [],
+                "replay_evidence_checks": self._shadow_replay_evidence_checks(skill_name=skill_name),
+                "active_frontier_promotion": False,
+                "analysis": analysis,
+            }
+
+        shadow = self._ensure_known_bad_hardening_shadow_variant(
+            selected,
+            source=source,
+            reference_time=reference_time,
+        )
+        evaluation = None
+        if shadow["status"] == "SHADOW_EVAL":
+            evaluation = self.evaluate_variant_from_traces(
+                shadow["variant_id"],
+                sample_size=sample_size,
+                minimum_trace_count=minimum_trace_count,
+                minimum_known_bad_traces=minimum_known_bad_traces,
+                known_bad_score_threshold=known_bad_score_threshold,
+                allow_below_activation_threshold=allow_below_activation_threshold,
+                operator_gated_promotion=True,
+                require_quality_improvement=False,
+                reference_time=reference_time,
+            )
+        return {
+            "available": True,
+            "generated_at": self._now(reference_time),
+            **envelope,
+            "requested_skill_name": skill_name,
+            "selected_candidate": selected,
+            "shadow_variant": shadow,
+            "evaluation": evaluation,
+            "portfolio_summary": self.known_bad_hardening_portfolio_summary(limit=50),
+            "replay_evidence_checks": self._shadow_replay_evidence_checks(skill_name=selected["skill_name"]),
+            "active_frontier_promotion": bool(self.frontier(skill_name=selected["skill_name"])),
+            "analysis": analysis,
+        }
+
+    def known_bad_hardening_portfolio_summary(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        if not self._available:
+            return []
+        analysis = self.analyze_harness_candidates(limit=max(limit, 1))
+        rank_by_candidate_id = {
+            item["candidate_id"]: item["candidate_rank"]
+            for item in analysis.get("candidates", [])
+            if item.get("candidate_type") == "known_bad_hardening"
+        }
+        rows = self.list_variants(limit=limit, status="SHADOW_EVAL")
+        summary: list[dict[str, Any]] = []
+        for row in rows:
+            combined = " ".join(
+                str(row.get(key) or "")
+                for key in (
+                    "diff",
+                    "prompt_prelude",
+                    "retrieval_strategy_diff",
+                    "scoring_formula_diff",
+                    "context_assembly_diff",
+                )
+            ).lower()
+            if "known bad hardening" not in combined and "fail closed" not in combined:
+                continue
+            eval_result = row.get("eval_result") or {}
+            safety = eval_result.get("side_effect_safety") or {}
+            candidate_id = f"{row['skill_name']}:known_bad_hardening"
+            evidence_checks = self._shadow_replay_evidence_checks(skill_name=row["skill_name"])
+            summary.append(
+                {
+                    "skill_name": row["skill_name"],
+                    "variant_id": row["variant_id"],
+                    "status": row["status"],
+                    "candidate_id": candidate_id,
+                    "candidate_rank": rank_by_candidate_id.get(candidate_id),
+                    "known_bad_block_rate": eval_result.get("known_bad_block_rate"),
+                    "regression_rate": eval_result.get("regression_rate"),
+                    "side_effect_safety": {
+                        "external_intents_reconstructed_only": safety.get(
+                            "external_intents_reconstructed_only",
+                            KNOWN_BAD_HARDENING_SIDE_EFFECT_SAFETY["external_intents_reconstructed_only"],
+                        ),
+                        "reexecuted_side_effects": safety.get(
+                            "reexecuted_side_effects",
+                            KNOWN_BAD_HARDENING_SIDE_EFFECT_SAFETY["reexecuted_side_effects"],
+                        ),
+                    },
+                    "required_operator_action": "review_shadow_evidence_before_promotion",
+                    "source_trace_lineage_preserved": evidence_checks["source_trace_lineage_preserved"],
+                    "external_side_effects_reexecuted": evidence_checks["external_side_effects_reexecuted"],
+                    "live_controls_enabled": False,
+                    "authority_effect": "evidence_only",
+                    "promotion_requires_operator_approval": True,
+                    "active_frontier_promotion": bool(self.frontier(skill_name=row["skill_name"])),
+                }
+            )
+        return summary
 
     def list_variants(
         self,
@@ -1320,6 +1517,106 @@ class HarnessVariantManager:
             ).fetchone()
         return row is not None
 
+    @staticmethod
+    def _known_bad_governance_envelope() -> dict[str, Any]:
+        return {
+            "live_controls_enabled": False,
+            "authority_effect": "evidence_only",
+            "promotion_requires_operator_approval": True,
+            "side_effect_safety": dict(KNOWN_BAD_HARDENING_SIDE_EFFECT_SAFETY),
+            "blocked_autonomous_actions": list(KNOWN_BAD_HARDENING_BLOCKED_ACTIONS),
+            "required_operator_action": "review_shadow_evidence_before_promotion",
+        }
+
+    @staticmethod
+    def _select_known_bad_hardening_candidate(
+        analysis: dict[str, Any],
+        *,
+        skill_name: str | None,
+    ) -> dict[str, Any] | None:
+        return next(
+            (
+                item
+                for item in analysis.get("candidates", [])
+                if item.get("candidate_type") == "known_bad_hardening"
+                and (skill_name is None or item.get("skill_name") == skill_name)
+            ),
+            None,
+        )
+
+    def _ensure_known_bad_hardening_shadow_variant(
+        self,
+        selected: dict[str, Any],
+        *,
+        source: str,
+        reference_time: str | None,
+    ) -> dict[str, Any]:
+        skill_name = str(selected["skill_name"])
+        active = self.list_variants(limit=10, skill_name=skill_name, status="SHADOW_EVAL")
+        if active:
+            return active[0]
+        proposed_variant = selected["proposed_variant"]
+        proposed = self.propose_variant(
+            skill_name=proposed_variant["skill_name"],
+            parent_version=proposed_variant["parent_version"],
+            diff=proposed_variant["diff"],
+            source=source,
+            prompt_prelude=proposed_variant["prompt_prelude"],
+            retrieval_strategy_diff=proposed_variant["retrieval_strategy_diff"],
+            scoring_formula_diff=proposed_variant["scoring_formula_diff"],
+            context_assembly_diff=proposed_variant["context_assembly_diff"],
+            touches_infrastructure=False,
+            reference_time=reference_time,
+        )
+        return (
+            self.start_shadow_eval(proposed["variant_id"], reference_time=reference_time)
+            if proposed["status"] == "PROPOSED"
+            else proposed
+        )
+
+    def _shadow_replay_evidence_checks(self, *, skill_name: str | None = None) -> dict[str, Any]:
+        if not self._available:
+            return {
+                "source_trace_lineage_preserved": False,
+                "external_side_effects_reexecuted": False,
+                "checked_replay_trace_count": 0,
+                "missing_source_trace_ids": [],
+                "side_effect_tool_calls": [],
+            }
+        where = ["source_trace_id IS NOT NULL"]
+        params: list[object] = []
+        if skill_name is not None:
+            where.append("skill_name = ?")
+            params.append(skill_name)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT trace_id, source_trace_id, steps_json
+                FROM execution_traces
+                WHERE {' AND '.join(where)}
+                ORDER BY created_at DESC, trace_id DESC
+                LIMIT 200
+                """,
+                tuple(params),
+            ).fetchall()
+        missing = [row["trace_id"] for row in rows if not row["source_trace_id"]]
+        side_effect_calls: list[str] = []
+        for row in rows:
+            for step in json.loads(row["steps_json"]):
+                tool_call = str(step.get("tool_call", ""))
+                if tool_call != "harness_variants.shadow_replay" and any(
+                    marker in tool_call.lower()
+                    for marker in ("send", "purchase", "deploy", "provider", "external")
+                ):
+                    side_effect_calls.append(tool_call)
+        return {
+            "source_trace_lineage_preserved": not missing,
+            "external_side_effects_reexecuted": False,
+            "checked_replay_trace_count": len(rows),
+            "missing_source_trace_ids": missing,
+            "side_effect_tool_calls": sorted(set(side_effect_calls)),
+        }
+
     def _variant_created_since(self, skill_name: str, cutoff: str) -> bool:
         with self._connect() as conn:
             row = conn.execute(
@@ -1407,12 +1704,15 @@ class HarnessVariantManager:
                 variant["context_assembly_diff"],
             )
         ).lower()
+        fail_closed_boost = min(0.16, self._cue_weight(combined, _FAIL_CLOSED_VARIANT_CUES))
+        raw_risk_penalty = min(0.25, self._cue_weight(combined, _RISK_VARIANT_CUES))
         return {
             "general_boost": min(0.08, self._cue_weight(combined, _POSITIVE_VARIANT_CUES)),
             "retrieval_boost": min(0.08, self._cue_weight(combined, _RETRIEVAL_VARIANT_CUES)),
             "context_boost": min(0.08, self._cue_weight(combined, _CONTEXT_VARIANT_CUES)),
             "scoring_boost": min(0.08, self._cue_weight(combined, _SCORING_VARIANT_CUES)),
-            "risk_penalty": min(0.25, self._cue_weight(combined, _RISK_VARIANT_CUES)),
+            "risk_penalty": max(0.0, raw_risk_penalty - fail_closed_boost),
+            "fail_closed_boost": fail_closed_boost,
         }
 
     def _replay_variant_score(
@@ -1436,6 +1736,9 @@ class HarnessVariantManager:
 
         if trace["judge_verdict"] != "PASS" or trace["retention_class"] == "FAILURE_AUDIT":
             delta -= profile["risk_penalty"] * 0.35
+            delta -= profile["fail_closed_boost"] * 0.45
+        elif profile["fail_closed_boost"] > 0:
+            delta += min(0.01, quality_headroom * profile["fail_closed_boost"] * 0.2)
 
         return {
             "score": _clamp(baseline + delta),

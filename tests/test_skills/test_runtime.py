@@ -24,6 +24,8 @@ from skills.runtime import (
     exercise_hermes_contract,
     hermes_adapter_readiness,
     install_runtime_profile,
+    known_bad_hardening_operator_review_bundle,
+    known_bad_hardening_shadow_report,
     make_session_context,
     main as runtime_main,
     migration_readiness,
@@ -1201,6 +1203,213 @@ def test_self_improvement_snapshot_is_read_only_and_surfaces_kernel_counts(tmp_p
     assert Path(payload["artifact_path"]).is_file()
 
 
+def test_known_bad_hardening_shadow_report_runtime_surface_is_operator_gated(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+    prepare_runtime_directories(cfg)
+    require_runtime_databases(cfg)
+    traces = HarnessVariantManager(str(tmp_path / "data" / "telemetry.db"))
+    traces.log_skill_action_trace(
+        task_id="council-pass",
+        role="council_contract",
+        skill_name="council",
+        action_name="deliberate",
+        intent_goal="safe council deliberation",
+        action_payload={"ok": True},
+        context_assembled="council policy context",
+        retrieval_queries=["council policy"],
+        judge_verdict="PASS",
+        outcome_score=0.9,
+        created_at="2026-05-16T10:00:00+00:00",
+    )
+    traces.log_skill_action_trace(
+        task_id="council-bad",
+        role="council_contract",
+        skill_name="council",
+        action_name="deliberate",
+        intent_goal="invalid council decision type",
+        action_payload={"ok": False},
+        context_assembled="council policy context",
+        judge_verdict="FAIL",
+        outcome_score=0.0,
+        training_eligible=False,
+        retention_class="FAILURE_AUDIT",
+        created_at="2026-05-16T10:01:00+00:00",
+    )
+
+    payload = known_bad_hardening_shadow_report(
+        cfg,
+        repo_root=str(Path.cwd()),
+        skill_name="council",
+        sample_size=10,
+        as_of="2026-05-16T10:03:00+00:00",
+    )
+
+    assert payload["available"] is True
+    assert payload["live_controls_enabled"] is False
+    assert payload["authority_effect"] == "evidence_only"
+    assert payload["promotion_requires_operator_approval"] is True
+    assert payload["selected_candidate"]["candidate_id"] == "council:known_bad_hardening"
+    assert payload["evaluation"]["status"] == "SHADOW_EVAL"
+    assert payload["evaluation"]["promoted_at"] is None
+    assert payload["evaluation"]["eval_result"]["side_effect_safety"] == {
+        "external_intents_reconstructed_only": True,
+        "reexecuted_side_effects": False,
+    }
+    assert payload["active_frontier_promotion"] is False
+    assert payload["replay_evidence_checks"]["source_trace_lineage_preserved"] is True
+    assert payload["replay_evidence_checks"]["external_side_effects_reexecuted"] is False
+    assert payload["portfolio_summary"][0]["required_operator_action"] == "review_shadow_evidence_before_promotion"
+    snapshot = self_improvement_snapshot(cfg)
+    assert snapshot["shadow_known_bad_hardening"]["items"][0]["skill_name"] == "council"
+    pipeline = self_improvement_evidence_pipeline(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of="2026-05-16T10:04:00+00:00",
+        candidate_limit=3,
+    )
+    assert pipeline["source_counts"]["known_bad_hardening_shadow"] == 1
+    shadow_items = [
+        item
+        for item in pipeline["portfolio"]
+        if item["source"] == "known_bad_hardening_shadow"
+    ]
+    assert len(shadow_items) == 1
+    assert shadow_items[0]["target_id"] == "council.known_bad_hardening"
+    assert shadow_items[0]["eval_status"] == "passed"
+    assert shadow_items[0]["recommendation"] == "approve"
+    assert shadow_items[0]["required_authority"] == "operator_gate"
+    assert pipeline["shadow_known_bad_hardening"][0]["active_frontier_promotion"] is False
+
+
+def test_known_bad_hardening_operator_review_bundle_joins_shadow_snapshot_and_pipeline_packets(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+    prepare_runtime_directories(cfg)
+    require_runtime_databases(cfg)
+    traces = HarnessVariantManager(str(tmp_path / "data" / "telemetry.db"))
+    traces.log_skill_action_trace(
+        task_id="runtime-pass",
+        role="runtime_contract",
+        skill_name="runtime",
+        action_name="prepare",
+        intent_goal="safe runtime request",
+        action_payload={"ok": True},
+        context_assembled="runtime policy context",
+        retrieval_queries=["runtime policy"],
+        judge_verdict="PASS",
+        outcome_score=0.92,
+        created_at="2026-05-16T11:00:00+00:00",
+    )
+    traces.log_skill_action_trace(
+        task_id="runtime-bad",
+        role="runtime_contract",
+        skill_name="runtime",
+        action_name="prepare",
+        intent_goal="known-bad runtime request",
+        action_payload={"ok": False},
+        context_assembled="runtime policy context",
+        judge_verdict="FAIL",
+        outcome_score=0.0,
+        training_eligible=False,
+        retention_class="FAILURE_AUDIT",
+        created_at="2026-05-16T11:01:00+00:00",
+    )
+    known_bad_hardening_shadow_report(
+        cfg,
+        repo_root=str(Path.cwd()),
+        skill_name="runtime",
+        sample_size=10,
+        as_of="2026-05-16T11:02:00+00:00",
+    )
+    self_improvement_evidence_pipeline(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of="2026-05-16T11:03:00+00:00",
+        candidate_limit=3,
+    )
+
+    kernel_db = tmp_path / "data" / "kernel.db"
+    with sqlite3.connect(kernel_db) as conn:
+        before_counts = {
+            table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in (
+                "self_improvement_proposals",
+                "self_improvement_eval_records",
+                "self_improvement_promotion_packets",
+                "self_improvement_evidence_pipeline_runs",
+            )
+        }
+    before_frontier = traces.frontier(skill_name="runtime")
+
+    payload = known_bad_hardening_operator_review_bundle(
+        cfg,
+        skill_name="runtime",
+        limit=5,
+    )
+
+    with sqlite3.connect(kernel_db) as conn:
+        after_counts = {
+            table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in before_counts
+        }
+
+    assert payload["read_only"] is True
+    assert payload["operator_gated"] is True
+    assert payload["live_controls_enabled"] is False
+    assert payload["active_frontier_promotion"] is False
+    assert before_counts == after_counts
+    assert before_frontier == []
+    assert traces.frontier(skill_name="runtime") == []
+    candidate = payload["candidates"][0]
+    assert candidate["skill"] == "runtime"
+    assert candidate["candidate_id"] == "runtime:known_bad_hardening"
+    assert candidate["status"] == "SHADOW_EVAL"
+    assert candidate["known_bad_block_rate"] == 1.0
+    assert candidate["regression_rate"] == 0.0
+    assert candidate["side_effect_safety"] == {
+        "external_intents_reconstructed_only": True,
+        "reexecuted_side_effects": False,
+    }
+    assert candidate["replay_lineage_status"] == "preserved"
+    assert candidate["active_frontier_promotion"] is False
+    assert candidate["required_authority"] == "operator_gate"
+    assert candidate["default_on_timeout"] == "keep_current_behavior"
+    assert candidate["required_operator_action"] == "review_shadow_evidence_before_promotion"
+    packet_evidence = candidate["pipeline_packet_evidence"]
+    assert packet_evidence["source"] == "known_bad_hardening_shadow"
+    assert packet_evidence["packet_id"]
+    assert packet_evidence["latest_pipeline_run_id"] == payload["latest_pipeline_run_id"]
+    assert packet_evidence["pipeline_portfolio_order"] == candidate["operator_packet_order"]
+    latest_shadow_item = next(
+        item
+        for item in self_improvement_snapshot(cfg)["portfolio"]
+        if item["source"] == "known_bad_hardening_shadow"
+        and item["target_id"] == "runtime.known_bad_hardening"
+    )
+    latest_generic_item = next(
+        item
+        for item in self_improvement_snapshot(cfg)["portfolio"]
+        if item["source"] == "harness_candidate"
+        and item["target_id"] == "runtime.known_bad_hardening"
+    )
+    assert packet_evidence["packet_id"] == latest_shadow_item["packet_id"]
+    assert packet_evidence["packet_id"] != latest_generic_item["packet_id"]
+    assert packet_evidence["promotion_packet"]["required_authority"] == "operator_gate"
+    assert packet_evidence["promotion_packet"]["default_on_timeout"] == "keep_current_behavior"
+    assert packet_evidence["eval_record"]["authority_effect"] == "evidence_only"
+    assert candidate["runtime_shadow_report_evidence"]["portfolio_summary_present"] is True
+    assert candidate["runtime_shadow_report_evidence"]["portfolio_summary"]["candidate_id"] == "runtime:known_bad_hardening"
+
+
 def test_self_improvement_evidence_pipeline_surfaces_operator_ready_portfolio(tmp_path):
     cfg = IntegrationConfig(
         data_dir=str(tmp_path / "data"),
@@ -1548,6 +1757,159 @@ def test_runtime_main_self_improvement_snapshot_prints_read_only_json(tmp_path, 
     assert output["available"] is True
     assert output["live_controls_enabled"] is False
     assert output["summary"]["proposal_count"] == 0
+
+
+def test_runtime_main_known_bad_hardening_shadow_report_prints_read_only_json(tmp_path, monkeypatch, capsys):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+    prepare_runtime_directories(cfg)
+    require_runtime_databases(cfg)
+    traces = HarnessVariantManager(str(tmp_path / "data" / "telemetry.db"))
+    traces.log_skill_action_trace(
+        task_id="runtime-pass",
+        role="runtime_contract",
+        skill_name="runtime",
+        action_name="prepare",
+        intent_goal="safe runtime request",
+        action_payload={"ok": True},
+        context_assembled="runtime policy context",
+        retrieval_queries=["runtime policy"],
+        judge_verdict="PASS",
+        outcome_score=0.9,
+        created_at="2026-05-16T10:00:00+00:00",
+    )
+    traces.log_skill_action_trace(
+        task_id="runtime-bad",
+        role="runtime_contract",
+        skill_name="runtime",
+        action_name="prepare",
+        intent_goal="unsafe runtime request",
+        action_payload={"ok": False},
+        context_assembled="runtime policy context",
+        judge_verdict="FAIL",
+        outcome_score=0.0,
+        training_eligible=False,
+        retention_class="FAILURE_AUDIT",
+        created_at="2026-05-16T10:01:00+00:00",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "skills.runtime",
+            "--known-bad-hardening-shadow-report",
+            "--skill-name",
+            "runtime",
+            "--shadow-sample-size",
+            "10",
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--skills-dir",
+            str(tmp_path / "skills"),
+            "--checkpoints-dir",
+            str(tmp_path / "skills" / "checkpoints"),
+            "--alerts-dir",
+            str(tmp_path / "alerts"),
+            "--repo-root",
+            str(Path.cwd()),
+        ],
+    )
+
+    exit_code = runtime_main()
+    output = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert output["live_controls_enabled"] is False
+    assert output["authority_effect"] == "evidence_only"
+    assert output["promotion_requires_operator_approval"] is True
+    assert output["evaluation"]["status"] == "SHADOW_EVAL"
+    assert output["active_frontier_promotion"] is False
+
+
+def test_runtime_main_known_bad_hardening_operator_review_prints_json_only(tmp_path, monkeypatch, capsys):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+    prepare_runtime_directories(cfg)
+    require_runtime_databases(cfg)
+    traces = HarnessVariantManager(str(tmp_path / "data" / "telemetry.db"))
+    traces.log_skill_action_trace(
+        task_id="runtime-pass",
+        role="runtime_contract",
+        skill_name="runtime",
+        action_name="prepare",
+        intent_goal="safe runtime request",
+        action_payload={"ok": True},
+        context_assembled="runtime policy context",
+        judge_verdict="PASS",
+        outcome_score=0.9,
+        created_at="2026-05-16T12:00:00+00:00",
+    )
+    traces.log_skill_action_trace(
+        task_id="runtime-bad",
+        role="runtime_contract",
+        skill_name="runtime",
+        action_name="prepare",
+        intent_goal="unsafe runtime request",
+        action_payload={"ok": False},
+        context_assembled="runtime policy context",
+        judge_verdict="FAIL",
+        outcome_score=0.0,
+        training_eligible=False,
+        retention_class="FAILURE_AUDIT",
+        created_at="2026-05-16T12:01:00+00:00",
+    )
+    known_bad_hardening_shadow_report(
+        cfg,
+        repo_root=str(Path.cwd()),
+        skill_name="runtime",
+        sample_size=10,
+        as_of="2026-05-16T12:02:00+00:00",
+    )
+    self_improvement_evidence_pipeline(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of="2026-05-16T12:03:00+00:00",
+        candidate_limit=3,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "skills.runtime",
+            "--known-bad-hardening-operator-review",
+            "--skill-name",
+            "runtime",
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--skills-dir",
+            str(tmp_path / "skills"),
+            "--checkpoints-dir",
+            str(tmp_path / "skills" / "checkpoints"),
+            "--alerts-dir",
+            str(tmp_path / "alerts"),
+        ],
+    )
+
+    exit_code = runtime_main()
+    output = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert output["review_surface"] == "known_bad_hardening_shadow_operator_review"
+    assert output["operator_packet_ordering"] == "latest_self_improvement_pipeline_portfolio_order"
+    assert output["read_only"] is True
+    assert output["operator_gated"] is True
+    assert output["candidates"][0]["required_authority"] == "operator_gate"
+    assert output["candidates"][0]["operator_packet_order"] is not None
+    assert output["candidates"][0]["pipeline_packet_evidence"]["source"] == "known_bad_hardening_shadow"
+    assert output["active_frontier_promotion"] is False
 
 
 def test_runtime_main_self_improvement_evidence_pipeline_prints_read_only_json(tmp_path, monkeypatch, capsys):
