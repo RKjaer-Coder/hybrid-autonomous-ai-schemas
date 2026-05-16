@@ -1366,10 +1366,37 @@ def test_known_bad_hardening_operator_review_bundle_joins_shadow_snapshot_and_pi
     assert payload["operator_gated"] is True
     assert payload["live_controls_enabled"] is False
     assert payload["active_frontier_promotion"] is False
+    candidate = payload["candidates"][0]
+    assert payload["recommended_next_candidate"] == {
+        "candidate_id": "runtime:known_bad_hardening",
+        "skill": "runtime",
+        "operator_packet_order": candidate["operator_packet_order"],
+        "candidate_rank": candidate["candidate_rank"],
+        "required_operator_action": "review_shadow_evidence_before_promotion",
+    }
+    decision_packet = payload["operator_decision_packet"]
+    assert decision_packet["decision_type"] == "known_bad_hardening_shadow_review"
+    assert decision_packet["candidate_id"] == "runtime:known_bad_hardening"
+    assert decision_packet["required_authority"] == "operator_gate"
+    assert decision_packet["default_on_timeout"] == "keep_current_behavior"
+    assert decision_packet["promotion_effect"] == "none_until_separate_operator_gate"
+    assert decision_packet["allowed_operator_resolutions"] == [
+        "approve_for_manual_promotion_review",
+        "defer_pending_more_shadow_evidence",
+        "reject_shadow_candidate",
+    ]
+    assert decision_packet["blocked_autonomous_actions"] == [
+        "active_behavior_mutation",
+        "autonomous_harness_promotion",
+        "frontier_route_update",
+        "external_side_effect_reexecution",
+    ]
+    assert decision_packet["evidence_summary"]["known_bad_block_rate"] == 1.0
+    assert decision_packet["evidence_summary"]["regression_rate"] == 0.0
+    assert decision_packet["evidence_summary"]["active_frontier_promotion"] is False
     assert before_counts == after_counts
     assert before_frontier == []
     assert traces.frontier(skill_name="runtime") == []
-    candidate = payload["candidates"][0]
     assert candidate["skill"] == "runtime"
     assert candidate["candidate_id"] == "runtime:known_bad_hardening"
     assert candidate["status"] == "SHADOW_EVAL"
@@ -1909,6 +1936,9 @@ def test_runtime_main_known_bad_hardening_operator_review_prints_json_only(tmp_p
     assert output["candidates"][0]["required_authority"] == "operator_gate"
     assert output["candidates"][0]["operator_packet_order"] is not None
     assert output["candidates"][0]["pipeline_packet_evidence"]["source"] == "known_bad_hardening_shadow"
+    assert output["recommended_next_candidate"]["candidate_id"] == "runtime:known_bad_hardening"
+    assert output["operator_decision_packet"]["required_authority"] == "operator_gate"
+    assert output["operator_decision_packet"]["promotion_effect"] == "none_until_separate_operator_gate"
     assert output["active_frontier_promotion"] is False
 
 
