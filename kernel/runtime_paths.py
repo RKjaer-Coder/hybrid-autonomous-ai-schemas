@@ -44,6 +44,7 @@ def _runtime_launcher_paths(config: IntegrationConfig) -> dict[str, Path]:
         "analyze_harness_candidates": bin_dir / "analyze_harness_candidates.sh",
         "propose_best_harness_candidate": bin_dir / "propose_best_harness_candidate.sh",
         "known_bad_hardening_operator_review": bin_dir / "known_bad_hardening_operator_review.sh",
+        "known_bad_hardening_follow_on_review": bin_dir / "known_bad_hardening_follow_on_review.sh",
         "mac_studio_day_one": bin_dir / "mac_studio_day_one.sh",
         "recovery_readiness": bin_dir / "recovery_readiness.sh",
         "hermes_adapter_readiness": bin_dir / "hermes_adapter_readiness.sh",
@@ -144,6 +145,10 @@ def _runtime_harness_candidate_report_path(config: IntegrationConfig) -> Path:
     return runtime_support_artifact_paths(config)["harness_candidate_report"]
 
 
+def _runtime_known_bad_hardening_follow_on_review_path(config: IntegrationConfig) -> Path:
+    return runtime_support_artifact_paths(config)["known_bad_hardening_follow_on_review"]
+
+
 def _runtime_mac_studio_day_one_handoff_path(config: IntegrationConfig) -> Path:
     return runtime_support_artifact_paths(config)["mac_studio_day_one_handoff"]
 
@@ -201,6 +206,7 @@ def _proxy_config_payload(
 
 
 def _write_json_yaml(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f"{json.dumps(payload, indent=2, sort_keys=True)}\n", encoding="utf-8")
 
 

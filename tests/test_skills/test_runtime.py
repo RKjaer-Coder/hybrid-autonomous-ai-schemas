@@ -24,6 +24,7 @@ from skills.runtime import (
     exercise_hermes_contract,
     hermes_adapter_readiness,
     install_runtime_profile,
+    known_bad_hardening_follow_on_review_packet,
     known_bad_hardening_operator_review_bundle,
     known_bad_hardening_shadow_report,
     make_session_context,
@@ -1205,6 +1206,25 @@ def test_self_improvement_snapshot_is_read_only_and_surfaces_kernel_counts(tmp_p
     assert Path(payload["artifact_path"]).is_file()
 
 
+def test_self_improvement_snapshot_reads_legacy_bundles_without_patch_review_table(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+    prepare_runtime_directories(cfg)
+    require_runtime_databases(cfg)
+
+    payload = self_improvement_snapshot(cfg)
+
+    assert payload["available"] is True
+    assert payload["live_controls_enabled"] is False
+    assert payload["summary"]["patch_review_packet_count"] == 0
+    assert payload["summary"]["missing_optional_tables"] == ["self_improvement_patch_review_packets"]
+    assert payload["patch_review_packets"] == []
+
+
 def test_known_bad_hardening_shadow_report_runtime_surface_is_operator_gated(tmp_path):
     cfg = IntegrationConfig(
         data_dir=str(tmp_path / "data"),
@@ -1393,6 +1413,20 @@ def test_known_bad_hardening_operator_review_bundle_joins_shadow_snapshot_and_pi
         "frontier_route_update",
         "external_side_effect_reexecution",
     ]
+
+    with sqlite3.connect(tmp_path / "data" / "telemetry.db") as conn:
+        conn.execute("DELETE FROM harness_variants")
+        conn.commit()
+
+    fallback_payload = known_bad_hardening_operator_review_bundle(
+        cfg,
+        skill_name="runtime",
+        limit=5,
+    )
+
+    assert fallback_payload["recommended_next_candidate"]["candidate_id"] == "runtime:known_bad_hardening"
+    assert fallback_payload["operator_decision_packet"]["required_authority"] == "operator_gate"
+    assert fallback_payload["operator_decision_packet"]["promotion_effect"] == "none_until_separate_operator_gate"
     assert decision_packet["evidence_summary"]["known_bad_block_rate"] == 1.0
     assert decision_packet["evidence_summary"]["regression_rate"] == 0.0
     assert decision_packet["evidence_summary"]["active_frontier_promotion"] is False
@@ -1437,6 +1471,92 @@ def test_known_bad_hardening_operator_review_bundle_joins_shadow_snapshot_and_pi
     assert packet_evidence["eval_record"]["authority_effect"] == "evidence_only"
     assert candidate["runtime_shadow_report_evidence"]["portfolio_summary_present"] is True
     assert candidate["runtime_shadow_report_evidence"]["portfolio_summary"]["candidate_id"] == "runtime:known_bad_hardening"
+
+
+def test_known_bad_hardening_follow_on_review_packet_is_durable_and_inert(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+    prepare_runtime_directories(cfg)
+    require_runtime_databases(cfg)
+    traces = HarnessVariantManager(str(tmp_path / "data" / "telemetry.db"))
+    traces.log_skill_action_trace(
+        task_id="council-pass",
+        role="council_contract",
+        skill_name="council",
+        action_name="deliberate",
+        intent_goal="safe council deliberation",
+        action_payload={"ok": True},
+        context_assembled="council policy context",
+        judge_verdict="PASS",
+        outcome_score=0.94,
+        created_at="2026-05-17T10:00:00+00:00",
+    )
+    traces.log_skill_action_trace(
+        task_id="council-bad",
+        role="council_contract",
+        skill_name="council",
+        action_name="deliberate",
+        intent_goal="known-bad council deliberation",
+        action_payload={"ok": False},
+        context_assembled="council policy context",
+        judge_verdict="FAIL",
+        outcome_score=0.0,
+        training_eligible=False,
+        retention_class="FAILURE_AUDIT",
+        created_at="2026-05-17T10:01:00+00:00",
+    )
+    known_bad_hardening_shadow_report(
+        cfg,
+        repo_root=str(Path.cwd()),
+        skill_name="council",
+        sample_size=10,
+        as_of="2026-05-17T10:02:00+00:00",
+    )
+    self_improvement_evidence_pipeline(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of="2026-05-17T10:03:00+00:00",
+        candidate_limit=3,
+    )
+
+    before_frontier = traces.frontier(skill_name="council")
+    with sqlite3.connect(tmp_path / "data" / "kernel.db") as conn:
+        conn.execute("DROP TABLE self_improvement_patch_review_packets")
+        conn.commit()
+    payload = known_bad_hardening_follow_on_review_packet(
+        cfg,
+        candidate_id="council:known_bad_hardening",
+        operator_resolution="approve_for_manual_promotion_review",
+        skill_name="council",
+        limit=5,
+    )
+    repeated = known_bad_hardening_follow_on_review_packet(
+        cfg,
+        candidate_id="council:known_bad_hardening",
+        operator_resolution="approve_for_manual_promotion_review",
+        skill_name="council",
+        limit=5,
+    )
+
+    assert payload["durable"] is True
+    assert payload["operator_gated"] is True
+    assert payload["live_controls_enabled"] is False
+    assert payload["active_frontier_promotion"] is False
+    assert payload["patch_packet"]["activation_effect"] == "none_until_separate_operator_gate"
+    assert payload["patch_review_packet"]["required_authority"] == "operator_gate"
+    assert payload["patch_review_packet"]["authority_effect"] == "review_only"
+    assert payload["patch_review_packet"]["status"] == "prepared"
+    assert "autonomous_patch_application" in payload["patch_review_packet"]["blocked_autonomous_actions"]
+    assert "frontier_route_update" in payload["patch_review_packet"]["blocked_autonomous_actions"]
+    assert Path(payload["artifact_path"]).is_file()
+    assert repeated["patch_review_packet"]["patch_packet_id"] == payload["patch_review_packet"]["patch_packet_id"]
+    assert traces.frontier(skill_name="council") == before_frontier == []
+    snapshot = self_improvement_snapshot(cfg)
+    assert snapshot["summary"]["patch_review_packet_count"] == 1
 
 
 def test_self_improvement_evidence_pipeline_surfaces_operator_ready_portfolio(tmp_path):
@@ -1941,6 +2061,91 @@ def test_runtime_main_known_bad_hardening_operator_review_prints_json_only(tmp_p
     assert output["recommended_next_candidate"]["candidate_id"] == "runtime:known_bad_hardening"
     assert output["operator_decision_packet"]["required_authority"] == "operator_gate"
     assert output["operator_decision_packet"]["promotion_effect"] == "none_until_separate_operator_gate"
+    assert output["active_frontier_promotion"] is False
+
+
+def test_runtime_main_known_bad_hardening_follow_on_review_prints_json_only(tmp_path, monkeypatch, capsys):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+    prepare_runtime_directories(cfg)
+    require_runtime_databases(cfg)
+    traces = HarnessVariantManager(str(tmp_path / "data" / "telemetry.db"))
+    traces.log_skill_action_trace(
+        task_id="council-pass",
+        role="council_contract",
+        skill_name="council",
+        action_name="deliberate",
+        intent_goal="safe council request",
+        action_payload={"ok": True},
+        context_assembled="council policy context",
+        judge_verdict="PASS",
+        outcome_score=0.9,
+        created_at="2026-05-17T12:00:00+00:00",
+    )
+    traces.log_skill_action_trace(
+        task_id="council-bad",
+        role="council_contract",
+        skill_name="council",
+        action_name="deliberate",
+        intent_goal="unsafe council request",
+        action_payload={"ok": False},
+        context_assembled="council policy context",
+        judge_verdict="FAIL",
+        outcome_score=0.0,
+        training_eligible=False,
+        retention_class="FAILURE_AUDIT",
+        created_at="2026-05-17T12:01:00+00:00",
+    )
+    known_bad_hardening_shadow_report(
+        cfg,
+        repo_root=str(Path.cwd()),
+        skill_name="council",
+        sample_size=10,
+        as_of="2026-05-17T12:02:00+00:00",
+    )
+    self_improvement_evidence_pipeline(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of="2026-05-17T12:03:00+00:00",
+        candidate_limit=3,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "skills.runtime",
+            "--known-bad-hardening-follow-on-review",
+            "--candidate-id",
+            "council:known_bad_hardening",
+            "--skill-name",
+            "council",
+            "--operator-resolution",
+            "approve_for_manual_promotion_review",
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--skills-dir",
+            str(tmp_path / "skills"),
+            "--checkpoints-dir",
+            str(tmp_path / "skills" / "checkpoints"),
+            "--alerts-dir",
+            str(tmp_path / "alerts"),
+        ],
+    )
+
+    exit_code = runtime_main()
+    output = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert output["review_surface"] == "known_bad_hardening_manual_promotion_follow_on_review"
+    assert output["candidate_id"] == "council:known_bad_hardening"
+    assert output["operator_resolution"] == "approve_for_manual_promotion_review"
+    assert output["durable"] is True
+    assert output["patch_review_packet"]["required_authority"] == "operator_gate"
+    assert output["patch_review_packet"]["authority_effect"] == "review_only"
     assert output["active_frontier_promotion"] is False
 
 
