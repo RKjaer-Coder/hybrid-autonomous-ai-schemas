@@ -2517,6 +2517,52 @@ def known_bad_hardening_operator_review_bundle(
             str(candidate.get("candidate_id") or ""),
         )
     )
+    next_candidate = candidates[0] if candidates else None
+    decision_packet = (
+        {
+            "decision_type": "known_bad_hardening_shadow_review",
+            "candidate_id": next_candidate["candidate_id"],
+            "skill": next_candidate["skill"],
+            "variant_id": next_candidate["variant_id"],
+            "recommendation": (
+                next_candidate.get("pipeline_packet_evidence", {})
+                .get("promotion_packet", {})
+                .get("recommendation")
+                or next_candidate.get("pipeline_packet_evidence", {})
+                .get("portfolio_item", {})
+                .get("recommendation")
+                or "needs_more_data"
+            ),
+            "required_authority": "operator_gate",
+            "default_on_timeout": "keep_current_behavior",
+            "allowed_operator_resolutions": [
+                "approve_for_manual_promotion_review",
+                "defer_pending_more_shadow_evidence",
+                "reject_shadow_candidate",
+            ],
+            "blocked_autonomous_actions": [
+                "active_behavior_mutation",
+                "autonomous_harness_promotion",
+                "frontier_route_update",
+                "external_side_effect_reexecution",
+            ],
+            "promotion_effect": "none_until_separate_operator_gate",
+            "evidence_summary": {
+                "known_bad_block_rate": next_candidate.get("known_bad_block_rate"),
+                "regression_rate": next_candidate.get("regression_rate"),
+                "replay_lineage_status": next_candidate.get("replay_lineage_status"),
+                "side_effect_safety": next_candidate.get("side_effect_safety") or {},
+                "active_frontier_promotion": next_candidate.get("active_frontier_promotion"),
+                "operator_packet_order": next_candidate.get("operator_packet_order"),
+                "packet_id": (
+                    next_candidate.get("pipeline_packet_evidence", {})
+                    .get("packet_id")
+                ),
+            },
+        }
+        if next_candidate
+        else None
+    )
 
     return {
         "available": True,
@@ -2531,6 +2577,18 @@ def known_bad_hardening_operator_review_bundle(
         "required_authority": "operator_gate",
         "default_on_timeout": "keep_current_behavior",
         "required_operator_action": "review_shadow_evidence_before_promotion" if candidates else "none",
+        "recommended_next_candidate": (
+            {
+                "candidate_id": next_candidate["candidate_id"],
+                "skill": next_candidate["skill"],
+                "operator_packet_order": next_candidate.get("operator_packet_order"),
+                "candidate_rank": next_candidate.get("candidate_rank"),
+                "required_operator_action": next_candidate.get("required_operator_action"),
+            }
+            if next_candidate
+            else None
+        ),
+        "operator_decision_packet": decision_packet,
         "kernel_db_path": str(db_path),
         "telemetry_db_path": str(Path(resolved.data_dir) / "telemetry.db"),
         "runtime_shadow_report_artifact_path": str(_runtime_harness_candidate_report_path(resolved)),
