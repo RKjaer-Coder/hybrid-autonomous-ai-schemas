@@ -52,6 +52,23 @@ class KernelSelfImprovement:
     def compare_replay_to_projection(self, command: Command, scope: str = "self_improvement"):
         return self.store.compare_self_improvement_replay_to_projection(command, scope)
 
+    def run_evidence_pipeline(
+        self,
+        command: Command,
+        *,
+        signals: list[dict],
+        as_of: str,
+        scope: str = "pre_hermes_self_improvement",
+        run_id: str | None = None,
+    ):
+        return self.store.run_self_improvement_evidence_pipeline(
+            command,
+            signals=signals,
+            as_of=as_of,
+            scope=scope,
+            run_id=run_id,
+        )
+
     def promotion_decision(
         self,
         *,

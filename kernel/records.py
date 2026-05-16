@@ -1437,9 +1437,25 @@ class SelfImprovementReplayProjectionComparison:
     projection_promotion_packets: list[JsonObject]
     replay_rollbacks: list[JsonObject]
     projection_rollbacks: list[JsonObject]
+    replay_pipeline_runs: list[JsonObject]
+    projection_pipeline_runs: list[JsonObject]
     matches: bool
     mismatches: list[str]
     comparison_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class SelfImprovementEvidencePipelineRun:
+    source_counts: JsonObject
+    proposal_ids: list[str]
+    eval_record_ids: list[str]
+    promotion_packet_ids: list[str]
+    comparison_id: str | None
+    portfolio_items: list[JsonObject]
+    blocked_autonomous_actions: list[str]
+    status: Literal["recorded", "no_signals", "blocked"] = "recorded"
+    run_id: str = field(default_factory=new_id)
     created_at: str = field(default_factory=now_iso)
 
 

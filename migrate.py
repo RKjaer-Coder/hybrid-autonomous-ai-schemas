@@ -68,6 +68,12 @@ EXPECTED_OBJECTS = {
             "model_promotion_decision_packets",
             "model_demotion_records",
             "model_routing_state",
+            "self_improvement_proposals",
+            "self_improvement_eval_records",
+            "self_improvement_promotion_packets",
+            "self_improvement_rollbacks",
+            "self_improvement_replay_projection_comparisons",
+            "self_improvement_evidence_pipeline_runs",
             "capability_grants",
             "budgets",
             "budget_reservations",
@@ -163,6 +169,11 @@ EXPECTED_OBJECTS = {
             "idx_model_demotion_records_task",
             "idx_model_routing_state_role",
             "idx_model_routing_state_model",
+            "idx_self_improvement_proposals_target",
+            "idx_self_improvement_eval_records_proposal",
+            "idx_self_improvement_promotion_packets_proposal",
+            "idx_self_improvement_rollbacks_proposal",
+            "idx_self_improvement_pipeline_runs_status",
             "idx_capability_grants_subject",
             "idx_budgets_owner",
             "idx_budget_reservations_budget_status",
@@ -318,6 +329,7 @@ def _preflight_schema_compat(conn: sqlite3.Connection, schema_name: str) -> None
         _rebuild_kernel_events_for_research_entities(conn)
         _rebuild_kernel_projection_outbox_if_drifted(conn)
         _rebuild_project_outcomes_for_operate_followup(conn)
+        _rebuild_self_improvement_comparisons_for_pipeline(conn)
         return
     if schema_name == "strategic_memory.sql":
         _ensure_column(
@@ -601,6 +613,65 @@ def _rebuild_project_outcomes_for_operate_followup(conn: sqlite3.Connection) -> 
             """
         )
         conn.execute("DROP TABLE project_outcomes__old")
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
+
+
+def _rebuild_self_improvement_comparisons_for_pipeline(conn: sqlite3.Connection) -> None:
+    """Rebuild comparison rows that predate pipeline-run replay coverage."""
+    existing_sql = _object_sql(conn, "table", "self_improvement_replay_projection_comparisons")
+    if not existing_sql:
+        return
+    existing_cols = _table_columns(conn, "self_improvement_replay_projection_comparisons")
+    if {"replay_pipeline_runs_json", "projection_pipeline_runs_json"}.issubset(existing_cols):
+        return
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.execute(
+            "ALTER TABLE self_improvement_replay_projection_comparisons "
+            "RENAME TO self_improvement_replay_projection_comparisons__old"
+        )
+        conn.execute(
+            """
+            CREATE TABLE self_improvement_replay_projection_comparisons (
+              comparison_id TEXT PRIMARY KEY,
+              scope TEXT NOT NULL,
+              replay_proposals_json TEXT NOT NULL CHECK (json_valid(replay_proposals_json)),
+              projection_proposals_json TEXT NOT NULL CHECK (json_valid(projection_proposals_json)),
+              replay_eval_records_json TEXT NOT NULL CHECK (json_valid(replay_eval_records_json)),
+              projection_eval_records_json TEXT NOT NULL CHECK (json_valid(projection_eval_records_json)),
+              replay_promotion_packets_json TEXT NOT NULL CHECK (json_valid(replay_promotion_packets_json)),
+              projection_promotion_packets_json TEXT NOT NULL CHECK (json_valid(projection_promotion_packets_json)),
+              replay_rollbacks_json TEXT NOT NULL CHECK (json_valid(replay_rollbacks_json)),
+              projection_rollbacks_json TEXT NOT NULL CHECK (json_valid(projection_rollbacks_json)),
+              replay_pipeline_runs_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(replay_pipeline_runs_json)),
+              projection_pipeline_runs_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(projection_pipeline_runs_json)),
+              matches INTEGER NOT NULL CHECK (matches IN (0, 1)),
+              mismatches_json TEXT NOT NULL CHECK (json_valid(mismatches_json)),
+              created_at TEXT NOT NULL
+            ) STRICT
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO self_improvement_replay_projection_comparisons (
+              comparison_id, scope, replay_proposals_json, projection_proposals_json,
+              replay_eval_records_json, projection_eval_records_json,
+              replay_promotion_packets_json, projection_promotion_packets_json,
+              replay_rollbacks_json, projection_rollbacks_json,
+              replay_pipeline_runs_json, projection_pipeline_runs_json,
+              matches, mismatches_json, created_at
+            )
+            SELECT
+              comparison_id, scope, replay_proposals_json, projection_proposals_json,
+              replay_eval_records_json, projection_eval_records_json,
+              replay_promotion_packets_json, projection_promotion_packets_json,
+              replay_rollbacks_json, projection_rollbacks_json,
+              '[]', '[]', matches, mismatches_json, created_at
+            FROM self_improvement_replay_projection_comparisons__old
+            """
+        )
+        conn.execute("DROP TABLE self_improvement_replay_projection_comparisons__old")
     finally:
         conn.execute("PRAGMA foreign_keys=ON")
 

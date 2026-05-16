@@ -798,8 +798,23 @@ CREATE TABLE IF NOT EXISTS self_improvement_replay_projection_comparisons (
   projection_promotion_packets_json TEXT NOT NULL CHECK (json_valid(projection_promotion_packets_json)),
   replay_rollbacks_json TEXT NOT NULL CHECK (json_valid(replay_rollbacks_json)),
   projection_rollbacks_json TEXT NOT NULL CHECK (json_valid(projection_rollbacks_json)),
+  replay_pipeline_runs_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(replay_pipeline_runs_json)),
+  projection_pipeline_runs_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(projection_pipeline_runs_json)),
   matches INTEGER NOT NULL CHECK (matches IN (0, 1)),
   mismatches_json TEXT NOT NULL CHECK (json_valid(mismatches_json)),
+  created_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS self_improvement_evidence_pipeline_runs (
+  run_id TEXT PRIMARY KEY,
+  source_counts_json TEXT NOT NULL CHECK (json_valid(source_counts_json)),
+  proposal_ids_json TEXT NOT NULL CHECK (json_valid(proposal_ids_json)),
+  eval_record_ids_json TEXT NOT NULL CHECK (json_valid(eval_record_ids_json)),
+  promotion_packet_ids_json TEXT NOT NULL CHECK (json_valid(promotion_packet_ids_json)),
+  comparison_id TEXT REFERENCES self_improvement_replay_projection_comparisons(comparison_id),
+  portfolio_items_json TEXT NOT NULL CHECK (json_valid(portfolio_items_json)),
+  blocked_autonomous_actions_json TEXT NOT NULL CHECK (json_valid(blocked_autonomous_actions_json)),
+  status TEXT NOT NULL CHECK (status IN ('recorded','no_signals','blocked')),
   created_at TEXT NOT NULL
 ) STRICT;
 
@@ -1256,6 +1271,7 @@ CREATE INDEX IF NOT EXISTS idx_self_improvement_proposals_target ON self_improve
 CREATE INDEX IF NOT EXISTS idx_self_improvement_eval_records_proposal ON self_improvement_eval_records(proposal_id, eval_type, status);
 CREATE INDEX IF NOT EXISTS idx_self_improvement_promotion_packets_proposal ON self_improvement_promotion_packets(proposal_id, status, created_at);
 CREATE INDEX IF NOT EXISTS idx_self_improvement_rollbacks_proposal ON self_improvement_rollbacks(proposal_id, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_self_improvement_pipeline_runs_status ON self_improvement_evidence_pipeline_runs(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_capability_grants_subject ON capability_grants(subject_type, subject_id, capability_type, status);
 CREATE INDEX IF NOT EXISTS idx_budgets_owner ON budgets(owner_type, owner_id, status);
 CREATE INDEX IF NOT EXISTS idx_budget_reservations_budget_status ON budget_reservations(budget_id, status);

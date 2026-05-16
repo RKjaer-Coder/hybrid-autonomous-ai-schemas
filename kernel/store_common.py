@@ -70,6 +70,7 @@ from .records import (
     SideEffectIntent,
     SideEffectReceipt,
     SelfImprovementEvalRecord,
+    SelfImprovementEvidencePipelineRun,
     SelfImprovementPromotionPacket,
     SelfImprovementProposal,
     SelfImprovementReplayProjectionComparison,
@@ -2050,9 +2051,26 @@ def _self_improvement_comparison_payload(comparison: SelfImprovementReplayProjec
         "projection_promotion_packets": comparison.projection_promotion_packets,
         "replay_rollbacks": comparison.replay_rollbacks,
         "projection_rollbacks": comparison.projection_rollbacks,
+        "replay_pipeline_runs": comparison.replay_pipeline_runs,
+        "projection_pipeline_runs": comparison.projection_pipeline_runs,
         "matches": comparison.matches,
         "mismatches": comparison.mismatches,
         "created_at": comparison.created_at,
+    }
+
+
+def _self_improvement_pipeline_run_payload(run: SelfImprovementEvidencePipelineRun) -> dict[str, Any]:
+    return {
+        "run_id": run.run_id,
+        "source_counts": run.source_counts,
+        "proposal_ids": run.proposal_ids,
+        "eval_record_ids": run.eval_record_ids,
+        "promotion_packet_ids": run.promotion_packet_ids,
+        "comparison_id": run.comparison_id,
+        "portfolio_items": run.portfolio_items,
+        "blocked_autonomous_actions": run.blocked_autonomous_actions,
+        "status": run.status,
+        "created_at": run.created_at,
     }
 
 

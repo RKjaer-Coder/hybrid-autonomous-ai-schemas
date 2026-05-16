@@ -3,16 +3,21 @@ from __future__ import annotations
 from typing import Any
 
 from .records import (
+    Decision,
     SelfImprovementEvalRecord,
+    SelfImprovementEvidencePipelineRun,
     SelfImprovementPromotionPacket,
     SelfImprovementProposal,
     SelfImprovementReplayProjectionComparison,
     SelfImprovementRollbackRecord,
+    sha256_text,
 )
+from .replay import KERNEL_POLICY_VERSION
 from .store_common import (
     _loads,
     _self_improvement_comparison_payload,
     _self_improvement_eval_payload,
+    _self_improvement_pipeline_run_payload,
     _self_improvement_promotion_payload,
     _self_improvement_proposal_payload,
     _self_improvement_rollback_payload,
@@ -253,10 +258,12 @@ class SelfImprovementKernelTransactionMixin:
         eval_rows = [self._self_improvement_eval_row(row) for row in self.conn.execute("SELECT * FROM self_improvement_eval_records ORDER BY eval_id")]
         packet_rows = [self._self_improvement_packet_row(row) for row in self.conn.execute("SELECT * FROM self_improvement_promotion_packets ORDER BY packet_id")]
         rollback_rows = [self._self_improvement_rollback_row(row) for row in self.conn.execute("SELECT * FROM self_improvement_rollbacks ORDER BY rollback_id")]
+        pipeline_rows = [self._self_improvement_pipeline_row(row) for row in self.conn.execute("SELECT * FROM self_improvement_evidence_pipeline_runs ORDER BY run_id")]
         replay_proposals = sorted(replay.self_improvement_proposals.values(), key=lambda item: item["proposal_id"])
         replay_evals = sorted(replay.self_improvement_eval_records.values(), key=lambda item: item["eval_id"])
         replay_packets = sorted(replay.self_improvement_promotion_packets.values(), key=lambda item: item["packet_id"])
         replay_rollbacks = sorted(replay.self_improvement_rollbacks.values(), key=lambda item: item["rollback_id"])
+        replay_pipeline_runs = sorted(replay.self_improvement_evidence_pipeline_runs.values(), key=lambda item: item["run_id"])
         mismatches: list[str] = []
         if replay_proposals != proposal_rows:
             mismatches.append("proposal_projection_mismatch")
@@ -266,6 +273,8 @@ class SelfImprovementKernelTransactionMixin:
             mismatches.append("promotion_packet_projection_mismatch")
         if replay_rollbacks != rollback_rows:
             mismatches.append("rollback_projection_mismatch")
+        if replay_pipeline_runs != pipeline_rows:
+            mismatches.append("pipeline_run_projection_mismatch")
         comparison = SelfImprovementReplayProjectionComparison(
             scope=scope,
             replay_proposals=replay_proposals,
@@ -276,6 +285,8 @@ class SelfImprovementKernelTransactionMixin:
             projection_promotion_packets=packet_rows,
             replay_rollbacks=replay_rollbacks,
             projection_rollbacks=rollback_rows,
+            replay_pipeline_runs=replay_pipeline_runs,
+            projection_pipeline_runs=pipeline_rows,
             matches=not mismatches,
             mismatches=mismatches,
         )
@@ -287,9 +298,10 @@ class SelfImprovementKernelTransactionMixin:
               comparison_id, scope, replay_proposals_json, projection_proposals_json,
               replay_eval_records_json, projection_eval_records_json,
               replay_promotion_packets_json, projection_promotion_packets_json,
-              replay_rollbacks_json, projection_rollbacks_json, matches,
+              replay_rollbacks_json, projection_rollbacks_json,
+              replay_pipeline_runs_json, projection_pipeline_runs_json, matches,
               mismatches_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 comparison.comparison_id,
@@ -302,6 +314,8 @@ class SelfImprovementKernelTransactionMixin:
                 canonical_json(comparison.projection_promotion_packets),
                 canonical_json(comparison.replay_rollbacks),
                 canonical_json(comparison.projection_rollbacks),
+                canonical_json(comparison.replay_pipeline_runs),
+                canonical_json(comparison.projection_pipeline_runs),
                 1 if comparison.matches else 0,
                 canonical_json(comparison.mismatches),
                 comparison.created_at,
@@ -309,6 +323,308 @@ class SelfImprovementKernelTransactionMixin:
         )
         self.enqueue_projection(event_id, "self_improvement_replay_projection_comparison")
         return comparison
+
+    def run_self_improvement_evidence_pipeline(
+        self,
+        *,
+        signals: list[dict[str, Any]],
+        as_of: str,
+        scope: str = "pre_hermes_self_improvement",
+        run_id: str | None = None,
+    ) -> SelfImprovementEvidencePipelineRun:
+        if self.command.requested_by != "kernel":
+            raise PermissionError("self-improvement evidence pipeline is kernel-owned")
+        if self.command.requested_authority and self.command.requested_authority != "operator_gate":
+            raise PermissionError("self-improvement evidence pipeline preserves operator-gate authority")
+        blocked_actions = [
+            "active_behavior_mutation",
+            "policy_mutation",
+            "spend_rule_mutation",
+            "gate_rule_mutation",
+            "holdout_mutation",
+            "side_effect_replay",
+            "autonomous_model_promotion",
+        ]
+        source_counts: dict[str, int] = {}
+        proposal_ids: list[str] = []
+        eval_record_ids: list[str] = []
+        promotion_packet_ids: list[str] = []
+        portfolio_items: list[dict[str, Any]] = []
+
+        for index, signal in enumerate(signals):
+            normalized = self._normalize_improvement_signal(signal, index=index, as_of=as_of)
+            source = normalized["source"]
+            source_counts[source] = source_counts.get(source, 0) + 1
+            proposal = self._proposal_from_signal(normalized)
+            proposal_id = self._ensure_self_improvement_proposal(proposal)
+            proposal_ids.append(proposal_id)
+
+            eval_record = self._eval_from_signal(normalized, proposal_id)
+            eval_id = self._ensure_self_improvement_eval(eval_record)
+            eval_record_ids.append(eval_id)
+
+            decision = self._decision_from_signal(normalized, proposal, eval_id)
+            decision_id = self._ensure_self_improvement_decision(decision)
+            packet = self._packet_from_signal(normalized, proposal_id, eval_id, decision_id)
+            packet_id = self._ensure_self_improvement_promotion_packet(packet)
+            promotion_packet_ids.append(packet_id)
+            portfolio_items.append(
+                {
+                    "packet_id": packet_id,
+                    "proposal_id": proposal_id,
+                    "target_type": proposal.target_type,
+                    "target_id": proposal.target_id,
+                    "source": source,
+                    "recommendation": packet.recommendation,
+                    "required_authority": packet.required_authority,
+                    "eval_status": eval_record.status,
+                    "risk_flags": packet.risk_flags,
+                    "operator_action": normalized["operator_action"],
+                    "live_controls_enabled": False,
+                }
+            )
+
+        comparison_id: str | None = None
+        if signals:
+            comparison = self.compare_self_improvement_replay_to_projection(scope)
+            comparison_id = comparison.comparison_id
+        run = SelfImprovementEvidencePipelineRun(
+            run_id=run_id or f"si-pipeline-{sha256_text(canonical_json({'signals': signals, 'as_of': as_of}))[:24]}",
+            source_counts=source_counts,
+            proposal_ids=proposal_ids,
+            eval_record_ids=eval_record_ids,
+            promotion_packet_ids=promotion_packet_ids,
+            comparison_id=comparison_id,
+            portfolio_items=portfolio_items,
+            blocked_autonomous_actions=blocked_actions,
+            status="recorded" if signals else "no_signals",
+            created_at=as_of,
+        )
+        payload = _self_improvement_pipeline_run_payload(run)
+        event_id = self.append_event("self_improvement_evidence_pipeline_recorded", "self_improvement", run.run_id, payload)
+        self.conn.execute(
+            """
+            INSERT INTO self_improvement_evidence_pipeline_runs (
+              run_id, source_counts_json, proposal_ids_json, eval_record_ids_json,
+              promotion_packet_ids_json, comparison_id, portfolio_items_json,
+              blocked_autonomous_actions_json, status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run.run_id,
+                canonical_json(run.source_counts),
+                canonical_json(run.proposal_ids),
+                canonical_json(run.eval_record_ids),
+                canonical_json(run.promotion_packet_ids),
+                run.comparison_id,
+                canonical_json(run.portfolio_items),
+                canonical_json(run.blocked_autonomous_actions),
+                run.status,
+                run.created_at,
+            ),
+        )
+        self.enqueue_projection(event_id, "self_improvement_evidence_pipeline_projection")
+        return run
+
+    def _ensure_self_improvement_proposal(self, proposal: SelfImprovementProposal) -> str:
+        row = self.conn.execute(
+            "SELECT proposal_id FROM self_improvement_proposals WHERE proposal_id=?",
+            (proposal.proposal_id,),
+        ).fetchone()
+        if row is not None:
+            return row["proposal_id"]
+        return self.record_self_improvement_proposal(proposal)
+
+    def _ensure_self_improvement_eval(self, record: SelfImprovementEvalRecord) -> str:
+        row = self.conn.execute(
+            "SELECT eval_id FROM self_improvement_eval_records WHERE eval_id=?",
+            (record.eval_id,),
+        ).fetchone()
+        if row is not None:
+            return row["eval_id"]
+        return self.record_self_improvement_eval(record)
+
+    def _ensure_self_improvement_decision(self, decision: Decision) -> str:
+        row = self.conn.execute("SELECT decision_id FROM decisions WHERE decision_id=?", (decision.decision_id,)).fetchone()
+        if row is not None:
+            return row["decision_id"]
+        return self.create_decision(decision)
+
+    def _ensure_self_improvement_promotion_packet(self, packet: SelfImprovementPromotionPacket) -> str:
+        row = self.conn.execute(
+            "SELECT packet_id FROM self_improvement_promotion_packets WHERE packet_id=?",
+            (packet.packet_id,),
+        ).fetchone()
+        if row is not None:
+            return row["packet_id"]
+        return self.create_self_improvement_promotion_packet(packet)
+
+    @staticmethod
+    def _normalize_improvement_signal(signal: dict[str, Any], *, index: int, as_of: str) -> dict[str, Any]:
+        source = str(signal.get("source") or "unknown")
+        target_type = str(signal.get("target_type") or "harness")
+        if target_type not in {"harness", "workflow", "tool", "model", "eval", "policy"}:
+            raise ValueError("unsupported self-improvement target_type")
+        target_id = str(signal.get("target_id") or f"{source}.{index}")
+        evidence_refs = [str(item) for item in signal.get("evidence_refs", []) if str(item)]
+        if not evidence_refs:
+            evidence_refs = [f"kernel:self_improvement/signals/{source}/{sha256_text(canonical_json(signal))[:16]}"]
+        authority_required = str(signal.get("authority_required") or "operator_gate")
+        if authority_required != "operator_gate":
+            raise PermissionError("pre-Hermes self-improvement signals must remain operator-gated")
+        proposed_change = str(signal.get("proposed_change") or f"Review governed improvement candidate for {target_id}.")
+        expected_benefit = str(signal.get("expected_benefit") or "Improve reliability using recorded kernel evidence.")
+        risk_assessment = str(signal.get("risk_assessment") or "Evidence-only; no active behavior mutation is permitted.")
+        eval_plan = str(signal.get("eval_plan") or "Replay, regression, known-bad, and side-effect safety checks before promotion.")
+        rollback_plan = str(signal.get("rollback_plan") or "Keep current behavior unless an operator approves a reversible promotion.")
+        metrics = dict(signal.get("metrics") or {})
+        metrics.setdefault("overall", float(signal.get("overall", 0.0)))
+        side_effect_safety = dict(signal.get("side_effect_safety") or {})
+        side_effect_safety.setdefault("reexecuted_side_effects", False)
+        side_effect_safety.setdefault("external_intents_reconstructed_only", True)
+        return {
+            **signal,
+            "source": source,
+            "target_type": target_type,
+            "target_id": target_id,
+            "evidence_refs": evidence_refs,
+            "authority_required": authority_required,
+            "proposed_change": proposed_change,
+            "expected_benefit": expected_benefit,
+            "risk_assessment": risk_assessment,
+            "eval_plan": eval_plan,
+            "rollback_plan": rollback_plan,
+            "metrics": metrics,
+            "regression_thresholds": dict(signal.get("regression_thresholds") or {"overall_min": 0.0}),
+            "failure_examples": list(signal.get("failure_examples") or []),
+            "side_effect_safety": side_effect_safety,
+            "data_classes": list(signal.get("data_classes") or ["internal"]),
+            "affected_policy_areas": list(signal.get("affected_policy_areas") or []),
+            "eval_type": str(signal.get("eval_type") or "replay"),
+            "eval_status": str(signal.get("eval_status") or "needs_more_data"),
+            "recommendation": str(signal.get("recommendation") or "needs_more_data"),
+            "risk_flags": list(signal.get("risk_flags") or ["operator_gate_required_before_active_change"]),
+            "baseline_ref": str(signal.get("baseline_ref") or f"current://{target_id}"),
+            "candidate_ref": str(signal.get("candidate_ref") or f"candidate://{target_id}"),
+            "dataset_refs": list(signal.get("dataset_refs") or evidence_refs),
+            "operator_action": str(signal.get("operator_action") or "review_evidence_packet"),
+            "as_of": as_of,
+        }
+
+    @staticmethod
+    def _signal_id(signal: dict[str, Any], prefix: str) -> str:
+        stable = {
+            "source": signal["source"],
+            "target_type": signal["target_type"],
+            "target_id": signal["target_id"],
+            "evidence_refs": signal["evidence_refs"],
+            "proposed_change": signal["proposed_change"],
+        }
+        return f"{prefix}-{sha256_text(canonical_json(stable))[:24]}"
+
+    def _proposal_from_signal(self, signal: dict[str, Any]) -> SelfImprovementProposal:
+        return SelfImprovementProposal(
+            proposal_id=self._signal_id(signal, "si-proposal"),
+            target_type=signal["target_type"],  # type: ignore[arg-type]
+            target_id=signal["target_id"],
+            problem_evidence=signal["evidence_refs"],
+            proposed_change=signal["proposed_change"],
+            expected_benefit=signal["expected_benefit"],
+            risk_assessment=signal["risk_assessment"],
+            eval_plan=signal["eval_plan"],
+            rollback_plan=signal["rollback_plan"],
+            authority_required="operator_gate",
+            proposer_type="kernel",
+            proposer_id="self-improvement-evidence-pipeline",
+            affected_policy_areas=signal["affected_policy_areas"],
+            data_classes=signal["data_classes"],
+            created_at=signal["as_of"],
+            updated_at=signal["as_of"],
+        )
+
+    def _eval_from_signal(self, signal: dict[str, Any], proposal_id: str) -> SelfImprovementEvalRecord:
+        return SelfImprovementEvalRecord(
+            eval_id=self._signal_id(signal, "si-eval"),
+            proposal_id=proposal_id,
+            eval_type=signal["eval_type"],  # type: ignore[arg-type]
+            baseline_ref=signal["baseline_ref"],
+            candidate_ref=signal["candidate_ref"],
+            dataset_refs=signal["dataset_refs"],
+            metrics=signal["metrics"],
+            regression_thresholds=signal["regression_thresholds"],
+            failure_examples=signal["failure_examples"],
+            side_effect_safety=signal["side_effect_safety"],
+            status=signal["eval_status"],  # type: ignore[arg-type]
+            created_at=signal["as_of"],
+        )
+
+    def _decision_from_signal(self, signal: dict[str, Any], proposal: SelfImprovementProposal, eval_id: str) -> Decision:
+        decision_id = self._signal_id(signal, "si-decision")
+        return Decision(
+            decision_id=decision_id,
+            decision_type="system_improvement",
+            question=f"Review governed improvement proposal for {proposal.target_type}:{proposal.target_id}?",
+            options=[
+                {"option_id": "approve", "label": "Approve gated promotion"},
+                {"option_id": "reject", "label": "Reject proposal"},
+                {"option_id": "needs_more_data", "label": "Request more evidence"},
+                {"option_id": "rollback", "label": "Prepare rollback only"},
+            ],
+            stakes="high" if proposal.target_type in {"workflow", "policy", "model"} else "medium",
+            evidence_bundle_ids=[],
+            evidence_refs=[eval_id, *signal["evidence_refs"]],
+            requested_by="kernel",
+            required_authority="operator_gate",
+            authority_policy_version=KERNEL_POLICY_VERSION,
+            status="proposed",
+            recommendation=signal["recommendation"],
+            confidence=signal["metrics"].get("overall") if isinstance(signal["metrics"].get("overall"), float) else None,
+            decisive_factors=[
+                f"source={signal['source']}",
+                f"target_type={proposal.target_type}",
+                f"target_id={proposal.target_id}",
+            ],
+            risk_flags=signal["risk_flags"],
+            default_on_timeout="keep_current_behavior",
+            gate_packet={
+                "decision_type": "system_improvement",
+                "proposal_id": proposal.proposal_id,
+                "source": signal["source"],
+                "live_controls_enabled": False,
+            },
+            created_at=signal["as_of"],
+        )
+
+    def _packet_from_signal(
+        self,
+        signal: dict[str, Any],
+        proposal_id: str,
+        eval_id: str,
+        decision_id: str,
+    ) -> SelfImprovementPromotionPacket:
+        recommendation = signal["recommendation"]
+        if recommendation == "approve" and signal["eval_status"] != "passed":
+            recommendation = "needs_more_data"
+        return SelfImprovementPromotionPacket(
+            packet_id=self._signal_id(signal, "si-packet"),
+            proposal_id=proposal_id,
+            decision_id=decision_id,
+            recommendation=recommendation,  # type: ignore[arg-type]
+            required_authority="operator_gate",
+            eval_record_ids=[eval_id],
+            evidence_refs=[eval_id, *signal["evidence_refs"]],
+            risk_flags=signal["risk_flags"],
+            gate_packet={
+                "decision_type": "system_improvement",
+                "proposal_id": proposal_id,
+                "source": signal["source"],
+                "operator_action": signal["operator_action"],
+                "live_controls_enabled": False,
+            },
+            default_on_timeout="keep_current_behavior",
+            status="proposed",
+            created_at=signal["as_of"],
+        )
 
     @staticmethod
     def _self_improvement_proposal_row(row: Any) -> dict[str, Any]:
@@ -377,6 +693,21 @@ class SelfImprovementKernelTransactionMixin:
             "rollback_reason": row["rollback_reason"],
             "receipt_ref": row["receipt_ref"],
             "receipt_hash": row["receipt_hash"],
+            "status": row["status"],
+            "created_at": row["created_at"],
+        }
+
+    @staticmethod
+    def _self_improvement_pipeline_row(row: Any) -> dict[str, Any]:
+        return {
+            "run_id": row["run_id"],
+            "source_counts": _loads(row["source_counts_json"]),
+            "proposal_ids": _loads(row["proposal_ids_json"]),
+            "eval_record_ids": _loads(row["eval_record_ids_json"]),
+            "promotion_packet_ids": _loads(row["promotion_packet_ids_json"]),
+            "comparison_id": row["comparison_id"],
+            "portfolio_items": _loads(row["portfolio_items_json"]),
+            "blocked_autonomous_actions": _loads(row["blocked_autonomous_actions_json"]),
             "status": row["status"],
             "created_at": row["created_at"],
         }

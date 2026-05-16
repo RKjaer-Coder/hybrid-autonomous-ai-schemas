@@ -234,6 +234,80 @@ class KernelSelfImprovementTests(unittest.TestCase):
                 unsafe,
             )
 
+    def test_evidence_pipeline_creates_operator_gated_portfolio_and_compares_replay(self):
+        run = self.si.run_evidence_pipeline(
+            self_improvement_command(
+                "self_improvement.evidence_pipeline.run",
+                "pipeline-readiness",
+                requested_by="kernel",
+                requester_id="self-improvement-evidence-pipeline",
+                requested_authority="operator_gate",
+            ),
+            as_of="2026-05-16T00:00:00+00:00",
+            signals=[
+                {
+                    "source": "replay_readiness",
+                    "target_type": "eval",
+                    "target_id": "replay.corpus.activation",
+                    "evidence_refs": ["artifact://runtime/replay_readiness_report.json"],
+                    "proposed_change": "Grow replay corpus before broader harness promotion.",
+                    "expected_benefit": "Representative promotion evidence.",
+                    "risk_assessment": "Evidence-only.",
+                    "eval_plan": "Replay known-bad and regression traces.",
+                    "rollback_plan": "Keep current harness active.",
+                    "metrics": {"overall": 0.42, "known_bad_source_traces": 2},
+                    "eval_status": "needs_more_data",
+                    "recommendation": "needs_more_data",
+                },
+                {
+                    "source": "harness_candidate",
+                    "target_type": "harness",
+                    "target_id": "research_domain.summary.prompt",
+                    "evidence_refs": ["artifact://runtime/harness_candidate_report.json"],
+                    "proposed_change": "Promote citation-presence prompt candidate after operator review.",
+                    "expected_benefit": "Fewer unsupported claims.",
+                    "risk_assessment": "Shadow only until gated.",
+                    "eval_plan": "Replay and shadow comparison.",
+                    "rollback_plan": "Restore current prompt.",
+                    "eval_type": "shadow",
+                    "metrics": {"overall": 0.91, "unsupported_claim_rate": 0.0},
+                    "eval_status": "passed",
+                    "recommendation": "approve",
+                },
+            ],
+        )
+
+        self.assertEqual(run.status, "recorded")
+        self.assertEqual(len(run.proposal_ids), 2)
+        self.assertEqual(len(run.eval_record_ids), 2)
+        self.assertEqual(len(run.promotion_packet_ids), 2)
+        self.assertEqual(run.portfolio_items[1]["recommendation"], "approve")
+        self.assertIn("autonomous_model_promotion", run.blocked_autonomous_actions)
+
+        comparison = self.si.compare_replay_to_projection(
+            self_improvement_command(
+                "self_improvement.replay.compare",
+                "compare-pipeline",
+                requested_by="kernel",
+            )
+        )
+        self.assertTrue(comparison.matches, comparison.mismatches)
+        self.assertEqual(comparison.projection_pipeline_runs[0]["run_id"], run.run_id)
+
+    def test_evidence_pipeline_is_kernel_owned(self):
+        with self.assertRaises(PermissionError):
+            self.si.run_evidence_pipeline(
+                self_improvement_command(
+                    "self_improvement.evidence_pipeline.run",
+                    "agent-pipeline",
+                    requested_by="agent",
+                    requester_id="worker",
+                    requested_authority="operator_gate",
+                ),
+                as_of="2026-05-16T00:00:00+00:00",
+                signals=[],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

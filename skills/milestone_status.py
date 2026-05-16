@@ -69,6 +69,7 @@ def _runtime_launcher_paths(config: IntegrationConfig) -> dict[str, Path]:
         "hermes_adapter_readiness": bin_dir / "hermes_adapter_readiness.sh",
         "migration_readiness": bin_dir / "migration_readiness.sh",
         "pre_hermes_readiness": bin_dir / "pre_hermes_readiness.sh",
+        "self_improvement_evidence_pipeline": bin_dir / "self_improvement_evidence_pipeline.sh",
         "self_improvement_snapshot": bin_dir / "self_improvement_snapshot.sh",
         "gateway": bin_dir / "start_gateway.sh",
         "workspace": bin_dir / "start_workspace.sh",

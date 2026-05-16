@@ -35,6 +35,7 @@ from skills.runtime import (
     recovery_readiness,
     replay_readiness_report,
     require_runtime_databases,
+    self_improvement_evidence_pipeline,
     self_improvement_snapshot,
     run_flywheel_drill,
     run_research_cron_proof,
@@ -244,8 +245,10 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
         "Analytics",
     ]
     assert "--readiness-suite" in workspace_manifest["readiness_suite_command"]
+    assert "--self-improvement-evidence-pipeline" in workspace_manifest["self_improvement_evidence_pipeline_command"]
     assert "--self-improvement-snapshot" in workspace_manifest["self_improvement_snapshot_command"]
     assert "readiness_suite" in workspace_manifest["read_only_readiness_surfaces"]
+    assert "self_improvement_evidence_pipeline" in workspace_manifest["read_only_readiness_surfaces"]
     assert "self_improvement_snapshot" in workspace_manifest["read_only_readiness_surfaces"]
     assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["profile_name"] == "hybrid-test"
     assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["repo_contract_version"] == 1
@@ -301,6 +304,7 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
     assert "mac_studio_day_one" in manifest["commands"]
     assert "recovery_readiness" in manifest["commands"]
     assert "hermes_adapter_readiness" in manifest["commands"]
+    assert "self_improvement_evidence_pipeline" in manifest["commands"]
     assert "milestone_status" in manifest["commands"]
     assert "mission_control" not in manifest["commands"]
     assert sorted(Path(path).name for path in result.linked_skill_paths) == ["immune_system", "strategic_memory"]
@@ -1197,6 +1201,36 @@ def test_self_improvement_snapshot_is_read_only_and_surfaces_kernel_counts(tmp_p
     assert Path(payload["artifact_path"]).is_file()
 
 
+def test_self_improvement_evidence_pipeline_surfaces_operator_ready_portfolio(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+
+    payload = self_improvement_evidence_pipeline(
+        cfg,
+        repo_root=str(Path(__file__).resolve().parents[2]),
+        as_of="2026-05-16T00:00:00+00:00",
+        candidate_limit=2,
+    )
+
+    assert payload["available"] is True
+    assert payload["live_controls_enabled"] is False
+    assert payload["signal_count"] >= 1
+    assert payload["run"]["status"] == "recorded"
+    assert payload["run"]["proposal_ids"]
+    assert payload["run"]["eval_record_ids"]
+    assert payload["run"]["promotion_packet_ids"]
+    assert payload["portfolio"]
+    assert "active_behavior_mutation" in payload["disabled_live_controls"]
+    snapshot = self_improvement_snapshot(cfg)
+    assert snapshot["summary"]["pipeline_run_count"] == 1
+    assert snapshot["portfolio"]
+    assert Path(snapshot["artifact_path"]).is_file()
+
+
 def test_run_evidence_factory_generates_cross_skill_evidence(tmp_path):
     cfg = IntegrationConfig(
         data_dir=str(tmp_path / "data"),
@@ -1514,6 +1548,33 @@ def test_runtime_main_self_improvement_snapshot_prints_read_only_json(tmp_path, 
     assert output["available"] is True
     assert output["live_controls_enabled"] is False
     assert output["summary"]["proposal_count"] == 0
+
+
+def test_runtime_main_self_improvement_evidence_pipeline_prints_read_only_json(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "skills.runtime",
+            "--self-improvement-evidence-pipeline",
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--skills-dir",
+            str(tmp_path / "skills"),
+            "--checkpoints-dir",
+            str(tmp_path / "skills" / "checkpoints"),
+            "--alerts-dir",
+            str(tmp_path / "alerts"),
+        ],
+    )
+
+    exit_code = runtime_main()
+    output = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert output["available"] is True
+    assert output["live_controls_enabled"] is False
+    assert output["run"]["promotion_packet_ids"]
 
 
 def test_runtime_main_reports_runtime_setup_failure_cleanly(tmp_path, monkeypatch, capsys):

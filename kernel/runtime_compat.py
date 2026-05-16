@@ -55,7 +55,7 @@ from kernel.runtime import (
     require_runtime_databases as _kernel_require_runtime_databases,
     verify_runtime_databases as _kernel_verify_runtime_databases,
 )
-from kernel import Command, KernelStore, MigrationReadinessRecord
+from kernel import Command, KernelStore, MigrationReadinessRecord, self_improvement_command
 from kernel.projections import (
     apply_operator_digest_projection_outbox,
     compare_operator_digest_migration_readiness_projection,
@@ -1991,6 +1991,262 @@ def _write_self_improvement_snapshot_artifact(config: IntegrationConfig, payload
     _write_json_yaml(path, artifact)
 
 
+def _jsonish(value: Any) -> Any:
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    return value
+
+
+def _read_latest_rows(db_path: Path, table: str, order_by: str = "created_at", limit: int = 5) -> list[dict[str, Any]]:
+    if not db_path.is_file():
+        return []
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone()
+        if exists is None:
+            return []
+        rows = conn.execute(f"SELECT * FROM {table} ORDER BY {order_by} DESC LIMIT ?", (limit,)).fetchall()
+    converted: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        for key, value in list(item.items()):
+            if key.endswith("_json"):
+                item[key.removesuffix("_json")] = _jsonish(value)
+                del item[key]
+            elif key == "matches":
+                item[key] = bool(value)
+        converted.append(item)
+    return converted
+
+
+def _replay_signal_from_report(report: dict[str, Any]) -> list[dict[str, Any]]:
+    status = report.get("status")
+    if status == "READY_FOR_BROADER_REPLAY":
+        return []
+    blockers = list(report.get("blockers") or [])
+    metrics = {
+        "overall": 0.25 if blockers else 0.5,
+        "eligible_source_traces": report.get("eligible_source_traces", 0),
+        "known_bad_source_traces": report.get("known_bad_source_traces", 0),
+        "distinct_skill_count": report.get("distinct_skill_count", 0),
+    }
+    return [
+        {
+            "source": "replay_readiness",
+            "target_type": "eval",
+            "target_id": "replay.corpus.activation",
+            "evidence_refs": [f"artifact:{report.get('artifact_path', 'runtime/replay_readiness_report.json')}"],
+            "proposed_change": "Grow the replay and known-bad corpus before enabling broader harness promotion.",
+            "expected_benefit": "Promotion packets become grounded in representative replay evidence.",
+            "risk_assessment": "Evidence-only corpus growth; no active behavior mutation.",
+            "eval_plan": "Refresh replay readiness and compare kernel replay/projection state after corpus growth.",
+            "rollback_plan": "Keep current harnesses and discard candidate-only traces if quality regresses.",
+            "eval_type": "replay",
+            "metrics": metrics,
+            "regression_thresholds": {
+                "minimum_eligible_traces": report.get("minimum_eligible_traces", 0),
+                "minimum_known_bad_traces": report.get("minimum_known_bad_traces", 0),
+                "minimum_distinct_skills": report.get("minimum_distinct_skills", 0),
+            },
+            "eval_status": "needs_more_data",
+            "recommendation": "needs_more_data",
+            "risk_flags": blockers or ["replay_below_activation_threshold"],
+            "operator_action": "run_bounded_evidence_factory",
+        }
+    ]
+
+
+def _readiness_signals(components: dict[str, Any]) -> list[dict[str, Any]]:
+    signals: list[dict[str, Any]] = []
+    for name, component in components.items():
+        packet = component.get("packet") if isinstance(component, dict) else None
+        status = component.get("readiness_status") or component.get("status")
+        if isinstance(packet, dict):
+            status = packet.get("readiness_status", status)
+        if status in {None, "ready", "READY_FOR_BROADER_REPLAY"}:
+            continue
+        evidence_refs = [f"artifact:{component.get('artifact_path')}"] if component.get("artifact_path") else []
+        if isinstance(packet, dict) and packet.get("evidence_refs"):
+            evidence_refs.extend(packet["evidence_refs"])
+        actions = component.get("next_operator_actions") or (packet or {}).get("next_operator_actions") or []
+        signals.append(
+            {
+                "source": f"runtime_readiness:{name}",
+                "target_type": "workflow" if name in {"recovery_readiness", "migration_readiness"} else "tool",
+                "target_id": name,
+                "evidence_refs": evidence_refs,
+                "proposed_change": f"Resolve {name} readiness blockers before live Hermes activation.",
+                "expected_benefit": "Operator promotion review sees current substrate risks in one governed packet.",
+                "risk_assessment": "Read-only readiness evidence; live controls remain disabled.",
+                "eval_plan": "Refresh readiness packet and replay/projection comparison after remediation.",
+                "rollback_plan": "Keep pre-Hermes controls disabled until readiness returns to ready.",
+                "eval_type": "safety",
+                "metrics": {"overall": 0.0 if status == "fail_closed" else 0.45, "readiness_status": status},
+                "regression_thresholds": {"readiness_status": "ready"},
+                "eval_status": "failed" if status == "fail_closed" else "needs_more_data",
+                "recommendation": "needs_more_data",
+                "risk_flags": [f"{name}_{status}"],
+                "operator_action": actions[0]["action"] if actions and isinstance(actions[0], dict) else "resolve_readiness_blocker",
+            }
+        )
+    return signals
+
+
+def _harness_candidate_signals(report: dict[str, Any], *, limit: int = 3) -> list[dict[str, Any]]:
+    signals: list[dict[str, Any]] = []
+    for candidate in list(report.get("candidates") or [])[:limit]:
+        skill_name = candidate.get("skill_name", "unknown")
+        candidate_type = candidate.get("candidate_type", "harness")
+        score = float(candidate.get("opportunity_score", 0.0) or 0.0)
+        signals.append(
+            {
+                "source": "harness_candidate",
+                "target_type": "harness",
+                "target_id": f"{skill_name}.{candidate_type}",
+                "evidence_refs": [f"artifact:{report.get('artifact_path', 'runtime/harness_candidate_report.json')}"],
+                "proposed_change": str(candidate.get("proposal_summary") or f"Review ranked {candidate_type} candidate for {skill_name}."),
+                "expected_benefit": "Use replay-ranked harness evidence to improve output quality without mutating active prompts.",
+                "risk_assessment": "Candidate remains shadow/evidence-only until an operator approves promotion.",
+                "eval_plan": "Run replay, known-bad regression, and shadow comparison against the candidate diff.",
+                "rollback_plan": "Keep the current harness as the active baseline.",
+                "eval_type": "shadow",
+                "metrics": {"overall": min(max(score, 0.0), 1.0), **{k: v for k, v in candidate.items() if k.endswith("_score")}},
+                "regression_thresholds": {"overall_min": 0.8, "known_bad_regressions_max": 0},
+                "eval_status": "passed" if score >= 0.8 else "needs_more_data",
+                "recommendation": "approve" if score >= 0.8 else "needs_more_data",
+                "risk_flags": ["operator_gate_required_before_active_harness_change"],
+                "operator_action": "review_harness_candidate_packet",
+            }
+        )
+    return signals
+
+
+def _kernel_table_signals(db_path: Path) -> list[dict[str, Any]]:
+    signals: list[dict[str, Any]] = []
+    for row in _read_latest_rows(db_path, "project_commercial_rollups", limit=5):
+        risk_flags = list(row.get("risk_flags") or [])
+        if not risk_flags and int(row.get("receiptless_side_effect_count", 0) or 0) == 0 and int(row.get("support_open_count", 0) or 0) == 0:
+            continue
+        signals.append(
+            {
+                "source": "commercial",
+                "target_type": "workflow",
+                "target_id": f"project_commercial_rollup:{row['project_id']}",
+                "evidence_refs": [f"kernel:project_commercial_rollups/{row['rollup_id']}", *list(row.get("evidence_refs") or [])],
+                "proposed_change": "Review commercial workflow evidence for recurring revenue, support, or receipt gaps.",
+                "expected_benefit": "Reduce operator load and revenue leakage while preserving side-effect gates.",
+                "risk_assessment": "Commercial workflow changes stay operator-gated and cannot create customer commitments.",
+                "eval_plan": "Replay project/commercial projections and inspect follow-up outcomes before promotion.",
+                "rollback_plan": "Keep existing project workflow and queue only internal evidence tasks.",
+                "eval_type": "replay",
+                "metrics": {
+                    "overall": 0.4,
+                    "support_open_count": row.get("support_open_count", 0),
+                    "receiptless_side_effect_count": row.get("receiptless_side_effect_count", 0),
+                },
+                "regression_thresholds": {"receiptless_side_effect_count_max": 0},
+                "eval_status": "needs_more_data",
+                "recommendation": "needs_more_data",
+                "risk_flags": risk_flags or ["commercial_followup_open"],
+                "operator_action": "review_commercial_improvement_packet",
+            }
+        )
+    for row in _read_latest_rows(db_path, "model_eval_runs", limit=5):
+        if row.get("verdict") == "supports_decision":
+            continue
+        signals.append(
+            {
+                "source": "model_intelligence",
+                "target_type": "model",
+                "target_id": f"{row['task_class']}:{row['model_id']}",
+                "evidence_refs": [f"kernel:model_eval_runs/{row['eval_run_id']}", f"kernel:local_offload_eval_sets/{row['eval_set_id']}"],
+                "proposed_change": "Review model routing or eval-set improvements from Model Intelligence evidence.",
+                "expected_benefit": "Improve local-offload reliability without promoting a model automatically.",
+                "risk_assessment": "Model route changes remain operator-gated by task class.",
+                "eval_plan": "Run regression, known-bad, and frozen holdout checks through Model Intelligence.",
+                "rollback_plan": "Keep frontier fallback or prior route active.",
+                "eval_type": "regression",
+                "metrics": {
+                    "overall": row.get("quality_score", 0.0),
+                    "quality_score": row.get("quality_score", 0.0),
+                    "reliability_score": row.get("reliability_score", 0.0),
+                    "latency_p95_ms": row.get("latency_p95_ms", 0),
+                },
+                "regression_thresholds": {"quality_score_min": 0.0, "reliability_score_min": 0.0},
+                "failure_examples": [{"failure_modes": row.get("failure_modes", [])}],
+                "eval_status": "needs_more_data" if row.get("verdict") == "needs_more_data" else "failed",
+                "recommendation": "needs_more_data",
+                "risk_flags": [f"model_eval_{row.get('verdict')}"],
+                "operator_action": "review_model_intelligence_packet",
+            }
+        )
+    return signals
+
+
+def _latest_pipeline_runs(db_path: Path, limit: int = 5) -> list[dict[str, Any]]:
+    return _read_latest_rows(db_path, "self_improvement_evidence_pipeline_runs", limit=limit)
+
+
+def self_improvement_evidence_pipeline(
+    config: IntegrationConfig | None = None,
+    *,
+    repo_root: str | None = None,
+    as_of: str | None = None,
+    candidate_limit: int = 3,
+) -> dict[str, Any]:
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    root = Path(repo_root).expanduser().resolve() if repo_root else _repo_root()
+    prepare_runtime_directories(resolved)
+    require_runtime_databases(resolved)
+    install_runtime_profile(resolved, repo_root=str(root))
+    timestamp = as_of or _utc_now()
+    replay = replay_readiness_report(resolved, repo_root=str(root))
+    pre_hermes = pre_hermes_readiness(resolved, repo_root=str(root), as_of=timestamp, refresh=True)
+    harness = analyze_harness_candidates(resolved, repo_root=str(root), limit=candidate_limit, propose_best=False)
+    db_path = _kernel_db_path(resolved)
+    signals = (
+        _replay_signal_from_report(replay)
+        + _readiness_signals(pre_hermes["components"])
+        + _harness_candidate_signals(harness, limit=candidate_limit)
+        + _kernel_table_signals(db_path)
+    )
+    run = KernelStore(db_path).run_self_improvement_evidence_pipeline(
+        self_improvement_command(
+            "self_improvement.evidence_pipeline.run",
+            f"pipeline-{timestamp}",
+            requested_by="kernel",
+            requester_id="self-improvement-evidence-pipeline",
+            requested_authority="operator_gate",
+            payload={"signal_count": len(signals), "as_of": timestamp},
+        ),
+        signals=signals,
+        as_of=timestamp,
+        scope="pre_hermes_self_improvement",
+    )
+    snapshot = self_improvement_snapshot(resolved)
+    payload = {
+        "available": True,
+        "generated_at": timestamp,
+        "run": asdict(run),
+        "signal_count": len(signals),
+        "source_counts": run.source_counts,
+        "portfolio": run.portfolio_items,
+        "snapshot": snapshot,
+        "kernel_db_path": str(db_path),
+        "artifact_path": snapshot["artifact_path"],
+        "live_controls_enabled": False,
+        "disabled_live_controls": list(run.blocked_autonomous_actions),
+    }
+    _write_self_improvement_snapshot_artifact(resolved, {**snapshot, "latest_pipeline": payload})
+    return payload
+
+
 def self_improvement_snapshot(config: IntegrationConfig | None = None) -> dict[str, Any]:
     resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
     prepare_runtime_directories(resolved)
@@ -2000,6 +2256,7 @@ def self_improvement_snapshot(config: IntegrationConfig | None = None) -> dict[s
     eval_records = _self_improvement_rows(db_path, "self_improvement_eval_records", "created_at")
     promotion_packets = _self_improvement_rows(db_path, "self_improvement_promotion_packets", "created_at")
     rollbacks = _self_improvement_rows(db_path, "self_improvement_rollbacks", "created_at")
+    pipeline_runs = _latest_pipeline_runs(db_path)
     comparisons = _self_improvement_rows(
         db_path,
         "self_improvement_replay_projection_comparisons",
@@ -2020,6 +2277,7 @@ def self_improvement_snapshot(config: IntegrationConfig | None = None) -> dict[s
             "eval_record_count": len(eval_records),
             "promotion_packet_count": len(promotion_packets),
             "rollback_count": len(rollbacks),
+            "pipeline_run_count": len(pipeline_runs),
             "status_counts": status_counts,
             "latest_replay_projection_match": comparisons[0]["matches"] if comparisons else None,
         },
@@ -2027,6 +2285,8 @@ def self_improvement_snapshot(config: IntegrationConfig | None = None) -> dict[s
         "eval_records": eval_records,
         "promotion_packets": promotion_packets,
         "rollbacks": rollbacks,
+        "pipeline_runs": pipeline_runs,
+        "portfolio": pipeline_runs[0]["portfolio_items"] if pipeline_runs else [],
         "comparisons": comparisons,
         "live_controls_enabled": False,
         "disabled_live_controls": [
@@ -2523,6 +2783,11 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
         "migration_readiness_command": _command_string(config, "--migration-readiness", repo_root),
         "pre_hermes_readiness_command": _command_string(config, "--pre-hermes-readiness", repo_root),
         "readiness_suite_command": _command_string(config, "--readiness-suite", repo_root),
+        "self_improvement_evidence_pipeline_command": _command_string(
+            config,
+            "--self-improvement-evidence-pipeline",
+            repo_root,
+        ),
         "self_improvement_snapshot_command": _command_string(config, "--self-improvement-snapshot", repo_root),
         "dashboard_surfaces": list(EXPECTED_DASHBOARD_SURFACES),
         "dashboard_mode": "hermes_native",
@@ -2536,6 +2801,7 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "migration_readiness",
             "pre_hermes_readiness",
             "readiness_suite",
+            "self_improvement_evidence_pipeline",
             "self_improvement_snapshot",
         ],
     }
@@ -2841,6 +3107,7 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
             "hermes_adapter_readiness": _command_string(resolved, "--hermes-adapter-readiness", root),
             "migration_readiness": _command_string(resolved, "--migration-readiness", root),
             "pre_hermes_readiness": _command_string(resolved, "--pre-hermes-readiness", root),
+            "self_improvement_evidence_pipeline": _command_string(resolved, "--self-improvement-evidence-pipeline", root),
             "self_improvement_snapshot": _command_string(resolved, "--self-improvement-snapshot", root),
             "milestone_status": _command_string(resolved, "--milestone-status", root),
             "workspace_overview": _command_string(resolved, "--workspace-overview", root),
@@ -2884,6 +3151,12 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
     _write_launcher(launcher_paths["hermes_adapter_readiness"], resolved, root, "--hermes-adapter-readiness")
     _write_launcher(launcher_paths["migration_readiness"], resolved, root, "--migration-readiness")
     _write_launcher(launcher_paths["pre_hermes_readiness"], resolved, root, "--pre-hermes-readiness")
+    _write_launcher(
+        launcher_paths["self_improvement_evidence_pipeline"],
+        resolved,
+        root,
+        "--self-improvement-evidence-pipeline",
+    )
     _write_launcher(launcher_paths["self_improvement_snapshot"], resolved, root, "--self-improvement-snapshot")
     _write_launcher(launcher_paths["milestone_status"], resolved, root, "--milestone-status")
     _write_launcher(launcher_paths["workspace_overview"], resolved, root, "--workspace-overview")
@@ -3038,6 +3311,7 @@ def doctor_runtime(
         "hermes_adapter_readiness_launcher": launcher_paths["hermes_adapter_readiness"].is_file(),
         "migration_readiness_launcher": launcher_paths["migration_readiness"].is_file(),
         "pre_hermes_readiness_launcher": launcher_paths["pre_hermes_readiness"].is_file(),
+        "self_improvement_evidence_pipeline_launcher": launcher_paths["self_improvement_evidence_pipeline"].is_file(),
         "self_improvement_snapshot_launcher": launcher_paths["self_improvement_snapshot"].is_file(),
         "gateway_launcher": launcher_paths["gateway"].is_file(),
         "workspace_launcher": launcher_paths["workspace"].is_file(),
@@ -6230,6 +6504,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--migration-readiness", action="store_true", help="Create or surface the read-only repo migration-readiness map")
     parser.add_argument("--pre-hermes-readiness", action="store_true", help="Create or surface the read-only pre-Hermes readiness summary")
     parser.add_argument("--readiness-suite", action="store_true", help="Run all read-only pre-Hermes readiness checks and print invariant status")
+    parser.add_argument(
+        "--self-improvement-evidence-pipeline",
+        action="store_true",
+        help="Convert readiness/replay/commercial/model/harness signals into governed self-improvement evidence packets",
+    )
     parser.add_argument("--self-improvement-snapshot", action="store_true", help="Print read-only governed self-improvement proposal/eval status")
     parser.add_argument("--milestone-status", action="store_true", help="Print machine-readable milestone build/proof status")
     parser.add_argument("--workspace-overview", action="store_true", help="Print a Hermes Workspace-oriented operator snapshot")
@@ -6572,6 +6851,15 @@ def _main_impl(
         )
         print(json.dumps(payload, indent=2, sort_keys=True, default=str))
         return 0 if payload["ok"] else 1
+
+    if args.self_improvement_evidence_pipeline:
+        payload = self_improvement_evidence_pipeline(
+            config=config,
+            repo_root=args.repo_root,
+            candidate_limit=args.report_limit,
+        )
+        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+        return 0
 
     if args.self_improvement_snapshot:
         payload = self_improvement_snapshot(config=config)

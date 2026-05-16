@@ -73,6 +73,7 @@ from .records import (
     SideEffectIntent,
     SideEffectReceipt,
     SelfImprovementEvalRecord,
+    SelfImprovementEvidencePipelineRun,
     SelfImprovementPromotionPacket,
     SelfImprovementProposal,
     SelfImprovementReplayProjectionComparison,
@@ -979,6 +980,25 @@ class KernelStore:
     ) -> SelfImprovementReplayProjectionComparison:
         def handler(tx: KernelTransaction) -> SelfImprovementReplayProjectionComparison:
             return tx.compare_self_improvement_replay_to_projection(scope)
+
+        return self.execute_command(command, handler)
+
+    def run_self_improvement_evidence_pipeline(
+        self,
+        command: Command,
+        *,
+        signals: list[dict[str, Any]],
+        as_of: str,
+        scope: str = "pre_hermes_self_improvement",
+        run_id: str | None = None,
+    ) -> SelfImprovementEvidencePipelineRun:
+        def handler(tx: KernelTransaction) -> SelfImprovementEvidencePipelineRun:
+            return tx.run_self_improvement_evidence_pipeline(
+                signals=signals,
+                as_of=as_of,
+                scope=scope,
+                run_id=run_id,
+            )
 
         return self.execute_command(command, handler)
 
