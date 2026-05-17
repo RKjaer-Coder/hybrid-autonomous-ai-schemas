@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime
+import hashlib
 import json
 import math
 import os
@@ -55,7 +56,13 @@ from kernel.runtime import (
     require_runtime_databases as _kernel_require_runtime_databases,
     verify_runtime_databases as _kernel_verify_runtime_databases,
 )
-from kernel import Command, KernelStore, MigrationReadinessRecord, self_improvement_command
+from kernel import (
+    Command,
+    KernelStore,
+    MigrationReadinessRecord,
+    SelfImprovementPatchReviewPacket,
+    self_improvement_command,
+)
 from kernel.projections import (
     apply_operator_digest_projection_outbox,
     compare_operator_digest_migration_readiness_projection,
@@ -477,6 +484,7 @@ from kernel.runtime_paths import (
     _runtime_gateway_manifest_path,
     _runtime_harness_candidate_report_path,
     _runtime_hermes_adapter_readiness_path,
+    _runtime_known_bad_hardening_follow_on_review_path,
     _runtime_launcher_paths,
     _runtime_local_provider_doctor_path,
     _runtime_logs_dir,
@@ -1982,6 +1990,17 @@ def _self_improvement_rows(db_path: Path, table: str, order_by: str, limit: int 
     return converted
 
 
+def _sqlite_table_exists(db_path: Path, table: str) -> bool:
+    if not db_path.is_file():
+        return False
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()
+    return row is not None
+
+
 def _write_self_improvement_snapshot_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
     artifact = dict(payload)
     path = _runtime_self_improvement_snapshot_path(config)
@@ -2333,7 +2352,12 @@ def _self_improvement_snapshot_payload(
     proposals = _self_improvement_rows(db_path, "self_improvement_proposals", "created_at")
     eval_records = _self_improvement_rows(db_path, "self_improvement_eval_records", "created_at")
     promotion_packets = _self_improvement_rows(db_path, "self_improvement_promotion_packets", "created_at")
-    patch_review_packets = _self_improvement_rows(db_path, "self_improvement_patch_review_packets", "created_at")
+    missing_optional_tables: list[str] = []
+    if _sqlite_table_exists(db_path, "self_improvement_patch_review_packets"):
+        patch_review_packets = _self_improvement_rows(db_path, "self_improvement_patch_review_packets", "created_at")
+    else:
+        missing_optional_tables.append("self_improvement_patch_review_packets")
+        patch_review_packets = []
     rollbacks = _self_improvement_rows(db_path, "self_improvement_rollbacks", "created_at")
     pipeline_runs = _latest_pipeline_runs(db_path)
     manager = HarnessVariantManager(str(Path(resolved.data_dir) / "telemetry.db"))
@@ -2360,6 +2384,7 @@ def _self_improvement_snapshot_payload(
             "patch_review_packet_count": len(patch_review_packets),
             "rollback_count": len(rollbacks),
             "pipeline_run_count": len(pipeline_runs),
+            "missing_optional_tables": missing_optional_tables,
             "status_counts": status_counts,
             "latest_replay_projection_match": comparisons[0]["matches"] if comparisons else None,
         },
@@ -2412,6 +2437,12 @@ def known_bad_hardening_operator_review_bundle(
     db_path = _kernel_db_path(resolved)
     manager = HarnessVariantManager(str(Path(resolved.data_dir) / "telemetry.db"))
     snapshot = _self_improvement_snapshot_payload(resolved, write_artifact=False)
+    shadow_report = _read_json_yaml(_runtime_harness_candidate_report_path(resolved)) or {}
+    report_candidates = {
+        str(item.get("candidate_id")): item
+        for item in (shadow_report.get("candidates") if isinstance(shadow_report, dict) else []) or []
+        if item.get("candidate_id")
+    }
     shadow_items = [
         item
         for item in manager.known_bad_hardening_portfolio_summary(limit=limit)
@@ -2438,16 +2469,47 @@ def known_bad_hardening_operator_review_bundle(
     known_bad_portfolio_order = {
         row["target_id"]: index
         for index, row in enumerate(latest_portfolio)
-        if row.get("source") == "known_bad_hardening_shadow" and row.get("target_id")
+        if row.get("target_id")
+        and (
+            row.get("source") == "known_bad_hardening_shadow"
+            or (row.get("source") == "harness_candidate" and str(row.get("target_id")).endswith(".known_bad_hardening"))
+        )
     }
     portfolio_by_target = {
         row["target_id"]: {**row, "pipeline_portfolio_order": known_bad_portfolio_order[row["target_id"]]}
         for row in latest_portfolio
-        if row.get("source") == "known_bad_hardening_shadow" and row.get("target_id")
+        if row.get("target_id") in known_bad_portfolio_order
     }
-    shadow_report = _read_json_yaml(_runtime_harness_candidate_report_path(resolved)) or {}
     report_selected = shadow_report.get("selected_candidate") if isinstance(shadow_report, dict) else None
     report_evaluation = shadow_report.get("evaluation") if isinstance(shadow_report, dict) else None
+    if not shadow_items:
+        shadow_items = []
+        for target_id, portfolio_item in portfolio_by_target.items():
+            candidate_id = str(target_id).replace(".", ":", 1)
+            candidate_report = report_candidates.get(candidate_id, {})
+            if skill_name is not None and not candidate_id.startswith(f"{skill_name}:"):
+                continue
+            source_summary = candidate_report.get("source_summary") or {}
+            known_bad_mean = source_summary.get("known_bad_mean_score")
+            eligible_mean = source_summary.get("eligible_mean_score")
+            shadow_items.append(
+                {
+                    "skill_name": candidate_report.get("skill_name") or str(target_id).split(".", 1)[0],
+                    "variant_id": candidate_report.get("candidate_id") or candidate_id,
+                    "status": "SHADOW_EVAL",
+                    "candidate_id": candidate_id,
+                    "candidate_rank": candidate_report.get("candidate_rank") or portfolio_item.get("pipeline_portfolio_order"),
+                    "known_bad_block_rate": 1.0 if known_bad_mean == 0 else None,
+                    "regression_rate": 0.0 if eligible_mean == 1.0 else None,
+                    "side_effect_safety": {},
+                    "source_trace_lineage_preserved": bool(candidate_report.get("sample_trace_ids")),
+                    "external_side_effects_reexecuted": False,
+                    "live_controls_enabled": False,
+                    "authority_effect": "evidence_only",
+                    "promotion_requires_operator_approval": True,
+                    "active_frontier_promotion": False,
+                }
+            )
 
     candidates: list[dict[str, Any]] = []
     for item in shadow_items:
@@ -2470,7 +2532,7 @@ def known_bad_hardening_operator_review_bundle(
                 "candidate_rank": item.get("candidate_rank"),
                 "known_bad_block_rate": item.get("known_bad_block_rate"),
                 "regression_rate": item.get("regression_rate"),
-                "side_effect_safety": item.get("side_effect_safety") or {},
+                "side_effect_safety": item.get("side_effect_safety") or eval_record.get("side_effect_safety") or {},
                 "replay_lineage_status": "preserved" if source_trace_lineage_preserved else "missing",
                 "source_trace_lineage_preserved": source_trace_lineage_preserved,
                 "active_frontier_promotion": bool(item.get("active_frontier_promotion")),
@@ -2610,6 +2672,184 @@ def known_bad_hardening_operator_review_bundle(
             "autonomous_promotion",
             "active_frontier_entry_creation",
         ],
+    }
+
+
+def _stable_json_hash(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def known_bad_hardening_follow_on_review_packet(
+    config: IntegrationConfig | None = None,
+    *,
+    candidate_id: str = "council:known_bad_hardening",
+    operator_resolution: str = "approve_for_manual_promotion_review",
+    skill_name: str | None = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    if operator_resolution != "approve_for_manual_promotion_review":
+        raise ValueError("follow-on review packet requires approve_for_manual_promotion_review")
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    prepare_runtime_directories(resolved)
+    require_runtime_databases(resolved)
+    candidate_skill = skill_name or candidate_id.split(":", 1)[0]
+    review_bundle = known_bad_hardening_operator_review_bundle(
+        config=resolved,
+        skill_name=candidate_skill,
+        limit=limit,
+    )
+    candidates = [
+        item for item in review_bundle.get("candidates", [])
+        if item.get("candidate_id") == candidate_id
+    ]
+    if not candidates:
+        raise ValueError(f"candidate {candidate_id} is not present in the known-bad hardening review bundle")
+    candidate = candidates[0]
+    decision_packet = review_bundle.get("operator_decision_packet") or {}
+    if candidate.get("active_frontier_promotion") or review_bundle.get("active_frontier_promotion"):
+        raise PermissionError("known-bad hardening follow-on packets require inactive frontier state")
+    pipeline_evidence = candidate.get("pipeline_packet_evidence") or {}
+    proposal_id = pipeline_evidence.get("proposal_id")
+    promotion_packet_id = pipeline_evidence.get("packet_id")
+    if not proposal_id or not promotion_packet_id:
+        raise ValueError("follow-on review packet requires durable proposal and promotion packet evidence")
+    db_path = _kernel_db_path(resolved)
+    apply_schema(db_path, _repo_root() / "schemas" / "kernel.sql")
+    packet_seed = {
+        "candidate_id": candidate_id,
+        "operator_resolution": operator_resolution,
+        "proposal_id": proposal_id,
+        "promotion_packet_id": promotion_packet_id,
+    }
+    packet_hash = _stable_json_hash(packet_seed)
+    patch_packet_id = f"known-bad-follow-on-{packet_hash[:24]}"
+    artifact_path = _runtime_known_bad_hardening_follow_on_review_path(resolved)
+    blocked_autonomous_actions = [
+        "active_behavior_mutation",
+        "autonomous_patch_application",
+        "autonomous_harness_promotion",
+        "frontier_route_update",
+        "external_side_effect_reexecution",
+    ]
+    artifact_payload = {
+        "available": True,
+        "generated_at": _utc_now(),
+        "review_surface": "known_bad_hardening_manual_promotion_follow_on_review",
+        "candidate_id": candidate_id,
+        "skill": candidate.get("skill"),
+        "operator_resolution": operator_resolution,
+        "source_operator_decision_packet": decision_packet,
+        "source_review_bundle": {
+            "latest_pipeline_run_id": review_bundle.get("latest_pipeline_run_id"),
+            "operator_packet_ordering": review_bundle.get("operator_packet_ordering"),
+            "runtime_shadow_report_artifact_path": review_bundle.get("runtime_shadow_report_artifact_path"),
+            "self_improvement_snapshot_artifact_path": review_bundle.get("self_improvement_snapshot_artifact_path"),
+        },
+        "evidence_summary": {
+            "known_bad_block_rate": candidate.get("known_bad_block_rate"),
+            "regression_rate": candidate.get("regression_rate"),
+            "replay_lineage_status": candidate.get("replay_lineage_status"),
+            "side_effect_safety": candidate.get("side_effect_safety") or {},
+            "active_frontier_promotion": False,
+        },
+        "patch_packet": {
+            "patch_packet_id": patch_packet_id,
+            "proposal_id": proposal_id,
+            "promotion_packet_id": promotion_packet_id,
+            "target_ref": f"harness:{candidate_id}",
+            "changed_paths": ["harness_variants.py", "kernel/runtime_compat.py"],
+            "required_authority": "operator_gate",
+            "authority_effect": "review_only",
+            "status": "prepared",
+            "activation_effect": "none_until_separate_operator_gate",
+            "default_on_timeout": "keep_current_behavior",
+            "blocked_autonomous_actions": blocked_autonomous_actions,
+        },
+        "operator_next_steps": [
+            "Review this packet and the linked shadow evidence.",
+            "If still approved, prepare a separate human-reviewed code patch.",
+            "Run focused known-bad hardening, self-improvement, schema, and full regression tests before any later activation gate.",
+        ],
+        "live_controls_enabled": False,
+        "active_frontier_promotion": False,
+        "operator_gated": True,
+        "read_only_until_operator_patch_gate": True,
+    }
+    artifact_payload["artifact_path"] = str(artifact_path)
+    artifact_hash = _stable_json_hash(artifact_payload)
+    artifact_payload["artifact_hash"] = artifact_hash
+    _write_json_yaml(artifact_path, artifact_payload)
+
+    evidence_refs = [
+        f"artifact:{artifact_path}",
+        f"kernel:self_improvement/promotion_packets/{promotion_packet_id}",
+        f"kernel:self_improvement/proposals/{proposal_id}",
+        f"operator_resolution:{operator_resolution}/{candidate_id}",
+    ]
+    for ref in (
+        review_bundle.get("runtime_shadow_report_artifact_path"),
+        review_bundle.get("self_improvement_snapshot_artifact_path"),
+    ):
+        if ref:
+            evidence_refs.append(f"artifact:{ref}")
+    packet = SelfImprovementPatchReviewPacket(
+        patch_packet_id=patch_packet_id,
+        proposal_id=str(proposal_id),
+        promotion_packet_id=str(promotion_packet_id),
+        target_ref=f"harness:{candidate_id}",
+        patch_ref=f"artifact:{artifact_path}",
+        patch_hash=artifact_hash,
+        changed_paths=["harness_variants.py", "kernel/runtime_compat.py"],
+        apply_instructions=(
+            "Do not apply automatically. Treat this as an operator review packet; "
+            "a separate human-approved patch gate must create and apply any code change."
+        ),
+        verification_plan=(
+            "Before any later activation gate, rerun known-bad hardening shadow/report tests, "
+            "self-improvement replay/projection comparison, schema verification, and the full suite."
+        ),
+        rollback_ref="current_active_harness_frontier",
+        evidence_refs=evidence_refs,
+        blocked_autonomous_actions=blocked_autonomous_actions,
+        required_authority="operator_gate",
+        authority_effect="review_only",
+        status="prepared",
+    )
+    existing = _self_improvement_rows(db_path, "self_improvement_patch_review_packets", "created_at")
+    existing_packet = next((row for row in existing if row.get("patch_packet_id") == patch_packet_id), None)
+    if existing_packet is None:
+        store = KernelStore(db_path)
+        store.prepare_self_improvement_patch_review_packet(
+            self_improvement_command(
+                "self_improvement.patch_review.prepare",
+                patch_packet_id,
+                requested_by="operator",
+                requested_authority="operator_gate",
+                payload={
+                    "candidate_id": candidate_id,
+                    "operator_resolution": operator_resolution,
+                    "activation_effect": "none_until_separate_operator_gate",
+                },
+            ),
+            packet,
+        )
+    snapshot = _self_improvement_snapshot_payload(resolved, write_artifact=True)
+    patch_row = next(
+        (
+            row for row in snapshot.get("patch_review_packets", [])
+            if row.get("patch_packet_id") == patch_packet_id
+        ),
+        existing_packet,
+    )
+    return {
+        **artifact_payload,
+        "kernel_db_path": str(db_path),
+        "patch_review_packet": patch_row,
+        "self_improvement_snapshot_artifact_path": snapshot.get("artifact_path"),
+        "durable": patch_row is not None,
+        "live_controls_enabled": False,
+        "active_frontier_promotion": False,
     }
 
 
@@ -3100,6 +3340,11 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "--known-bad-hardening-operator-review",
             repo_root,
         ),
+        "known_bad_hardening_follow_on_review_command": _command_string(
+            config,
+            "--known-bad-hardening-follow-on-review",
+            repo_root,
+        ),
         "recovery_readiness_command": _command_string(config, "--recovery-readiness", repo_root),
         "hermes_adapter_readiness_command": _command_string(config, "--hermes-adapter-readiness", repo_root),
         "migration_readiness_command": _command_string(config, "--migration-readiness", repo_root),
@@ -3127,6 +3372,7 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "self_improvement_snapshot",
             "known_bad_hardening_shadow_report",
             "known_bad_hardening_operator_review",
+            "known_bad_hardening_follow_on_review",
         ],
     }
     local_provider_doc = {
@@ -3436,6 +3682,11 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
                 "--known-bad-hardening-operator-review",
                 root,
             ),
+            "known_bad_hardening_follow_on_review": _command_string(
+                resolved,
+                "--known-bad-hardening-follow-on-review",
+                root,
+            ),
             "mac_studio_day_one": _command_string(resolved, "--mac-studio-day-one", root),
             "recovery_readiness": _command_string(resolved, "--recovery-readiness", root),
             "hermes_adapter_readiness": _command_string(resolved, "--hermes-adapter-readiness", root),
@@ -3485,6 +3736,12 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
         resolved,
         root,
         "--known-bad-hardening-operator-review",
+    )
+    _write_launcher(
+        launcher_paths["known_bad_hardening_follow_on_review"],
+        resolved,
+        root,
+        "--known-bad-hardening-follow-on-review",
     )
     _write_launcher(launcher_paths["mac_studio_day_one"], resolved, root, "--mac-studio-day-one")
     _write_launcher(launcher_paths["recovery_readiness"], resolved, root, "--recovery-readiness")
@@ -6875,6 +7132,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--propose-best-harness-candidate", action="store_true", help="Create one constrained harness proposal from the top replay candidate")
     parser.add_argument("--known-bad-hardening-shadow-report", action="store_true", help="Prepare and print a shadow-only known-bad hardening evidence report")
     parser.add_argument("--known-bad-hardening-operator-review", action="store_true", help="Print the read-only operator review bundle for known-bad hardening shadow packets")
+    parser.add_argument("--known-bad-hardening-follow-on-review", action="store_true", help="Create a durable operator-gated follow-on review packet for an approved known-bad hardening candidate")
     parser.add_argument("--mac-studio-day-one", action="store_true", help="Generate the one-command Mac Studio rehearsal and handoff package")
     parser.add_argument("--recovery-readiness", action="store_true", help="Create or surface the read-only recovery-readiness packet")
     parser.add_argument("--hermes-adapter-readiness", action="store_true", help="Create or surface the read-only Hermes v0.13 adapter-readiness packet")
@@ -6902,6 +7160,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-name", default="local-default")
     parser.add_argument("--repo-root", default=None, help="Override the repository root used for profile installation")
     parser.add_argument("--skill-name", default=None, help="Optional skill filter for corpus export and harness candidate analysis")
+    parser.add_argument("--candidate-id", default="council:known_bad_hardening", help="Candidate id for operator-gated known-bad hardening follow-on review")
+    parser.add_argument("--operator-resolution", default="approve_for_manual_promotion_review", help="Operator resolution recorded for known-bad hardening follow-on review")
     parser.add_argument("--task-id", default="stage0-operator-workflow")
     parser.add_argument("--title", default="Operator workflow smoke test")
     parser.add_argument("--corpus-limit", type=int, default=200, help="How many source traces to export into the replay corpus artifact")
@@ -7177,6 +7437,17 @@ def _main_impl(
     if args.known_bad_hardening_operator_review:
         payload = known_bad_hardening_operator_review_bundle(
             config=config,
+            skill_name=args.skill_name,
+            limit=args.report_limit,
+        )
+        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+        return 0
+
+    if args.known_bad_hardening_follow_on_review:
+        payload = known_bad_hardening_follow_on_review_packet(
+            config=config,
+            candidate_id=args.candidate_id,
+            operator_resolution=args.operator_resolution,
             skill_name=args.skill_name,
             limit=args.report_limit,
         )
