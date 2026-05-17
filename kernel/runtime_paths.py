@@ -56,6 +56,9 @@ def _runtime_launcher_paths(config: IntegrationConfig) -> dict[str, Path]:
         "hermes_adapter_gauntlet": bin_dir / "hermes_adapter_gauntlet.sh",
         "first_live_project_packet": bin_dir / "first_live_project_packet.sh",
         "model_shadow_ops": bin_dir / "model_shadow_ops.sh",
+        "target_machine_validation_run_packet": bin_dir / "target_machine_validation_run_packet.sh",
+        "target_machine_evidence_check": bin_dir / "target_machine_evidence_check.sh",
+        "first_live_project_acceptance_check": bin_dir / "first_live_project_acceptance_check.sh",
         "self_improvement_evidence_pipeline": bin_dir / "self_improvement_evidence_pipeline.sh",
         "self_improvement_snapshot": bin_dir / "self_improvement_snapshot.sh",
         "gateway": bin_dir / "start_gateway.sh",
@@ -197,6 +200,18 @@ def _runtime_first_live_project_packet_path(config: IntegrationConfig) -> Path:
 
 def _runtime_model_shadow_ops_path(config: IntegrationConfig) -> Path:
     return runtime_support_artifact_paths(config)["model_shadow_ops"]
+
+
+def _runtime_target_machine_validation_run_packet_path(config: IntegrationConfig) -> Path:
+    return runtime_support_artifact_paths(config)["target_machine_validation_run_packet"]
+
+
+def _runtime_target_machine_evidence_check_path(config: IntegrationConfig) -> Path:
+    return runtime_support_artifact_paths(config)["target_machine_evidence_check"]
+
+
+def _runtime_first_live_project_acceptance_check_path(config: IntegrationConfig) -> Path:
+    return runtime_support_artifact_paths(config)["first_live_project_acceptance_check"]
 
 
 def _runtime_self_improvement_snapshot_path(config: IntegrationConfig) -> Path:

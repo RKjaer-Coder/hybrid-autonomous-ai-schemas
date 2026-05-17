@@ -504,7 +504,10 @@ from kernel.runtime_paths import (
     _runtime_pre_live_mission_control_path,
     _runtime_hermes_adapter_gauntlet_path,
     _runtime_first_live_project_packet_path,
+    _runtime_first_live_project_acceptance_check_path,
     _runtime_model_shadow_ops_path,
+    _runtime_target_machine_evidence_check_path,
+    _runtime_target_machine_validation_run_packet_path,
     _runtime_profile_config_path,
     _runtime_profile_dir,
     _runtime_profile_manifest_path,
@@ -1978,6 +1981,38 @@ def _write_model_shadow_ops_artifact(config: IntegrationConfig, payload: dict[st
     _write_json_yaml(_runtime_model_shadow_ops_path(config), artifact)
 
 
+def _write_target_machine_validation_run_packet_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
+    artifact = dict(payload)
+    artifact.setdefault("artifact_path", str(_runtime_target_machine_validation_run_packet_path(config)))
+    artifact.setdefault("live_controls_enabled", False)
+    _write_json_yaml(_runtime_target_machine_validation_run_packet_path(config), artifact)
+
+
+def _write_target_machine_evidence_check_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
+    artifact = dict(payload)
+    artifact.setdefault("artifact_path", str(_runtime_target_machine_evidence_check_path(config)))
+    artifact.setdefault("live_controls_enabled", False)
+    _write_json_yaml(_runtime_target_machine_evidence_check_path(config), artifact)
+
+
+def _write_first_live_project_acceptance_check_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
+    artifact = dict(payload)
+    artifact.setdefault("artifact_path", str(_runtime_first_live_project_acceptance_check_path(config)))
+    artifact.setdefault("live_controls_enabled", False)
+    _write_json_yaml(_runtime_first_live_project_acceptance_check_path(config), artifact)
+
+
+def _file_sha256(path: Path) -> str | None:
+    try:
+        with path.open("rb") as handle:
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
 def _status_rank(status: str) -> int:
     return {
         "blocked": 0,
@@ -2077,6 +2112,74 @@ def pre_live_mission_control(
     return payload
 
 
+def _adapter_proof_record_status(evidence_status: str | None) -> str:
+    if evidence_status == "present":
+        return "ready_for_operator_review"
+    if evidence_status == "stale":
+        return "fail_closed_stale_evidence"
+    if evidence_status == "ambiguous":
+        return "fail_closed_ambiguous_evidence"
+    return "fail_closed_missing_evidence"
+
+
+def _adapter_surface_proof_result(check: dict[str, Any], *, evidence_status: str | None = None) -> dict[str, Any]:
+    status = _adapter_proof_record_status(evidence_status)
+    missing = list(check.get("kernel_evidence", [])) if status == "fail_closed_missing_evidence" else []
+    return {
+        "proof_id": f"surface-proof:{check['surface']}",
+        "surface": check["surface"],
+        "check_id": check["check_id"],
+        "hermes_input": check.get("hermes_input"),
+        "required_kernel_evidence": list(check.get("kernel_evidence", [])),
+        "evidence_status": evidence_status or "missing",
+        "missing_evidence": missing,
+        "ambiguous_evidence": evidence_status == "ambiguous",
+        "stale_evidence": evidence_status == "stale",
+        "status": status,
+        "fail_closed": status.startswith("fail_closed"),
+        "authority_effect": check.get("authority_effect"),
+        "live_controls_enabled": False,
+        "activation_effect": "none",
+    }
+
+
+def _adapter_boundary_proof_result(case: dict[str, Any], *, evidence_status: str | None = None) -> dict[str, Any]:
+    status = _adapter_proof_record_status(evidence_status)
+    missing = list(case.get("missing_evidence", [])) if status == "fail_closed_missing_evidence" else []
+    return {
+        "proof_id": f"authority-boundary-proof:{case['boundary_case_id']}",
+        "boundary_case_id": case["boundary_case_id"],
+        "attempted_action": case["attempted_action"],
+        "expected_verdict": case["expected_verdict"],
+        "required_kernel_guard": case["required_kernel_guard"],
+        "evidence_status": evidence_status or "missing",
+        "missing_evidence": missing,
+        "ambiguous_evidence": evidence_status == "ambiguous",
+        "stale_evidence": evidence_status == "stale",
+        "status": status,
+        "fail_closed": status.startswith("fail_closed"),
+        "live_controls_enabled": False,
+        "activation_effect": "none",
+    }
+
+
+def _adapter_proof_results(matrix: list[dict[str, Any]], cases: list[dict[str, Any]]) -> dict[str, Any]:
+    surface_results = [_adapter_surface_proof_result(item) for item in matrix]
+    boundary_results = [_adapter_boundary_proof_result(item) for item in cases]
+    fail_closed_count = sum(1 for item in [*surface_results, *boundary_results] if item["fail_closed"])
+    return {
+        "surface_results": surface_results,
+        "authority_boundary_results": boundary_results,
+        "summary": {
+            "surface_result_count": len(surface_results),
+            "authority_boundary_result_count": len(boundary_results),
+            "fail_closed_result_count": fail_closed_count,
+            "missing_stale_or_ambiguous_evidence_blocks_live_authority": True,
+            "live_controls_enabled": False,
+        },
+    }
+
+
 def hermes_adapter_gauntlet(
     config: IntegrationConfig | None = None,
     *,
@@ -2100,6 +2203,7 @@ def hermes_adapter_gauntlet(
                 "status": "pending_target_machine_evidence",
                 "kernel_evidence": list(check["kernel_evidence"]),
                 "authority_effect": check["authority_effect"],
+                "hermes_input": check["hermes_input"],
                 "live_controls_enabled": False,
                 "activation_effect": "none_until_live_evidence_reconciles",
             }
@@ -2112,6 +2216,7 @@ def hermes_adapter_gauntlet(
                 "attempted_action": case["attempted_action"],
                 "expected_verdict": case["expected_verdict"],
                 "required_kernel_guard": case["required_kernel_guard"],
+                "missing_evidence": list(case.get("missing_evidence", [])),
                 "status": "repo_fixture_defined",
                 "live_controls_enabled": False,
             }
@@ -2131,6 +2236,7 @@ def hermes_adapter_gauntlet(
         },
         "surface_matrix": matrix,
         "authority_boundary_cases": adversarial,
+        "proof_results": _adapter_proof_results(matrix, adversarial),
         "readiness_packet": readiness.get("packet"),
         "readiness_artifact_path": readiness.get("artifact_path"),
         "pass_rule": harness["pass_rule"],
@@ -2303,6 +2409,339 @@ def model_shadow_ops(
     }
     payload["packet_hash"] = _stable_json_hash({k: v for k, v in payload.items() if k != "packet_hash"})
     _write_model_shadow_ops_artifact(resolved, payload)
+    return payload
+
+
+def target_machine_validation_run_packet(
+    config: IntegrationConfig | None = None,
+    *,
+    repo_root: str | None = None,
+    as_of: str | None = None,
+    candidate_limit: int = 3,
+) -> dict[str, Any]:
+    """Create the concrete target-machine validation run packet and evidence manifest."""
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    root = Path(repo_root).expanduser().resolve() if repo_root else _repo_root()
+    timestamp = as_of or _utc_now()
+    mission = pre_live_mission_control(
+        resolved,
+        repo_root=str(root),
+        as_of=timestamp,
+        candidate_limit=candidate_limit,
+    )
+    adapter = mission["components"]["hermes_adapter_gauntlet"]
+    project = mission["components"]["first_live_project"]
+    shadow = mission["components"]["model_shadow_ops"]
+    readiness = mission["components"]["readiness_suite"]
+    patch_gate = mission["components"]["known_bad_manual_patch_gate"]
+    generated_artifacts = [
+        ("pre_live_mission_control", _runtime_pre_live_mission_control_path(resolved), mission.get("packet_hash")),
+        ("hermes_adapter_gauntlet", _runtime_hermes_adapter_gauntlet_path(resolved), adapter.get("packet_hash")),
+        ("first_live_project_packet", _runtime_first_live_project_packet_path(resolved), project.get("packet_hash")),
+        ("model_shadow_ops", _runtime_model_shadow_ops_path(resolved), shadow.get("packet_hash")),
+    ]
+    evidence_manifest = []
+    for name, path, packet_hash in generated_artifacts:
+        evidence_manifest.append(
+            {
+                "name": name,
+                "path": str(path),
+                "exists": path.is_file(),
+                "sha256": _file_sha256(path),
+                "packet_hash": packet_hash,
+                "required_before_live_authority": True,
+            }
+        )
+    run_steps = [
+        {
+            "step": 1,
+            "name": "repo_metadata_snapshot",
+            "command": "git status --short --branch && git rev-parse HEAD && git rev-parse origin/main",
+            "required_evidence": ["exact_local_commit_or_recorded_drift"],
+            "fail_closed_on_missing_evidence": True,
+        },
+        {
+            "step": 2,
+            "name": "handoff_checksum_verification",
+            "command": "shasum -a 256 -c SHA256SUMS",
+            "required_evidence": ["verified_pre_live_bundle_checksums", "verified_pre_hermes_bundle_checksums"],
+            "fail_closed_on_missing_evidence": True,
+        },
+        {
+            "step": 3,
+            "name": "recovery_and_migration_readiness",
+            "command": _command_string(resolved, "--readiness-suite", str(root)),
+            "required_evidence": [
+                "kernel_db_restore_verified",
+                "artifact_descriptor_verified",
+                "payload_access_receipts_verified",
+                "projection_checks_verified",
+            ],
+            "fail_closed_on_missing_evidence": True,
+        },
+        {
+            "step": 4,
+            "name": "hermes_adapter_gauntlet",
+            "command": _command_string(resolved, "--hermes-adapter-gauntlet", str(root)),
+            "required_evidence": ["ten_surface_matrix", "authority_boundary_cases"],
+            "fail_closed_on_missing_evidence": True,
+        },
+        {
+            "step": 5,
+            "name": "pre_live_mission_control",
+            "command": _command_string(resolved, "--pre-live-mission-control", str(root)),
+            "required_evidence": ["go_no_go_ready_for_target_machine_validation", "live_controls_disabled"],
+            "fail_closed_on_missing_evidence": True,
+        },
+        {
+            "step": 6,
+            "name": "model_shadow_ops",
+            "command": _command_string(resolved, "--model-shadow-ops", str(root)),
+            "required_evidence": ["seed_task_classes_shadow_only", "operator_gate_required_for_promotion"],
+            "fail_closed_on_missing_evidence": True,
+        },
+        {
+            "step": 7,
+            "name": "first_live_project_packet",
+            "command": _command_string(resolved, "--first-live-project-packet", str(root)),
+            "required_evidence": ["local_artifact_only", "operator_gate_before_external_delivery"],
+            "fail_closed_on_missing_evidence": True,
+        },
+        {
+            "step": 8,
+            "name": "known_bad_manual_patch_gate_review",
+            "command": _command_string(resolved, "--known-bad-hardening-operator-patch-gate", str(root)),
+            "required_evidence": ["manual_patch_gate_packet", "rollback_ref_before_activation"],
+            "fail_closed_on_missing_evidence": True,
+        },
+        {
+            "step": 9,
+            "name": "preserve_target_machine_outputs",
+            "command": "copy generated JSON outputs and run shasum -a 256 > SHA256SUMS",
+            "required_evidence": ["target_machine_artifact_bundle", "sha256sums"],
+            "fail_closed_on_missing_evidence": True,
+        },
+    ]
+    blockers = []
+    if mission.get("go_no_go") == "blocked":
+        blockers.append("pre_live_mission_control_blocked")
+    if not readiness.get("ok"):
+        blockers.append("readiness_suite_not_ok")
+    if not adapter["summary"].get("all_surfaces_covered"):
+        blockers.append("adapter_surface_coverage_incomplete")
+    if shadow["summary"].get("live_route_mutation_enabled"):
+        blockers.append("model_shadow_ops_allows_live_route_mutation")
+    if project["summary"].get("external_commitments_allowed"):
+        blockers.append("first_live_project_allows_external_commitments")
+    if any(not item["exists"] or item["sha256"] is None for item in evidence_manifest):
+        blockers.append("missing_generated_evidence_artifact")
+    packet = {
+        "available": True,
+        "generated_at": timestamp,
+        "packet_name": "target_machine_validation_run_packet",
+        "status": "ready_for_target_machine_execution" if not blockers else "blocked",
+        "repo_root": str(root),
+        "run_steps": run_steps,
+        "evidence_manifest": evidence_manifest,
+        "component_summary": {
+            "pre_live_mission_control": mission.get("go_no_go"),
+            "readiness_suite_ok": bool(readiness.get("ok")),
+            "adapter_surface_count": adapter["summary"]["surface_count"],
+            "adapter_authority_boundary_case_count": adapter["summary"]["authority_boundary_case_count"],
+            "first_live_project_phase_count": project["summary"]["phase_count"],
+            "model_shadow_seed_task_class_count": shadow["summary"]["seed_task_class_count"],
+            "known_bad_manual_patch_gate_available": bool(patch_gate.get("available")),
+        },
+        "blockers": blockers,
+        "fail_closed_controls": [
+            "live_hermes_attachment",
+            "dashboard_write_controls",
+            "paid_provider_calls",
+            "customer_visible_commitments",
+            "model_route_promotion",
+            "autonomous_patch_application",
+            "side_effect_replay",
+        ],
+        "operator_signoffs_required": [
+            "target_machine_environment_confirmed",
+            "handoff_checksums_verified",
+            "readiness_suite_passed",
+            "adapter_gauntlet_evidence_preserved",
+            "first_live_project_local_artifact_reviewed",
+            "known_bad_patch_gate_reviewed_if_used",
+        ],
+        "artifact_path": str(_runtime_target_machine_validation_run_packet_path(resolved)),
+        "live_controls_enabled": False,
+        "activation_effect": "none_until_target_machine_evidence_and_operator_gates_pass",
+    }
+    packet["packet_hash"] = _stable_json_hash({k: v for k, v in packet.items() if k != "packet_hash"})
+    _write_target_machine_validation_run_packet_artifact(resolved, packet)
+    return packet
+
+
+def _parse_sha256sums(path: Path) -> dict[str, str]:
+    entries: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return entries
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        parts = stripped.split(maxsplit=1)
+        if len(parts) != 2 or not re.fullmatch(r"[0-9a-fA-F]{64}", parts[0]):
+            continue
+        entries[Path(parts[1].lstrip("*")).name] = parts[0].lower()
+    return entries
+
+
+def _bundle_json(path: Path) -> dict[str, Any]:
+    parsed = _read_json_yaml(path)
+    return parsed if parsed is not None else {}
+
+
+def _bundle_evidence_records(bundle_dir: Path) -> dict[str, dict[str, Any]]:
+    records_path = bundle_dir / "evidence_records.json"
+    parsed = _bundle_json(records_path)
+    records = parsed.get("evidence", parsed)
+    if not isinstance(records, dict):
+        return {}
+    return {str(key): value for key, value in records.items() if isinstance(value, dict)}
+
+
+def target_machine_evidence_check(
+    config: IntegrationConfig | None = None,
+    *,
+    bundle_dir: str,
+    run_packet_path: str | None = None,
+    as_of: str | None = None,
+) -> dict[str, Any]:
+    """Validate preserved target-machine output without enabling live controls."""
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    bundle = Path(bundle_dir).expanduser().resolve()
+    packet_path = Path(run_packet_path).expanduser().resolve() if run_packet_path else bundle / "target_machine_validation_run_packet.json"
+    sha_path = bundle / "SHA256SUMS"
+    packet = _bundle_json(packet_path)
+    sha_entries = _parse_sha256sums(sha_path)
+    required_evidence = sorted(
+        {
+            str(item)
+            for step in packet.get("run_steps", [])
+            if isinstance(step, dict)
+            for item in step.get("required_evidence", [])
+        }
+    )
+    evidence_records = _bundle_evidence_records(bundle)
+    missing_required_evidence = [item for item in required_evidence if item not in evidence_records and not (bundle / "evidence" / f"{item}.json").is_file()]
+    ambiguous_required_evidence = [
+        item
+        for item, record in evidence_records.items()
+        if item in required_evidence
+        and (record.get("status") in {"ambiguous", "stale"} or record.get("ambiguous") is True)
+    ]
+    artifact_results = []
+    for item in packet.get("evidence_manifest", []):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or Path(str(item.get("path", ""))).stem)
+        basename = Path(str(item.get("path") or f"{name}.json")).name
+        bundle_path = bundle / basename
+        actual_hash = _file_sha256(bundle_path)
+        manifest_hash = sha_entries.get(basename)
+        expected_hash = item.get("sha256")
+        artifact_results.append(
+            {
+                "name": name,
+                "filename": basename,
+                "exists": bundle_path.is_file(),
+                "sha256": actual_hash,
+                "sha256sum_entry": manifest_hash,
+                "run_packet_sha256": expected_hash,
+                "matches_sha256sums": bool(actual_hash and manifest_hash and actual_hash == manifest_hash),
+                "matches_run_packet_manifest": bool(actual_hash and expected_hash and actual_hash == expected_hash),
+                "required_before_live_authority": bool(item.get("required_before_live_authority")),
+            }
+        )
+    blockers = []
+    if not bundle.is_dir():
+        blockers.append("target_machine_artifact_bundle_missing")
+    if not packet:
+        blockers.append("target_machine_run_packet_missing_or_invalid")
+    if not sha_entries:
+        blockers.append("sha256sums_missing_or_empty")
+    if missing_required_evidence:
+        blockers.append("required_evidence_missing")
+    if ambiguous_required_evidence:
+        blockers.append("required_evidence_stale_or_ambiguous")
+    if any(not item["exists"] for item in artifact_results):
+        blockers.append("manifest_artifact_missing")
+    if any(not item["matches_sha256sums"] for item in artifact_results):
+        blockers.append("sha256sum_mismatch")
+    if any(not item["matches_run_packet_manifest"] for item in artifact_results):
+        blockers.append("run_packet_manifest_hash_mismatch")
+    if packet.get("live_controls_enabled") is not False:
+        blockers.append("run_packet_live_controls_not_disabled")
+    status = "validated_preserved_target_machine_bundle" if not blockers else "blocked"
+    payload = {
+        "available": True,
+        "generated_at": as_of or _utc_now(),
+        "packet_name": "target_machine_evidence_check",
+        "status": status,
+        "bundle_dir": str(bundle),
+        "run_packet_path": str(packet_path),
+        "sha256sums_path": str(sha_path),
+        "required_evidence": required_evidence,
+        "missing_required_evidence": missing_required_evidence,
+        "ambiguous_required_evidence": ambiguous_required_evidence,
+        "artifact_results": artifact_results,
+        "blockers": blockers,
+        "live_controls_enabled": False,
+        "activation_effect": "none",
+        "artifact_path": str(_runtime_target_machine_evidence_check_path(resolved)),
+    }
+    payload["packet_hash"] = _stable_json_hash({k: v for k, v in payload.items() if k != "packet_hash"})
+    _write_target_machine_evidence_check_artifact(resolved, payload)
+    return payload
+
+
+def first_live_project_acceptance_check(
+    config: IntegrationConfig | None = None,
+    *,
+    repo_root: str | None = None,
+    packet_path: str | None = None,
+    as_of: str | None = None,
+) -> dict[str, Any]:
+    """Check the first-live-project packet remains local-only and gate-bound."""
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    root = Path(repo_root).expanduser().resolve() if repo_root else _repo_root()
+    packet = _bundle_json(Path(packet_path).expanduser().resolve()) if packet_path else first_live_project_packet(resolved, repo_root=str(root), as_of=as_of)
+    workflow = packet.get("workflow", [])
+    dry_run = packet.get("dry_run", {})
+    close_path = dry_run.get("close_path", {}) if isinstance(dry_run, dict) else {}
+    checks = {
+        "local_only_artifact_output": bool(packet.get("summary", {}).get("local_artifact_only")) and packet.get("artifact_contract", {}).get("external_delivery") == "prepared_intent_only_until_operator_gate",
+        "operator_gate_presence": any(item.get("operator_gate_required") for item in workflow if isinstance(item, dict)),
+        "feedback_ingestion": bool(close_path.get("feedback_ingested")) and bool(close_path.get("close_or_continue_requires_operator_gate")),
+        "no_external_side_effect_execution": all(item.get("external_side_effects_executed") is False for item in workflow if isinstance(item, dict)),
+        "live_controls_disabled": packet.get("live_controls_enabled") is False,
+        "external_commitments_disabled": packet.get("summary", {}).get("external_commitments_allowed") is False,
+    }
+    blockers = [name for name, ok in checks.items() if not ok]
+    payload = {
+        "available": True,
+        "generated_at": as_of or _utc_now(),
+        "packet_name": "first_live_project_acceptance_check",
+        "status": "accepted_pre_live_local_only" if not blockers else "blocked",
+        "fixture_id": packet.get("fixture_id"),
+        "checks": checks,
+        "blockers": blockers,
+        "live_controls_enabled": False,
+        "activation_effect": "none",
+        "artifact_path": str(_runtime_first_live_project_acceptance_check_path(resolved)),
+    }
+    payload["packet_hash"] = _stable_json_hash({k: v for k, v in payload.items() if k != "packet_hash"})
+    _write_first_live_project_acceptance_check_artifact(resolved, payload)
     return payload
 
 
@@ -4026,6 +4465,17 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
         "hermes_adapter_gauntlet_command": _command_string(config, "--hermes-adapter-gauntlet", repo_root),
         "first_live_project_packet_command": _command_string(config, "--first-live-project-packet", repo_root),
         "model_shadow_ops_command": _command_string(config, "--model-shadow-ops", repo_root),
+        "target_machine_validation_run_packet_command": _command_string(
+            config,
+            "--target-machine-validation-run-packet",
+            repo_root,
+        ),
+        "target_machine_evidence_check_command": _command_string(config, "--target-machine-evidence-check", repo_root),
+        "first_live_project_acceptance_check_command": _command_string(
+            config,
+            "--first-live-project-acceptance-check",
+            repo_root,
+        ),
         "self_improvement_evidence_pipeline_command": _command_string(
             config,
             "--self-improvement-evidence-pipeline",
@@ -4048,6 +4498,9 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "hermes_adapter_gauntlet",
             "first_live_project_packet",
             "model_shadow_ops",
+            "target_machine_validation_run_packet",
+            "target_machine_evidence_check",
+            "first_live_project_acceptance_check",
             "self_improvement_evidence_pipeline",
             "self_improvement_snapshot",
             "known_bad_hardening_shadow_report",
@@ -4255,6 +4708,33 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "live_controls_enabled": False,
         },
     )
+    _write_target_machine_validation_run_packet_artifact(
+        config,
+        {
+            "available": False,
+            "status": "NOT_RUN",
+            "command": _command_string(config, "--target-machine-validation-run-packet", repo_root),
+            "live_controls_enabled": False,
+        },
+    )
+    _write_target_machine_evidence_check_artifact(
+        config,
+        {
+            "available": False,
+            "status": "NOT_RUN",
+            "command": _command_string(config, "--target-machine-evidence-check", repo_root),
+            "live_controls_enabled": False,
+        },
+    )
+    _write_first_live_project_acceptance_check_artifact(
+        config,
+        {
+            "available": False,
+            "status": "NOT_RUN",
+            "command": _command_string(config, "--first-live-project-acceptance-check", repo_root),
+            "live_controls_enabled": False,
+        },
+    )
     _write_self_improvement_snapshot_artifact(
         config,
         {
@@ -4363,6 +4843,9 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
         "hermes_adapter_gauntlet_path": str(_runtime_hermes_adapter_gauntlet_path(resolved)),
         "first_live_project_packet_path": str(_runtime_first_live_project_packet_path(resolved)),
         "model_shadow_ops_path": str(_runtime_model_shadow_ops_path(resolved)),
+        "target_machine_validation_run_packet_path": str(_runtime_target_machine_validation_run_packet_path(resolved)),
+        "target_machine_evidence_check_path": str(_runtime_target_machine_evidence_check_path(resolved)),
+        "first_live_project_acceptance_check_path": str(_runtime_first_live_project_acceptance_check_path(resolved)),
         "self_improvement_snapshot_path": str(_runtime_self_improvement_snapshot_path(resolved)),
         "dashboard": {
             "mode": "hermes_native",
@@ -4428,6 +4911,17 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
             "hermes_adapter_gauntlet": _command_string(resolved, "--hermes-adapter-gauntlet", root),
             "first_live_project_packet": _command_string(resolved, "--first-live-project-packet", root),
             "model_shadow_ops": _command_string(resolved, "--model-shadow-ops", root),
+            "target_machine_validation_run_packet": _command_string(
+                resolved,
+                "--target-machine-validation-run-packet",
+                root,
+            ),
+            "target_machine_evidence_check": _command_string(resolved, "--target-machine-evidence-check", root),
+            "first_live_project_acceptance_check": _command_string(
+                resolved,
+                "--first-live-project-acceptance-check",
+                root,
+            ),
             "self_improvement_evidence_pipeline": _command_string(resolved, "--self-improvement-evidence-pipeline", root),
             "self_improvement_snapshot": _command_string(resolved, "--self-improvement-snapshot", root),
             "milestone_status": _command_string(resolved, "--milestone-status", root),
@@ -4500,6 +4994,19 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
     _write_launcher(launcher_paths["hermes_adapter_gauntlet"], resolved, root, "--hermes-adapter-gauntlet")
     _write_launcher(launcher_paths["first_live_project_packet"], resolved, root, "--first-live-project-packet")
     _write_launcher(launcher_paths["model_shadow_ops"], resolved, root, "--model-shadow-ops")
+    _write_launcher(
+        launcher_paths["target_machine_validation_run_packet"],
+        resolved,
+        root,
+        "--target-machine-validation-run-packet",
+    )
+    _write_launcher(launcher_paths["target_machine_evidence_check"], resolved, root, "--target-machine-evidence-check")
+    _write_launcher(
+        launcher_paths["first_live_project_acceptance_check"],
+        resolved,
+        root,
+        "--first-live-project-acceptance-check",
+    )
     _write_launcher(
         launcher_paths["self_improvement_evidence_pipeline"],
         resolved,
@@ -4645,6 +5152,9 @@ def doctor_runtime(
         "hermes_adapter_gauntlet": _runtime_hermes_adapter_gauntlet_path(resolved).is_file(),
         "first_live_project_packet": _runtime_first_live_project_packet_path(resolved).is_file(),
         "model_shadow_ops": _runtime_model_shadow_ops_path(resolved).is_file(),
+        "target_machine_validation_run_packet": _runtime_target_machine_validation_run_packet_path(resolved).is_file(),
+        "target_machine_evidence_check": _runtime_target_machine_evidence_check_path(resolved).is_file(),
+        "first_live_project_acceptance_check": _runtime_first_live_project_acceptance_check_path(resolved).is_file(),
         "self_improvement_snapshot": _runtime_self_improvement_snapshot_path(resolved).is_file(),
         "bootstrap_launcher": launcher_paths["bootstrap"].is_file(),
         "bootstrap_stack_launcher": launcher_paths["bootstrap_stack"].is_file(),
@@ -4668,6 +5178,9 @@ def doctor_runtime(
         "hermes_adapter_gauntlet_launcher": launcher_paths["hermes_adapter_gauntlet"].is_file(),
         "first_live_project_packet_launcher": launcher_paths["first_live_project_packet"].is_file(),
         "model_shadow_ops_launcher": launcher_paths["model_shadow_ops"].is_file(),
+        "target_machine_validation_run_packet_launcher": launcher_paths["target_machine_validation_run_packet"].is_file(),
+        "target_machine_evidence_check_launcher": launcher_paths["target_machine_evidence_check"].is_file(),
+        "first_live_project_acceptance_check_launcher": launcher_paths["first_live_project_acceptance_check"].is_file(),
         "self_improvement_evidence_pipeline_launcher": launcher_paths["self_improvement_evidence_pipeline"].is_file(),
         "self_improvement_snapshot_launcher": launcher_paths["self_improvement_snapshot"].is_file(),
         "gateway_launcher": launcher_paths["gateway"].is_file(),
@@ -7910,6 +8423,21 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--first-live-project-packet", action="store_true", help="Create the productized first-live-project handoff packet")
     parser.add_argument("--model-shadow-ops", action="store_true", help="Create the seed Model Intelligence shadow-ops packet")
     parser.add_argument(
+        "--target-machine-validation-run-packet",
+        action="store_true",
+        help="Create the concrete target-machine validation run packet and evidence manifest",
+    )
+    parser.add_argument(
+        "--target-machine-evidence-check",
+        action="store_true",
+        help="Validate a preserved target-machine artifact bundle against the run packet and SHA-256 manifest",
+    )
+    parser.add_argument(
+        "--first-live-project-acceptance-check",
+        action="store_true",
+        help="Validate the first-live-project packet stays local-only, operator-gated, and side-effect free",
+    )
+    parser.add_argument(
         "--self-improvement-evidence-pipeline",
         action="store_true",
         help="Convert readiness/replay/commercial/model/harness signals into governed self-improvement evidence packets",
@@ -7929,6 +8457,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--smoke-query", default=None, help="Override the readiness chat prompt used by --readiness")
     parser.add_argument("--model-name", default="local-default")
     parser.add_argument("--repo-root", default=None, help="Override the repository root used for profile installation")
+    parser.add_argument("--bundle-dir", default=None, help="Preserved target-machine artifact bundle for evidence checks")
+    parser.add_argument("--run-packet-path", default=None, help="Target-machine validation run packet path for evidence checks")
+    parser.add_argument("--first-live-project-packet-path", default=None, help="First-live-project packet path for acceptance checks")
     parser.add_argument("--skill-name", default=None, help="Optional skill filter for corpus export and harness candidate analysis")
     parser.add_argument("--candidate-id", default="council:known_bad_hardening", help="Candidate id for operator-gated known-bad hardening follow-on review")
     parser.add_argument("--operator-resolution", default="approve_for_manual_promotion_review", help="Operator resolution recorded for known-bad hardening follow-on review")
@@ -8348,6 +8879,35 @@ def _main_impl(
         )
         print(json.dumps(payload, indent=2, sort_keys=True, default=str))
         return 0
+
+    if args.target_machine_validation_run_packet:
+        payload = target_machine_validation_run_packet(
+            config=config,
+            repo_root=args.repo_root,
+            candidate_limit=args.report_limit,
+        )
+        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+        return 0 if payload["status"] != "blocked" else 1
+
+    if args.target_machine_evidence_check:
+        if not args.bundle_dir:
+            parser.error("--target-machine-evidence-check requires --bundle-dir")
+        payload = target_machine_evidence_check(
+            config=config,
+            bundle_dir=args.bundle_dir,
+            run_packet_path=args.run_packet_path,
+        )
+        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+        return 0 if payload["status"] != "blocked" else 1
+
+    if args.first_live_project_acceptance_check:
+        payload = first_live_project_acceptance_check(
+            config=config,
+            repo_root=args.repo_root,
+            packet_path=args.first_live_project_packet_path,
+        )
+        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+        return 0 if payload["status"] != "blocked" else 1
 
     if args.self_improvement_evidence_pipeline:
         payload = self_improvement_evidence_pipeline(
