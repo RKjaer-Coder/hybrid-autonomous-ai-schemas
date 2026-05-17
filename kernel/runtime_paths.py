@@ -44,7 +44,9 @@ def _runtime_launcher_paths(config: IntegrationConfig) -> dict[str, Path]:
         "analyze_harness_candidates": bin_dir / "analyze_harness_candidates.sh",
         "propose_best_harness_candidate": bin_dir / "propose_best_harness_candidate.sh",
         "known_bad_hardening_operator_review": bin_dir / "known_bad_hardening_operator_review.sh",
+        "known_bad_hardening_operator_review_summary": bin_dir / "known_bad_hardening_operator_review_summary.sh",
         "known_bad_hardening_follow_on_review": bin_dir / "known_bad_hardening_follow_on_review.sh",
+        "known_bad_hardening_operator_patch_gate": bin_dir / "known_bad_hardening_operator_patch_gate.sh",
         "mac_studio_day_one": bin_dir / "mac_studio_day_one.sh",
         "recovery_readiness": bin_dir / "recovery_readiness.sh",
         "hermes_adapter_readiness": bin_dir / "hermes_adapter_readiness.sh",
@@ -147,6 +149,14 @@ def _runtime_harness_candidate_report_path(config: IntegrationConfig) -> Path:
 
 def _runtime_known_bad_hardening_follow_on_review_path(config: IntegrationConfig) -> Path:
     return runtime_support_artifact_paths(config)["known_bad_hardening_follow_on_review"]
+
+
+def _runtime_known_bad_hardening_operator_review_summary_path(config: IntegrationConfig) -> Path:
+    return runtime_support_artifact_paths(config)["known_bad_hardening_operator_review_summary"]
+
+
+def _runtime_known_bad_hardening_operator_patch_gate_path(config: IntegrationConfig) -> Path:
+    return runtime_support_artifact_paths(config)["known_bad_hardening_operator_patch_gate"]
 
 
 def _runtime_mac_studio_day_one_handoff_path(config: IntegrationConfig) -> Path:

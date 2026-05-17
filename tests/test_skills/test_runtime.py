@@ -5,6 +5,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
+import pytest
+
 from harness_variants import HarnessVariantManager
 from kernel import KernelStore
 from runtime_control import RuntimeControlManager
@@ -25,7 +27,9 @@ from skills.runtime import (
     hermes_adapter_readiness,
     install_runtime_profile,
     known_bad_hardening_follow_on_review_packet,
+    known_bad_hardening_operator_patch_gate,
     known_bad_hardening_operator_review_bundle,
+    known_bad_hardening_operator_review_summary,
     known_bad_hardening_shadow_report,
     make_session_context,
     main as runtime_main,
@@ -1557,6 +1561,205 @@ def test_known_bad_hardening_follow_on_review_packet_is_durable_and_inert(tmp_pa
     assert traces.frontier(skill_name="council") == before_frontier == []
     snapshot = self_improvement_snapshot(cfg)
     assert snapshot["summary"]["patch_review_packet_count"] == 1
+
+
+def test_known_bad_hardening_operator_summary_and_patch_gate_are_manual_only(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+    prepare_runtime_directories(cfg)
+    require_runtime_databases(cfg)
+    traces = HarnessVariantManager(str(tmp_path / "data" / "telemetry.db"))
+    traces.log_skill_action_trace(
+        task_id="council-pass",
+        role="council_contract",
+        skill_name="council",
+        action_name="deliberate",
+        intent_goal="safe council request",
+        action_payload={"ok": True},
+        context_assembled="council policy context",
+        judge_verdict="PASS",
+        outcome_score=0.9,
+        created_at="2026-05-17T13:00:00+00:00",
+    )
+    traces.log_skill_action_trace(
+        task_id="council-bad",
+        role="council_contract",
+        skill_name="council",
+        action_name="deliberate",
+        intent_goal="unsafe council request",
+        action_payload={"ok": False},
+        context_assembled="council policy context",
+        judge_verdict="FAIL",
+        outcome_score=0.0,
+        training_eligible=False,
+        retention_class="FAILURE_AUDIT",
+        created_at="2026-05-17T13:01:00+00:00",
+    )
+    known_bad_hardening_shadow_report(
+        cfg,
+        repo_root=str(Path.cwd()),
+        skill_name="council",
+        sample_size=10,
+        as_of="2026-05-17T13:02:00+00:00",
+    )
+    self_improvement_evidence_pipeline(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of="2026-05-17T13:03:00+00:00",
+        candidate_limit=3,
+    )
+    follow_on = known_bad_hardening_follow_on_review_packet(
+        cfg,
+        candidate_id="council:known_bad_hardening",
+        operator_resolution="approve_for_manual_promotion_review",
+        skill_name="council",
+        limit=5,
+    )
+
+    summary = known_bad_hardening_operator_review_summary(
+        cfg,
+        candidate_id="council:known_bad_hardening",
+        skill_name="council",
+        limit=5,
+    )
+    gate = known_bad_hardening_operator_patch_gate(
+        cfg,
+        patch_packet_id=follow_on["patch_review_packet"]["patch_packet_id"],
+        operator_patch_resolution="approve_manual_patch_gate",
+        candidate_id="council:known_bad_hardening",
+        skill_name="council",
+        limit=5,
+    )
+
+    assert summary["review_surface"] == "known_bad_hardening_operator_review_summary"
+    assert summary["patch_review"]["prepared"] is True
+    assert summary["patch_review"]["patch_packet_id"] == follow_on["patch_review_packet"]["patch_packet_id"]
+    assert summary["next_required_gate"] == "known_bad_hardening_operator_patch_gate"
+    assert summary["active_frontier_promotion"] is False
+    assert summary["autonomous_patch_application_enabled"] is False
+    assert Path(summary["artifact_path"]).is_file()
+
+    assert gate["review_surface"] == "known_bad_hardening_operator_patch_gate"
+    assert gate["source_patch_packet_id"] == follow_on["patch_review_packet"]["patch_packet_id"]
+    assert gate["manual_patch_gate"]["manual_application_only"] is True
+    assert gate["manual_patch_gate"]["autonomous_application_enabled"] is False
+    assert gate["manual_patch_gate"]["activation_effect"] == "manual_patch_review_only_no_runtime_activation"
+    assert gate["active_frontier_promotion"] is False
+    assert gate["route_updates_enabled"] is False
+    assert gate["side_effect_replay_enabled"] is False
+    assert "full_pytest_suite" in gate["required_verification_before_manual_application"]
+    assert Path(gate["artifact_path"]).is_file()
+    assert traces.frontier(skill_name="council") == []
+
+
+def test_known_bad_hardening_follow_on_review_fails_closed_for_unapproved_resolution(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+    with pytest.raises(ValueError, match="approve_for_manual_promotion_review"):
+        known_bad_hardening_follow_on_review_packet(
+            cfg,
+            candidate_id="council:known_bad_hardening",
+            operator_resolution="defer_pending_more_shadow_evidence",
+            skill_name="council",
+        )
+
+
+def test_known_bad_hardening_follow_on_review_fails_closed_for_active_frontier(tmp_path, monkeypatch):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+
+    def active_bundle(*_args, **_kwargs):
+        return {
+            "active_frontier_promotion": True,
+            "operator_decision_packet": {},
+            "candidates": [
+                {
+                    "candidate_id": "council:known_bad_hardening",
+                    "active_frontier_promotion": True,
+                    "pipeline_packet_evidence": {
+                        "proposal_id": "proposal",
+                        "packet_id": "packet",
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        "kernel.runtime_compat.known_bad_hardening_operator_review_bundle",
+        active_bundle,
+    )
+
+    with pytest.raises(PermissionError, match="inactive frontier"):
+        known_bad_hardening_follow_on_review_packet(
+            cfg,
+            candidate_id="council:known_bad_hardening",
+            operator_resolution="approve_for_manual_promotion_review",
+            skill_name="council",
+        )
+
+
+def test_known_bad_hardening_follow_on_review_fails_closed_without_durable_packet_evidence(tmp_path, monkeypatch):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+
+    def missing_evidence_bundle(*_args, **_kwargs):
+        return {
+            "active_frontier_promotion": False,
+            "operator_decision_packet": {},
+            "candidates": [
+                {
+                    "candidate_id": "council:known_bad_hardening",
+                    "active_frontier_promotion": False,
+                    "pipeline_packet_evidence": {},
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        "kernel.runtime_compat.known_bad_hardening_operator_review_bundle",
+        missing_evidence_bundle,
+    )
+
+    with pytest.raises(ValueError, match="durable proposal and promotion packet evidence"):
+        known_bad_hardening_follow_on_review_packet(
+            cfg,
+            candidate_id="council:known_bad_hardening",
+            operator_resolution="approve_for_manual_promotion_review",
+            skill_name="council",
+        )
+
+
+def test_known_bad_hardening_operator_patch_gate_fails_closed_for_bad_resolution(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+    with pytest.raises(ValueError, match="approve_manual_patch_gate"):
+        known_bad_hardening_operator_patch_gate(
+            cfg,
+            patch_packet_id="known-bad-follow-on-test",
+            operator_patch_resolution="defer_manual_patch_gate",
+            candidate_id="council:known_bad_hardening",
+            skill_name="council",
+        )
 
 
 def test_self_improvement_evidence_pipeline_surfaces_operator_ready_portfolio(tmp_path):
