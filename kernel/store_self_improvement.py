@@ -6,6 +6,7 @@ from .records import (
     Decision,
     SelfImprovementEvalRecord,
     SelfImprovementEvidencePipelineRun,
+    SelfImprovementPatchReviewPacket,
     SelfImprovementPromotionPacket,
     SelfImprovementProposal,
     SelfImprovementReplayProjectionComparison,
@@ -17,6 +18,7 @@ from .store_common import (
     _loads,
     _self_improvement_comparison_payload,
     _self_improvement_eval_payload,
+    _self_improvement_patch_review_payload,
     _self_improvement_pipeline_run_payload,
     _self_improvement_promotion_payload,
     _self_improvement_proposal_payload,
@@ -214,6 +216,80 @@ class SelfImprovementKernelTransactionMixin:
         self.enqueue_projection(event_id, "self_improvement_promotion_projection")
         return packet.packet_id
 
+    def prepare_self_improvement_patch_review_packet(self, packet: SelfImprovementPatchReviewPacket) -> str:
+        proposal = self.conn.execute(
+            "SELECT proposal_id, authority_required, status FROM self_improvement_proposals WHERE proposal_id=?",
+            (packet.proposal_id,),
+        ).fetchone()
+        if proposal is None:
+            raise ValueError("patch review packet requires a recorded proposal")
+        promotion = self.conn.execute(
+            "SELECT packet_id, proposal_id, required_authority, status FROM self_improvement_promotion_packets WHERE packet_id=?",
+            (packet.promotion_packet_id,),
+        ).fetchone()
+        if promotion is None or promotion["proposal_id"] != packet.proposal_id:
+            raise ValueError("patch review packet requires a matching promotion packet")
+        if packet.required_authority != "operator_gate" or packet.authority_effect != "review_only":
+            raise PermissionError("self-improvement patch packets are operator-gated and review-only")
+        if packet.status != "prepared":
+            raise PermissionError("new self-improvement patch packets can only be prepared")
+        if self.command.requested_by in {"agent", "model"}:
+            raise PermissionError("workers may not prepare patch review packets")
+        if not packet.patch_ref or not packet.patch_hash:
+            raise ValueError("patch review packet requires a governed patch ref and hash")
+        if not packet.changed_paths:
+            raise ValueError("patch review packet requires changed paths")
+        if any(path.startswith("/") or ".." in path.split("/") for path in packet.changed_paths):
+            raise PermissionError("patch review changed paths must be repo-relative and bounded")
+        if not packet.apply_instructions.strip() or not packet.verification_plan.strip() or not packet.rollback_ref.strip():
+            raise ValueError("patch review packet requires apply instructions, verification plan, and rollback ref")
+        required_blocks = {
+            "active_behavior_mutation",
+            "autonomous_patch_application",
+            "frontier_route_update",
+            "external_side_effect_reexecution",
+        }
+        if not required_blocks.issubset(set(packet.blocked_autonomous_actions)):
+            raise PermissionError("patch review packet must block autonomous mutation and side-effect replay")
+        payload = _self_improvement_patch_review_payload(packet)
+        event_id = self.append_event(
+            "self_improvement_patch_review_packet_prepared",
+            "self_improvement",
+            packet.patch_packet_id,
+            payload,
+        )
+        self.conn.execute(
+            """
+            INSERT INTO self_improvement_patch_review_packets (
+              patch_packet_id, proposal_id, promotion_packet_id, target_ref,
+              patch_ref, patch_hash, changed_paths_json, apply_instructions,
+              verification_plan, rollback_ref, evidence_refs_json,
+              blocked_autonomous_actions_json, required_authority,
+              authority_effect, status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                packet.patch_packet_id,
+                packet.proposal_id,
+                packet.promotion_packet_id,
+                packet.target_ref,
+                packet.patch_ref,
+                packet.patch_hash,
+                canonical_json(packet.changed_paths),
+                packet.apply_instructions,
+                packet.verification_plan,
+                packet.rollback_ref,
+                canonical_json(packet.evidence_refs),
+                canonical_json(packet.blocked_autonomous_actions),
+                packet.required_authority,
+                packet.authority_effect,
+                packet.status,
+                packet.created_at,
+            ),
+        )
+        self.enqueue_projection(event_id, "self_improvement_patch_review_projection")
+        return packet.patch_packet_id
+
     def record_self_improvement_rollback(self, record: SelfImprovementRollbackRecord) -> str:
         packet = self.conn.execute(
             "SELECT proposal_id FROM self_improvement_promotion_packets WHERE packet_id=?",
@@ -257,11 +333,13 @@ class SelfImprovementKernelTransactionMixin:
         proposal_rows = [self._self_improvement_proposal_row(row) for row in self.conn.execute("SELECT * FROM self_improvement_proposals ORDER BY proposal_id")]
         eval_rows = [self._self_improvement_eval_row(row) for row in self.conn.execute("SELECT * FROM self_improvement_eval_records ORDER BY eval_id")]
         packet_rows = [self._self_improvement_packet_row(row) for row in self.conn.execute("SELECT * FROM self_improvement_promotion_packets ORDER BY packet_id")]
+        patch_rows = [self._self_improvement_patch_review_row(row) for row in self.conn.execute("SELECT * FROM self_improvement_patch_review_packets ORDER BY patch_packet_id")]
         rollback_rows = [self._self_improvement_rollback_row(row) for row in self.conn.execute("SELECT * FROM self_improvement_rollbacks ORDER BY rollback_id")]
         pipeline_rows = [self._self_improvement_pipeline_row(row) for row in self.conn.execute("SELECT * FROM self_improvement_evidence_pipeline_runs ORDER BY run_id")]
         replay_proposals = sorted(replay.self_improvement_proposals.values(), key=lambda item: item["proposal_id"])
         replay_evals = sorted(replay.self_improvement_eval_records.values(), key=lambda item: item["eval_id"])
         replay_packets = sorted(replay.self_improvement_promotion_packets.values(), key=lambda item: item["packet_id"])
+        replay_patch_packets = sorted(replay.self_improvement_patch_review_packets.values(), key=lambda item: item["patch_packet_id"])
         replay_rollbacks = sorted(replay.self_improvement_rollbacks.values(), key=lambda item: item["rollback_id"])
         replay_pipeline_runs = sorted(replay.self_improvement_evidence_pipeline_runs.values(), key=lambda item: item["run_id"])
         mismatches: list[str] = []
@@ -271,6 +349,8 @@ class SelfImprovementKernelTransactionMixin:
             mismatches.append("eval_projection_mismatch")
         if replay_packets != packet_rows:
             mismatches.append("promotion_packet_projection_mismatch")
+        if replay_patch_packets != patch_rows:
+            mismatches.append("patch_review_packet_projection_mismatch")
         if replay_rollbacks != rollback_rows:
             mismatches.append("rollback_projection_mismatch")
         if replay_pipeline_runs != pipeline_rows:
@@ -283,6 +363,8 @@ class SelfImprovementKernelTransactionMixin:
             projection_eval_records=eval_rows,
             replay_promotion_packets=replay_packets,
             projection_promotion_packets=packet_rows,
+            replay_patch_review_packets=replay_patch_packets,
+            projection_patch_review_packets=patch_rows,
             replay_rollbacks=replay_rollbacks,
             projection_rollbacks=rollback_rows,
             replay_pipeline_runs=replay_pipeline_runs,
@@ -298,10 +380,11 @@ class SelfImprovementKernelTransactionMixin:
               comparison_id, scope, replay_proposals_json, projection_proposals_json,
               replay_eval_records_json, projection_eval_records_json,
               replay_promotion_packets_json, projection_promotion_packets_json,
+              replay_patch_review_packets_json, projection_patch_review_packets_json,
               replay_rollbacks_json, projection_rollbacks_json,
               replay_pipeline_runs_json, projection_pipeline_runs_json, matches,
               mismatches_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 comparison.comparison_id,
@@ -312,6 +395,8 @@ class SelfImprovementKernelTransactionMixin:
                 canonical_json(comparison.projection_eval_records),
                 canonical_json(comparison.replay_promotion_packets),
                 canonical_json(comparison.projection_promotion_packets),
+                canonical_json(comparison.replay_patch_review_packets),
+                canonical_json(comparison.projection_patch_review_packets),
                 canonical_json(comparison.replay_rollbacks),
                 canonical_json(comparison.projection_rollbacks),
                 canonical_json(comparison.replay_pipeline_runs),
@@ -679,6 +764,27 @@ class SelfImprovementKernelTransactionMixin:
             "risk_flags": _loads(row["risk_flags_json"]),
             "gate_packet": _loads(row["gate_packet_json"]),
             "default_on_timeout": row["default_on_timeout"],
+            "status": row["status"],
+            "created_at": row["created_at"],
+        }
+
+    @staticmethod
+    def _self_improvement_patch_review_row(row: Any) -> dict[str, Any]:
+        return {
+            "patch_packet_id": row["patch_packet_id"],
+            "proposal_id": row["proposal_id"],
+            "promotion_packet_id": row["promotion_packet_id"],
+            "target_ref": row["target_ref"],
+            "patch_ref": row["patch_ref"],
+            "patch_hash": row["patch_hash"],
+            "changed_paths": _loads(row["changed_paths_json"]),
+            "apply_instructions": row["apply_instructions"],
+            "verification_plan": row["verification_plan"],
+            "rollback_ref": row["rollback_ref"],
+            "evidence_refs": _loads(row["evidence_refs_json"]),
+            "blocked_autonomous_actions": _loads(row["blocked_autonomous_actions_json"]),
+            "required_authority": row["required_authority"],
+            "authority_effect": row["authority_effect"],
             "status": row["status"],
             "created_at": row["created_at"],
         }

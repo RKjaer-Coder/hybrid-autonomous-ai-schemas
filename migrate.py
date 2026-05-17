@@ -71,6 +71,7 @@ EXPECTED_OBJECTS = {
             "self_improvement_proposals",
             "self_improvement_eval_records",
             "self_improvement_promotion_packets",
+            "self_improvement_patch_review_packets",
             "self_improvement_rollbacks",
             "self_improvement_replay_projection_comparisons",
             "self_improvement_evidence_pipeline_runs",
@@ -172,6 +173,7 @@ EXPECTED_OBJECTS = {
             "idx_self_improvement_proposals_target",
             "idx_self_improvement_eval_records_proposal",
             "idx_self_improvement_promotion_packets_proposal",
+            "idx_self_improvement_patch_review_packets_proposal",
             "idx_self_improvement_rollbacks_proposal",
             "idx_self_improvement_pipeline_runs_status",
             "idx_capability_grants_subject",
@@ -618,13 +620,39 @@ def _rebuild_project_outcomes_for_operate_followup(conn: sqlite3.Connection) -> 
 
 
 def _rebuild_self_improvement_comparisons_for_pipeline(conn: sqlite3.Connection) -> None:
-    """Rebuild comparison rows that predate pipeline-run replay coverage."""
+    """Rebuild comparison rows that predate newer replay coverage fields."""
     existing_sql = _object_sql(conn, "table", "self_improvement_replay_projection_comparisons")
     if not existing_sql:
         return
     existing_cols = _table_columns(conn, "self_improvement_replay_projection_comparisons")
-    if {"replay_pipeline_runs_json", "projection_pipeline_runs_json"}.issubset(existing_cols):
+    expected_cols = {
+        "replay_patch_review_packets_json",
+        "projection_patch_review_packets_json",
+        "replay_pipeline_runs_json",
+        "projection_pipeline_runs_json",
+    }
+    if expected_cols.issubset(existing_cols):
         return
+    replay_patch_select = (
+        "replay_patch_review_packets_json"
+        if "replay_patch_review_packets_json" in existing_cols
+        else "'[]'"
+    )
+    projection_patch_select = (
+        "projection_patch_review_packets_json"
+        if "projection_patch_review_packets_json" in existing_cols
+        else "'[]'"
+    )
+    replay_pipeline_select = (
+        "replay_pipeline_runs_json"
+        if "replay_pipeline_runs_json" in existing_cols
+        else "'[]'"
+    )
+    projection_pipeline_select = (
+        "projection_pipeline_runs_json"
+        if "projection_pipeline_runs_json" in existing_cols
+        else "'[]'"
+    )
     conn.execute("PRAGMA foreign_keys=OFF")
     try:
         conn.execute(
@@ -642,6 +670,8 @@ def _rebuild_self_improvement_comparisons_for_pipeline(conn: sqlite3.Connection)
               projection_eval_records_json TEXT NOT NULL CHECK (json_valid(projection_eval_records_json)),
               replay_promotion_packets_json TEXT NOT NULL CHECK (json_valid(replay_promotion_packets_json)),
               projection_promotion_packets_json TEXT NOT NULL CHECK (json_valid(projection_promotion_packets_json)),
+              replay_patch_review_packets_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(replay_patch_review_packets_json)),
+              projection_patch_review_packets_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(projection_patch_review_packets_json)),
               replay_rollbacks_json TEXT NOT NULL CHECK (json_valid(replay_rollbacks_json)),
               projection_rollbacks_json TEXT NOT NULL CHECK (json_valid(projection_rollbacks_json)),
               replay_pipeline_runs_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(replay_pipeline_runs_json)),
@@ -653,11 +683,12 @@ def _rebuild_self_improvement_comparisons_for_pipeline(conn: sqlite3.Connection)
             """
         )
         conn.execute(
-            """
+            f"""
             INSERT INTO self_improvement_replay_projection_comparisons (
               comparison_id, scope, replay_proposals_json, projection_proposals_json,
               replay_eval_records_json, projection_eval_records_json,
               replay_promotion_packets_json, projection_promotion_packets_json,
+              replay_patch_review_packets_json, projection_patch_review_packets_json,
               replay_rollbacks_json, projection_rollbacks_json,
               replay_pipeline_runs_json, projection_pipeline_runs_json,
               matches, mismatches_json, created_at
@@ -666,8 +697,12 @@ def _rebuild_self_improvement_comparisons_for_pipeline(conn: sqlite3.Connection)
               comparison_id, scope, replay_proposals_json, projection_proposals_json,
               replay_eval_records_json, projection_eval_records_json,
               replay_promotion_packets_json, projection_promotion_packets_json,
+              {replay_patch_select},
+              {projection_patch_select},
               replay_rollbacks_json, projection_rollbacks_json,
-              '[]', '[]', matches, mismatches_json, created_at
+              {replay_pipeline_select},
+              {projection_pipeline_select},
+              matches, mismatches_json, created_at
             FROM self_improvement_replay_projection_comparisons__old
             """
         )

@@ -2025,6 +2025,27 @@ def _self_improvement_promotion_payload(packet: SelfImprovementPromotionPacket) 
     }
 
 
+def _self_improvement_patch_review_payload(packet: Any) -> dict[str, Any]:
+    return {
+        "patch_packet_id": packet.patch_packet_id,
+        "proposal_id": packet.proposal_id,
+        "promotion_packet_id": packet.promotion_packet_id,
+        "target_ref": packet.target_ref,
+        "patch_ref": packet.patch_ref,
+        "patch_hash": packet.patch_hash,
+        "changed_paths": packet.changed_paths,
+        "apply_instructions": packet.apply_instructions,
+        "verification_plan": packet.verification_plan,
+        "rollback_ref": packet.rollback_ref,
+        "evidence_refs": packet.evidence_refs,
+        "blocked_autonomous_actions": packet.blocked_autonomous_actions,
+        "required_authority": packet.required_authority,
+        "authority_effect": packet.authority_effect,
+        "status": packet.status,
+        "created_at": packet.created_at,
+    }
+
+
 def _self_improvement_rollback_payload(record: SelfImprovementRollbackRecord) -> dict[str, Any]:
     return {
         "rollback_id": record.rollback_id,
@@ -2049,6 +2070,8 @@ def _self_improvement_comparison_payload(comparison: SelfImprovementReplayProjec
         "projection_eval_records": comparison.projection_eval_records,
         "replay_promotion_packets": comparison.replay_promotion_packets,
         "projection_promotion_packets": comparison.projection_promotion_packets,
+        "replay_patch_review_packets": comparison.replay_patch_review_packets,
+        "projection_patch_review_packets": comparison.projection_patch_review_packets,
         "replay_rollbacks": comparison.replay_rollbacks,
         "projection_rollbacks": comparison.projection_rollbacks,
         "replay_pipeline_runs": comparison.replay_pipeline_runs,

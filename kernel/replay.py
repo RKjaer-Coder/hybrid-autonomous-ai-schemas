@@ -103,6 +103,7 @@ class ReplayState:
     self_improvement_proposals: dict[str, dict[str, Any]] = field(default_factory=dict)
     self_improvement_eval_records: dict[str, dict[str, Any]] = field(default_factory=dict)
     self_improvement_promotion_packets: dict[str, dict[str, Any]] = field(default_factory=dict)
+    self_improvement_patch_review_packets: dict[str, dict[str, Any]] = field(default_factory=dict)
     self_improvement_rollbacks: dict[str, dict[str, Any]] = field(default_factory=dict)
     self_improvement_replay_projection_comparisons: dict[str, dict[str, Any]] = field(default_factory=dict)
     self_improvement_evidence_pipeline_runs: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -371,6 +372,8 @@ def apply_replay_event(state: ReplayState, event_type: str, entity_id: str, payl
             proposal["updated_at"] = payload["created_at"]
     elif event_type == "self_improvement_promotion_packet_created":
         state.self_improvement_promotion_packets[entity_id] = dict(payload)
+    elif event_type == "self_improvement_patch_review_packet_prepared":
+        state.self_improvement_patch_review_packets[entity_id] = dict(payload)
     elif event_type == "self_improvement_rollback_recorded":
         state.self_improvement_rollbacks[entity_id] = dict(payload)
         proposal = state.self_improvement_proposals.get(payload["proposal_id"])

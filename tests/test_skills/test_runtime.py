@@ -1199,6 +1199,8 @@ def test_self_improvement_snapshot_is_read_only_and_surfaces_kernel_counts(tmp_p
     assert payload["live_controls_enabled"] is False
     assert payload["summary"]["proposal_count"] == 0
     assert payload["summary"]["eval_record_count"] == 0
+    assert payload["summary"]["patch_review_packet_count"] == 0
+    assert payload["patch_review_packets"] == []
     assert "autonomous_promotion" in payload["disabled_live_controls"]
     assert Path(payload["artifact_path"]).is_file()
 

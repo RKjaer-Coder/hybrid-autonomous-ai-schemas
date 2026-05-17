@@ -775,6 +775,25 @@ CREATE TABLE IF NOT EXISTS self_improvement_promotion_packets (
   created_at TEXT NOT NULL
 ) STRICT;
 
+CREATE TABLE IF NOT EXISTS self_improvement_patch_review_packets (
+  patch_packet_id TEXT PRIMARY KEY,
+  proposal_id TEXT NOT NULL REFERENCES self_improvement_proposals(proposal_id),
+  promotion_packet_id TEXT NOT NULL REFERENCES self_improvement_promotion_packets(packet_id),
+  target_ref TEXT NOT NULL,
+  patch_ref TEXT NOT NULL,
+  patch_hash TEXT NOT NULL,
+  changed_paths_json TEXT NOT NULL CHECK (json_valid(changed_paths_json)),
+  apply_instructions TEXT NOT NULL,
+  verification_plan TEXT NOT NULL,
+  rollback_ref TEXT NOT NULL,
+  evidence_refs_json TEXT NOT NULL CHECK (json_valid(evidence_refs_json)),
+  blocked_autonomous_actions_json TEXT NOT NULL CHECK (json_valid(blocked_autonomous_actions_json)),
+  required_authority TEXT NOT NULL CHECK (required_authority = 'operator_gate'),
+  authority_effect TEXT NOT NULL CHECK (authority_effect = 'review_only'),
+  status TEXT NOT NULL CHECK (status IN ('prepared','superseded','rejected')),
+  created_at TEXT NOT NULL
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS self_improvement_rollbacks (
   rollback_id TEXT PRIMARY KEY,
   proposal_id TEXT NOT NULL REFERENCES self_improvement_proposals(proposal_id),
@@ -796,6 +815,8 @@ CREATE TABLE IF NOT EXISTS self_improvement_replay_projection_comparisons (
   projection_eval_records_json TEXT NOT NULL CHECK (json_valid(projection_eval_records_json)),
   replay_promotion_packets_json TEXT NOT NULL CHECK (json_valid(replay_promotion_packets_json)),
   projection_promotion_packets_json TEXT NOT NULL CHECK (json_valid(projection_promotion_packets_json)),
+  replay_patch_review_packets_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(replay_patch_review_packets_json)),
+  projection_patch_review_packets_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(projection_patch_review_packets_json)),
   replay_rollbacks_json TEXT NOT NULL CHECK (json_valid(replay_rollbacks_json)),
   projection_rollbacks_json TEXT NOT NULL CHECK (json_valid(projection_rollbacks_json)),
   replay_pipeline_runs_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(replay_pipeline_runs_json)),
@@ -1270,6 +1291,7 @@ CREATE INDEX IF NOT EXISTS idx_model_routing_state_model ON model_routing_state(
 CREATE INDEX IF NOT EXISTS idx_self_improvement_proposals_target ON self_improvement_proposals(target_type, target_id, status);
 CREATE INDEX IF NOT EXISTS idx_self_improvement_eval_records_proposal ON self_improvement_eval_records(proposal_id, eval_type, status);
 CREATE INDEX IF NOT EXISTS idx_self_improvement_promotion_packets_proposal ON self_improvement_promotion_packets(proposal_id, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_self_improvement_patch_review_packets_proposal ON self_improvement_patch_review_packets(proposal_id, status, created_at);
 CREATE INDEX IF NOT EXISTS idx_self_improvement_rollbacks_proposal ON self_improvement_rollbacks(proposal_id, status, created_at);
 CREATE INDEX IF NOT EXISTS idx_self_improvement_pipeline_runs_status ON self_improvement_evidence_pipeline_runs(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_capability_grants_subject ON capability_grants(subject_type, subject_id, capability_type, status);

@@ -8,6 +8,7 @@ from kernel import (
     KernelSelfImprovement,
     KernelStore,
     SelfImprovementEvalRecord,
+    SelfImprovementPatchReviewPacket,
     SelfImprovementPromotionPacket,
     SelfImprovementProposal,
     SelfImprovementRollbackRecord,
@@ -147,6 +148,143 @@ class KernelSelfImprovementTests(unittest.TestCase):
         self.assertEqual(comparison.projection_proposals[0]["status"], "rolled_back")
         self.assertEqual(comparison.projection_eval_records[0]["authority_effect"], "evidence_only")
         self.assertEqual(comparison.projection_promotion_packets[0]["required_authority"], "operator_gate")
+
+    def test_patch_review_packet_is_durable_review_only_and_replayable(self):
+        proposal = self.proposal()
+        proposal_id = self.si.record_proposal(
+            self_improvement_command("self_improvement.proposal.record", "proposal-patch-review"),
+            proposal,
+        )
+        eval_id = self.si.record_eval(
+            self_improvement_command("self_improvement.eval.record", "eval-patch-review"),
+            self.eval_record(proposal_id),
+        )
+        decision = self.si.promotion_decision(
+            proposal=proposal,
+            question="Prepare a patch review packet for the quick-summary harness candidate?",
+            evidence_refs=[eval_id, *proposal.problem_evidence],
+            confidence=0.91,
+        )
+        decision_id = self.store.create_decision(
+            self_improvement_command("decision.create", "decision-patch-review"),
+            decision,
+        )
+        packet_id = self.si.create_promotion_packet(
+            self_improvement_command("self_improvement.promotion_packet.create", "packet-patch-review"),
+            SelfImprovementPromotionPacket(
+                packet_id="packet-patch-review",
+                proposal_id=proposal_id,
+                decision_id=decision_id,
+                recommendation="approve",
+                required_authority="operator_gate",
+                eval_record_ids=[eval_id],
+                evidence_refs=[eval_id, *proposal.problem_evidence],
+                risk_flags=["operator_gate_required_before_active_harness_change"],
+                gate_packet={"decision_type": "system_improvement", "proposal_id": proposal_id},
+                default_on_timeout="keep_current_behavior",
+            ),
+        )
+        patch_packet = SelfImprovementPatchReviewPacket(
+            patch_packet_id="patch-review-harness-summary-v2",
+            proposal_id=proposal_id,
+            promotion_packet_id=packet_id,
+            target_ref="harness://research.quick_summary.prompt@v1",
+            patch_ref="artifact://patches/research/quick-summary-v2.diff",
+            patch_hash=sha256_text("diff --git a/research.prompt b/research.prompt"),
+            changed_paths=["skills/research_domain/skill.py", "tests/test_skills/test_research_domain.py"],
+            apply_instructions="Operator may apply this patch in a clean branch after reviewing the diff.",
+            verification_plan="Run focused research-domain tests, known-bad replay, then full suite.",
+            rollback_ref="harness://research.quick_summary.prompt@v1",
+            evidence_refs=[eval_id, "artifact://patches/research/quick-summary-v2.diff"],
+            blocked_autonomous_actions=[
+                "active_behavior_mutation",
+                "autonomous_patch_application",
+                "frontier_route_update",
+                "external_side_effect_reexecution",
+            ],
+            required_authority="operator_gate",
+        )
+        patch_packet_id = self.si.prepare_patch_review_packet(
+            self_improvement_command(
+                "self_improvement.patch_review.prepare",
+                "patch-review-harness-summary-v2",
+                requested_by="kernel",
+                requester_id="self-improvement-review",
+                requested_authority="operator_gate",
+            ),
+            patch_packet,
+        )
+        comparison = self.si.compare_replay_to_projection(
+            self_improvement_command("self_improvement.replay.compare", "compare-self-improvement-patch-review"),
+        )
+
+        self.assertEqual(patch_packet_id, patch_packet.patch_packet_id)
+        self.assertTrue(comparison.matches, comparison.mismatches)
+        self.assertEqual(comparison.projection_patch_review_packets[0]["authority_effect"], "review_only")
+        self.assertEqual(comparison.projection_patch_review_packets[0]["required_authority"], "operator_gate")
+        self.assertIn(
+            "autonomous_patch_application",
+            comparison.projection_patch_review_packets[0]["blocked_autonomous_actions"],
+        )
+
+    def test_workers_cannot_prepare_patch_review_packets(self):
+        proposal = self.proposal()
+        proposal_id = self.si.record_proposal(
+            self_improvement_command("self_improvement.proposal.record", "proposal-worker-patch-review"),
+            proposal,
+        )
+        eval_id = self.si.record_eval(
+            self_improvement_command("self_improvement.eval.record", "eval-worker-patch-review"),
+            self.eval_record(proposal_id),
+        )
+        decision = self.si.promotion_decision(proposal=proposal, question="Approve candidate?", evidence_refs=[eval_id])
+        decision_id = self.store.create_decision(
+            self_improvement_command("decision.create", "decision-worker-patch-review"),
+            decision,
+        )
+        packet_id = self.si.create_promotion_packet(
+            self_improvement_command("self_improvement.promotion_packet.create", "packet-worker-patch-review"),
+            SelfImprovementPromotionPacket(
+                proposal_id=proposal_id,
+                decision_id=decision_id,
+                recommendation="approve",
+                required_authority="operator_gate",
+                eval_record_ids=[eval_id],
+                evidence_refs=[eval_id],
+                risk_flags=[],
+                gate_packet={"decision_type": "system_improvement"},
+                default_on_timeout="keep_current_behavior",
+            ),
+        )
+        with self.assertRaises(PermissionError):
+            self.si.prepare_patch_review_packet(
+                self_improvement_command(
+                    "self_improvement.patch_review.prepare",
+                    "worker-patch-review",
+                    requested_by="agent",
+                    requester_id="worker",
+                    requested_authority="operator_gate",
+                ),
+                SelfImprovementPatchReviewPacket(
+                    proposal_id=proposal_id,
+                    promotion_packet_id=packet_id,
+                    target_ref="harness://research.quick_summary.prompt@v1",
+                    patch_ref="artifact://patches/research/quick-summary-v2.diff",
+                    patch_hash=sha256_text("patch"),
+                    changed_paths=["skills/research_domain/skill.py"],
+                    apply_instructions="Apply after operator approval.",
+                    verification_plan="Run tests.",
+                    rollback_ref="harness://research.quick_summary.prompt@v1",
+                    evidence_refs=[eval_id],
+                    blocked_autonomous_actions=[
+                        "active_behavior_mutation",
+                        "autonomous_patch_application",
+                        "frontier_route_update",
+                        "external_side_effect_reexecution",
+                    ],
+                    required_authority="operator_gate",
+                ),
+            )
 
     def test_workers_cannot_downgrade_pinned_policy_or_create_promotion_packets(self):
         pinned = SelfImprovementProposal(

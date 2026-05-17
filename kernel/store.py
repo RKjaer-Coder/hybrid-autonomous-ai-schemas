@@ -74,6 +74,7 @@ from .records import (
     SideEffectReceipt,
     SelfImprovementEvalRecord,
     SelfImprovementEvidencePipelineRun,
+    SelfImprovementPatchReviewPacket,
     SelfImprovementPromotionPacket,
     SelfImprovementProposal,
     SelfImprovementReplayProjectionComparison,
@@ -964,6 +965,16 @@ class KernelStore:
     ) -> str:
         def handler(tx: KernelTransaction) -> str:
             return tx.create_self_improvement_promotion_packet(packet)
+
+        return self.execute_command(command, handler)
+
+    def prepare_self_improvement_patch_review_packet(
+        self,
+        command: Command,
+        packet: SelfImprovementPatchReviewPacket,
+    ) -> str:
+        def handler(tx: KernelTransaction) -> str:
+            return tx.prepare_self_improvement_patch_review_packet(packet)
 
         return self.execute_command(command, handler)
 

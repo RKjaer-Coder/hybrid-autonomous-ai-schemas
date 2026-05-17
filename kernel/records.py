@@ -1414,6 +1414,26 @@ class SelfImprovementPromotionPacket:
 
 
 @dataclass(frozen=True)
+class SelfImprovementPatchReviewPacket:
+    proposal_id: str
+    promotion_packet_id: str
+    target_ref: str
+    patch_ref: str
+    patch_hash: str
+    changed_paths: list[str]
+    apply_instructions: str
+    verification_plan: str
+    rollback_ref: str
+    evidence_refs: list[str]
+    blocked_autonomous_actions: list[str]
+    required_authority: Authority
+    authority_effect: Literal["review_only"] = "review_only"
+    status: Literal["prepared", "superseded", "rejected"] = "prepared"
+    patch_packet_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
 class SelfImprovementRollbackRecord:
     proposal_id: str
     packet_id: str
@@ -1435,6 +1455,8 @@ class SelfImprovementReplayProjectionComparison:
     projection_eval_records: list[JsonObject]
     replay_promotion_packets: list[JsonObject]
     projection_promotion_packets: list[JsonObject]
+    replay_patch_review_packets: list[JsonObject]
+    projection_patch_review_packets: list[JsonObject]
     replay_rollbacks: list[JsonObject]
     projection_rollbacks: list[JsonObject]
     replay_pipeline_runs: list[JsonObject]

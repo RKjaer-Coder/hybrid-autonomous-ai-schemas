@@ -2333,6 +2333,7 @@ def _self_improvement_snapshot_payload(
     proposals = _self_improvement_rows(db_path, "self_improvement_proposals", "created_at")
     eval_records = _self_improvement_rows(db_path, "self_improvement_eval_records", "created_at")
     promotion_packets = _self_improvement_rows(db_path, "self_improvement_promotion_packets", "created_at")
+    patch_review_packets = _self_improvement_rows(db_path, "self_improvement_patch_review_packets", "created_at")
     rollbacks = _self_improvement_rows(db_path, "self_improvement_rollbacks", "created_at")
     pipeline_runs = _latest_pipeline_runs(db_path)
     manager = HarnessVariantManager(str(Path(resolved.data_dir) / "telemetry.db"))
@@ -2356,6 +2357,7 @@ def _self_improvement_snapshot_payload(
             "proposal_count": len(proposals),
             "eval_record_count": len(eval_records),
             "promotion_packet_count": len(promotion_packets),
+            "patch_review_packet_count": len(patch_review_packets),
             "rollback_count": len(rollbacks),
             "pipeline_run_count": len(pipeline_runs),
             "status_counts": status_counts,
@@ -2364,6 +2366,7 @@ def _self_improvement_snapshot_payload(
         "proposals": proposals,
         "eval_records": eval_records,
         "promotion_packets": promotion_packets,
+        "patch_review_packets": patch_review_packets,
         "rollbacks": rollbacks,
         "pipeline_runs": pipeline_runs,
         "portfolio": pipeline_runs[0]["portfolio_items"] if pipeline_runs else [],

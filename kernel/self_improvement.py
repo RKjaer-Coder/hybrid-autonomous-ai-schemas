@@ -4,6 +4,7 @@ from .records import (
     Command,
     Decision,
     SelfImprovementEvalRecord,
+    SelfImprovementPatchReviewPacket,
     SelfImprovementPromotionPacket,
     SelfImprovementProposal,
     SelfImprovementRollbackRecord,
@@ -45,6 +46,9 @@ class KernelSelfImprovement:
 
     def create_promotion_packet(self, command: Command, packet: SelfImprovementPromotionPacket) -> str:
         return self.store.create_self_improvement_promotion_packet(command, packet)
+
+    def prepare_patch_review_packet(self, command: Command, packet: SelfImprovementPatchReviewPacket) -> str:
+        return self.store.prepare_self_improvement_patch_review_packet(command, packet)
 
     def record_rollback(self, command: Command, record: SelfImprovementRollbackRecord) -> str:
         return self.store.record_self_improvement_rollback(command, record)
