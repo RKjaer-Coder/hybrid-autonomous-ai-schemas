@@ -1,0 +1,22 @@
+{
+  "files": [
+    {
+      "path": "README.md",
+      "description": "Repo-local implementation orientation and verification entrypoints."
+    },
+    {
+      "path": "kernel/store.py",
+      "description": "Authoritative kernel transaction facade and command boundary.",
+      "scope": ["kernel/**/*.py"]
+    },
+    {
+      "path": "kernel/services/runtime_artifacts.py",
+      "description": "Thin service helper for runtime artifact writing.",
+      "scope": ["kernel/runtime*.py", "kernel/services/**/*.py"]
+    },
+    {
+      "path": ".greptile/rules.md",
+      "description": "Repo-specific review invariants."
+    }
+  ]
+}

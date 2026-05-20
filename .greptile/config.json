@@ -1,0 +1,35 @@
+{
+  "strictness": 2,
+  "rules": [
+    {
+      "id": "kernel-command-event-boundary",
+      "rule": "Kernel critical-state changes must enter through Command handling and preserve the event-before-derived-state transaction boundary. Do not approve direct writes that bypass KernelStore.execute_command for authoritative state.",
+      "scope": ["kernel/**/*.py", "tests/test_kernel*.py"],
+      "severity": "high"
+    },
+    {
+      "id": "runtime-surfaces-are-adapters",
+      "rule": "Hermes/runtime/dashboard/provider surfaces are adapters or projections. Do not let runtime compatibility code become authoritative for gates, spend, model routing, side effects, or operator identity.",
+      "scope": ["kernel/runtime*.py", "skills/**/*.py", "tests/test_skills/**/*.py"],
+      "severity": "high"
+    },
+    {
+      "id": "self-improvement-review-only",
+      "rule": "Self-improvement changes may produce proposals, evals, patch-review packets, and operator-gated decisions, but must not autonomously mutate active behavior, update frontier routes, or re-execute side effects.",
+      "scope": ["kernel/*self_improvement*.py", "kernel/runtime*.py", "tests/**/*self_improvement*.py", "tests/test_skills/test_runtime.py"],
+      "severity": "high"
+    },
+    {
+      "id": "service-layer-stays-thin",
+      "rule": "New service-layer code should reduce repeated orchestration or context load while keeping policy and persistence invariants in the kernel/store layer. Avoid broad manager modules and duplicate validation logic.",
+      "scope": ["kernel/services/**/*.py", "kernel/**/*.py"],
+      "severity": "medium"
+    },
+    {
+      "id": "no-raw-secrets-in-events",
+      "rule": "Event payloads and durable artifacts must not contain raw secrets, credentials, private keys, or unnecessary client data. Use governed artifact references or secret references instead.",
+      "scope": ["kernel/**/*.py", "schemas/**/*.sql", "skills/**/*.py"],
+      "severity": "high"
+    }
+  ]
+}
