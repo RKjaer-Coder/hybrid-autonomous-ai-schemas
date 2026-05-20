@@ -2550,6 +2550,34 @@ def model_efficiency_service_packet(
     test_set = generate_first_live_project_test_set()
     packet = test_set["model_efficiency_service_packet"]
     seed_task_classes = packet["seed_task_classes"]
+    evidence_requirements = [
+        "seed_task_class_eval_evidence",
+        "shadow_route_savings_report",
+        "operator_gate_before_customer_visible_delivery",
+        "kill_criteria_review",
+    ]
+    forbidden_autonomous_actions = [
+        "customer_visible_delivery",
+        "model_route_promotion",
+        "paid_provider_call_without_budget_grant",
+        "eval_holdout_mutation",
+        "revenue_claim_without_recorded_receipt",
+    ]
+    closed_live_control_contract = {
+        "live_controls_enabled": False,
+        "route_mutation_enabled": packet["savings_report"]["route_mutation_enabled"],
+        "external_side_effects_allowed": packet["offer"]["external_side_effects_allowed"],
+        "customer_visible_delivery_enabled": False,
+        "paid_provider_calls_enabled": False,
+        "autonomous_customer_commitments_enabled": False,
+    }
+    operator_signoff_requirements = [
+        "operator_confirms_customer_evidence",
+        "operator_confirms_kill_criteria_reviewed",
+        "operator_confirms_forbidden_actions_remain_blocked",
+        "operator_confirms_live_controls_closed",
+        "operator_confirms_budget_grants_before_paid_provider_calls",
+    ]
     operator_decision_packet = {
         "decision_type": "commercial_model_efficiency_service",
         "required_authority": "operator_gate",
@@ -2557,6 +2585,18 @@ def model_efficiency_service_packet(
         "options": [
             {
                 "option": "pursue_first_control_plane_customer",
+                "recommendation": "pursue",
+                "required_evidence": [
+                    "seed_task_class_eval_evidence",
+                    "shadow_route_savings_report",
+                    "operator_gate_before_customer_visible_delivery",
+                    "kill_criteria_review",
+                ],
+                "bound_kill_criteria": list(packet["kill_criteria"]),
+                "forbidden_autonomous_actions": list(forbidden_autonomous_actions),
+                "closed_live_control_contract": dict(closed_live_control_contract),
+                "operator_signoff_requirements": list(operator_signoff_requirements),
+                "fail_closed_unless_all_bindings_present": True,
                 "conditions": [
                     "customer problem matches governed model offload",
                     "delivery remains local-artifact-only until explicit gate",
@@ -2565,6 +2605,16 @@ def model_efficiency_service_packet(
             },
             {
                 "option": "pause_until_customer_evidence",
+                "recommendation": "pause",
+                "required_evidence": [
+                    "operator_gate_before_customer_visible_delivery",
+                    "kill_criteria_review",
+                ],
+                "bound_kill_criteria": list(packet["kill_criteria"]),
+                "forbidden_autonomous_actions": list(forbidden_autonomous_actions),
+                "closed_live_control_contract": dict(closed_live_control_contract),
+                "operator_signoff_requirements": list(operator_signoff_requirements),
+                "fail_closed_unless_all_bindings_present": True,
                 "conditions": [
                     "no qualified buyer interview",
                     "operator load would exceed pre-live budget",
@@ -2572,25 +2622,23 @@ def model_efficiency_service_packet(
                 ],
             },
         ],
-        "required_evidence": [
-            "seed_task_class_eval_evidence",
-            "shadow_route_savings_report",
-            "operator_gate_before_customer_visible_delivery",
-            "kill_criteria_review",
-        ],
-        "forbidden_without_operator_gate": [
-            "customer_visible_delivery",
-            "revenue_claim_publication",
-            "model_route_promotion",
-            "paid_provider_call_execution",
-        ],
+        "required_evidence": evidence_requirements,
+        "kill_criteria": list(packet["kill_criteria"]),
+        "forbidden_without_operator_gate": list(forbidden_autonomous_actions),
+        "closed_live_control_contract": closed_live_control_contract,
+        "operator_signoff_requirements": operator_signoff_requirements,
+        "default_on_timeout": "pause",
     }
+    decision_contract = _model_efficiency_operator_decision_contract(operator_decision_packet, packet)
     payload = {
         "available": True,
         "generated_at": as_of or _utc_now(),
         "packet_name": "model_efficiency_service_packet",
         **packet,
         "operator_decision_packet": operator_decision_packet,
+        "decision_packet_contract": decision_contract["contract"],
+        "blockers": decision_contract["blockers"],
+        "status": "operator_decision_packet_ready" if not decision_contract["blockers"] else "blocked",
         "summary": {
             "buyer_profile_count": len(packet["offer"]["buyer_profiles"]),
             "seed_task_class_count": len(seed_task_classes),
@@ -2602,19 +2650,125 @@ def model_efficiency_service_packet(
             "kill_criteria_count": len(packet["kill_criteria"]),
             "operator_decision_options": len(operator_decision_packet["options"]),
         },
-        "blocked_autonomous_actions": [
-            "customer_visible_delivery",
-            "model_route_promotion",
-            "paid_provider_call_without_budget_grant",
-            "eval_holdout_mutation",
-            "revenue_claim_without_recorded_receipt",
-        ],
+        "blocked_autonomous_actions": forbidden_autonomous_actions,
         "artifact_path": str(_runtime_model_efficiency_service_packet_path(resolved)),
         "live_controls_enabled": False,
         "activation_effect": "operator_decision_packet_only",
     }
     _write_model_efficiency_service_packet_artifact(resolved, payload)
     return payload
+
+
+def _model_efficiency_operator_decision_contract(
+    operator_decision_packet: dict[str, Any],
+    source_packet: dict[str, Any],
+) -> dict[str, Any]:
+    required_options = {"pursue_first_control_plane_customer": "pursue", "pause_until_customer_evidence": "pause"}
+    required_evidence = set(operator_decision_packet.get("required_evidence", []))
+    required_kill_criteria = set(source_packet.get("kill_criteria", []))
+    required_forbidden_actions = set(operator_decision_packet.get("forbidden_without_operator_gate", []))
+    required_signoffs = set(operator_decision_packet.get("operator_signoff_requirements", []))
+    closed_contract = operator_decision_packet.get("closed_live_control_contract", {})
+    options = operator_decision_packet.get("options", [])
+    option_by_id = {
+        str(option.get("option")): option
+        for option in options
+        if isinstance(option, dict)
+    }
+
+    blockers: list[str] = []
+    live_control_contract_closed = (
+        isinstance(closed_contract, dict)
+        and closed_contract.get("live_controls_enabled") is False
+        and closed_contract.get("route_mutation_enabled") is False
+        and closed_contract.get("external_side_effects_allowed") is False
+        and closed_contract.get("customer_visible_delivery_enabled") is False
+        and closed_contract.get("paid_provider_calls_enabled") is False
+        and closed_contract.get("autonomous_customer_commitments_enabled") is False
+    )
+    if not live_control_contract_closed:
+        blockers.append("model_efficiency_live_control_contract_open")
+    if operator_decision_packet.get("required_authority") != "operator_gate":
+        blockers.append("model_efficiency_operator_gate_missing")
+    if operator_decision_packet.get("default_on_timeout") != "pause":
+        blockers.append("model_efficiency_timeout_default_not_pause")
+    if not required_evidence:
+        blockers.append("model_efficiency_required_evidence_missing")
+    if not required_kill_criteria:
+        blockers.append("model_efficiency_kill_criteria_missing")
+    if not required_forbidden_actions:
+        blockers.append("model_efficiency_forbidden_actions_missing")
+    if not required_signoffs:
+        blockers.append("model_efficiency_operator_signoff_requirements_missing")
+
+    option_bindings: dict[str, dict[str, bool]] = {}
+    for option_id, recommendation in required_options.items():
+        option = option_by_id.get(option_id)
+        if not option:
+            blockers.append(f"model_efficiency_{recommendation}_option_missing")
+            option_bindings[option_id] = {
+                "recommendation_bound": False,
+                "evidence_bound": False,
+                "kill_criteria_bound": False,
+                "forbidden_actions_bound": False,
+                "live_control_contract_bound": False,
+                "operator_signoff_bound": False,
+                "fail_closed": False,
+            }
+            continue
+        option_evidence = set(option.get("required_evidence", []))
+        option_kill_criteria = set(option.get("bound_kill_criteria", []))
+        option_forbidden_actions = set(option.get("forbidden_autonomous_actions", []))
+        option_signoffs = set(option.get("operator_signoff_requirements", []))
+        option_closed_contract = option.get("closed_live_control_contract", {})
+        binding = {
+            "recommendation_bound": option.get("recommendation") == recommendation,
+            "evidence_bound": bool(option_evidence) and option_evidence.issubset(required_evidence),
+            "kill_criteria_bound": bool(option_kill_criteria) and required_kill_criteria.issubset(option_kill_criteria),
+            "forbidden_actions_bound": (
+                bool(option_forbidden_actions)
+                and required_forbidden_actions.issubset(option_forbidden_actions)
+            ),
+            "live_control_contract_bound": (
+                isinstance(option_closed_contract, dict)
+                and option_closed_contract == closed_contract
+                and live_control_contract_closed
+            ),
+            "operator_signoff_bound": bool(option_signoffs) and required_signoffs.issubset(option_signoffs),
+            "fail_closed": option.get("fail_closed_unless_all_bindings_present") is True,
+        }
+        option_bindings[option_id] = binding
+        for key, ok in binding.items():
+            if not ok:
+                blockers.append(f"model_efficiency_{recommendation}_{key}")
+
+    contract = {
+        "required_options_present": set(required_options).issubset(option_by_id),
+        "recommendations_bound_to_explicit_evidence": all(
+            binding.get("recommendation_bound") and binding.get("evidence_bound")
+            for binding in option_bindings.values()
+        ),
+        "recommendations_bound_to_kill_criteria": all(
+            binding.get("kill_criteria_bound") for binding in option_bindings.values()
+        ),
+        "recommendations_bound_to_forbidden_actions": all(
+            binding.get("forbidden_actions_bound") for binding in option_bindings.values()
+        ),
+        "recommendations_bound_to_closed_live_controls": all(
+            binding.get("live_control_contract_bound") for binding in option_bindings.values()
+        ),
+        "recommendations_bound_to_operator_signoff": all(
+            binding.get("operator_signoff_bound") for binding in option_bindings.values()
+        ),
+        "options_fail_closed": all(binding.get("fail_closed") for binding in option_bindings.values()),
+        "operator_gate_required": operator_decision_packet.get("required_authority") == "operator_gate",
+        "timeout_defaults_to_pause": operator_decision_packet.get("default_on_timeout") == "pause",
+        "live_control_contract_closed": live_control_contract_closed,
+        "option_bindings": option_bindings,
+    }
+    if not all(value for key, value in contract.items() if key != "option_bindings"):
+        blockers.append("model_efficiency_decision_packet_contract_incomplete")
+    return {"contract": contract, "blockers": sorted(set(blockers))}
 
 
 def pre_live_completion_bundle(

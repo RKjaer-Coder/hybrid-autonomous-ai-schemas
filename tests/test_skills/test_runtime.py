@@ -1336,12 +1336,58 @@ def test_model_efficiency_service_packet_is_operator_gated_local_only_offer(tmp_
     assert payload["summary"]["operator_gate_required_for_customer_delivery"] is True
     assert payload["summary"]["external_side_effects_allowed"] is False
     assert payload["summary"]["operator_decision_options"] == 2
+    assert payload["status"] == "operator_decision_packet_ready"
+    assert payload["blockers"] == []
+    assert all(value for key, value in payload["decision_packet_contract"].items() if key != "option_bindings")
     assert payload["operator_decision_packet"]["required_authority"] == "operator_gate"
+    assert payload["operator_decision_packet"]["default_on_timeout"] == "pause"
     assert "model_route_promotion" in payload["operator_decision_packet"]["forbidden_without_operator_gate"]
+    for option in payload["operator_decision_packet"]["options"]:
+        assert option["fail_closed_unless_all_bindings_present"] is True
+        assert option["recommendation"] in {"pursue", "pause"}
+        assert option["required_evidence"]
+        assert option["bound_kill_criteria"] == payload["kill_criteria"]
+        assert option["forbidden_autonomous_actions"] == payload["blocked_autonomous_actions"]
+        assert option["closed_live_control_contract"] == payload["operator_decision_packet"]["closed_live_control_contract"]
+        assert option["operator_signoff_requirements"] == payload["operator_decision_packet"]["operator_signoff_requirements"]
     assert payload["kernel_boundaries"]["model_intelligence_supplies_evidence_only"] is True
     assert "customer_visible_delivery" in payload["blocked_autonomous_actions"]
     assert payload["live_controls_enabled"] is False
     assert Path(payload["artifact_path"]).is_file()
+
+
+def test_model_efficiency_operator_packet_fails_closed_when_pursue_is_unbound(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+    payload = model_efficiency_service_packet(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of="2026-05-12T00:06:30+00:00",
+    )
+    packet = json.loads(json.dumps(payload["operator_decision_packet"]))
+    pursue = next(option for option in packet["options"] if option["recommendation"] == "pursue")
+    pursue["required_evidence"] = []
+    pursue["bound_kill_criteria"] = []
+    pursue["forbidden_autonomous_actions"] = []
+    pursue["closed_live_control_contract"] = {"live_controls_enabled": True}
+    pursue["operator_signoff_requirements"] = []
+    pursue["fail_closed_unless_all_bindings_present"] = False
+
+    result = runtime_compat._model_efficiency_operator_decision_contract(packet, payload)
+
+    assert "model_efficiency_pursue_evidence_bound" in result["blockers"]
+    assert "model_efficiency_pursue_kill_criteria_bound" in result["blockers"]
+    assert "model_efficiency_pursue_forbidden_actions_bound" in result["blockers"]
+    assert "model_efficiency_pursue_live_control_contract_bound" in result["blockers"]
+    assert "model_efficiency_pursue_operator_signoff_bound" in result["blockers"]
+    assert "model_efficiency_pursue_fail_closed" in result["blockers"]
+    assert result["contract"]["recommendations_bound_to_explicit_evidence"] is False
+    assert result["contract"]["recommendations_bound_to_closed_live_controls"] is False
+    assert result["contract"]["options_fail_closed"] is False
 
 
 def test_pre_live_completion_bundle_proves_all_ten_goals_and_stays_closed(tmp_path):
