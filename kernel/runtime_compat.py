@@ -3393,6 +3393,12 @@ def pre_live_evidence_crosswalk(
         blockers.append("closed_control_contract_opened_live_control")
     if any(not item["ready"] for item in rows):
         blockers.append("pre_live_crosswalk_unmapped_or_unverified")
+    crosswalk_contract = _pre_live_evidence_crosswalk_contract(
+        rows,
+        run_packet_status=str(run_packet.get("status")),
+        closed_control_ok=closed_control_ok,
+    )
+    blockers.extend(crosswalk_contract["blockers"])
     payload = {
         "available": True,
         "generated_at": timestamp,
@@ -3403,6 +3409,7 @@ def pre_live_evidence_crosswalk(
         "run_packet_path": run_packet.get("artifact_path"),
         "run_packet_status": run_packet.get("status"),
         "checklist_rows": rows,
+        "crosswalk_contract": crosswalk_contract["contract"],
         "summary": {
             "checklist_item_count": len(rows),
             "ready_item_count": sum(1 for item in rows if item["ready"]),
@@ -3417,6 +3424,66 @@ def pre_live_evidence_crosswalk(
     }
     _write_pre_live_evidence_crosswalk_artifact(resolved, payload)
     return payload
+
+
+def _pre_live_evidence_crosswalk_contract(
+    rows: list[dict[str, Any]],
+    *,
+    run_packet_status: str,
+    closed_control_ok: bool,
+) -> dict[str, Any]:
+    all_rows_ready = bool(rows) and all(row.get("ready") is True for row in rows)
+    all_rows_have_steps = bool(rows) and all(row.get("mapped_step_count", 0) > 0 for row in rows)
+    all_rows_have_artifacts = bool(rows) and all(row.get("mapped_artifact_count", 0) > 0 for row in rows)
+    all_rows_have_required_evidence = bool(rows) and all(bool(row.get("required_evidence")) for row in rows)
+    all_rows_have_closed_control_keys = bool(rows) and all(bool(row.get("closed_control_keys")) for row in rows)
+    all_rows_have_blocker_conditions = bool(rows) and all(bool(row.get("blocker_conditions")) for row in rows)
+    no_missing_mappings = bool(rows) and all(
+        not row.get("missing_steps") and not row.get("missing_artifacts") for row in rows
+    )
+    no_opened_controls = bool(rows) and all(not row.get("opened_controls") for row in rows)
+    all_artifacts_hash_bound = bool(rows) and all(
+        artifact.get("exists") is True
+        and bool(artifact.get("sha256"))
+        and artifact.get("required_before_live_authority") is True
+        for row in rows
+        for artifact in row.get("artifact_checks", [])
+    )
+    all_rows_have_artifact_checks = bool(rows) and all(bool(row.get("artifact_checks")) for row in rows)
+    contract = {
+        "run_packet_ready": run_packet_status == "ready_for_target_machine_execution",
+        "closed_control_contract_ok": closed_control_ok,
+        "all_rows_ready": all_rows_ready,
+        "all_rows_have_steps": all_rows_have_steps,
+        "all_rows_have_artifacts": all_rows_have_artifacts,
+        "all_rows_have_required_evidence": all_rows_have_required_evidence,
+        "all_rows_have_closed_control_keys": all_rows_have_closed_control_keys,
+        "all_rows_have_blocker_conditions": all_rows_have_blocker_conditions,
+        "no_missing_mappings": no_missing_mappings,
+        "no_opened_controls": no_opened_controls,
+        "all_rows_have_artifact_checks": all_rows_have_artifact_checks,
+        "all_artifacts_hash_bound_before_live_authority": (
+            all_rows_have_artifact_checks and all_artifacts_hash_bound
+        ),
+    }
+    blocker_names = {
+        "run_packet_ready": "pre_live_crosswalk_run_packet_not_ready",
+        "closed_control_contract_ok": "pre_live_crosswalk_closed_control_contract_open",
+        "all_rows_ready": "pre_live_crosswalk_rows_not_ready",
+        "all_rows_have_steps": "pre_live_crosswalk_rows_missing_steps",
+        "all_rows_have_artifacts": "pre_live_crosswalk_rows_missing_artifacts",
+        "all_rows_have_required_evidence": "pre_live_crosswalk_rows_missing_required_evidence",
+        "all_rows_have_closed_control_keys": "pre_live_crosswalk_rows_missing_closed_control_keys",
+        "all_rows_have_blocker_conditions": "pre_live_crosswalk_rows_missing_blocker_conditions",
+        "no_missing_mappings": "pre_live_crosswalk_rows_have_missing_mappings",
+        "no_opened_controls": "pre_live_crosswalk_rows_have_opened_controls",
+        "all_rows_have_artifact_checks": "pre_live_crosswalk_rows_missing_artifact_checks",
+        "all_artifacts_hash_bound_before_live_authority": "pre_live_crosswalk_artifacts_not_hash_bound",
+    }
+    return {
+        "contract": contract,
+        "blockers": sorted({blocker_names[key] for key, ok in contract.items() if not ok}),
+    }
 
 
 def _parse_sha256sums(path: Path) -> dict[str, str]:

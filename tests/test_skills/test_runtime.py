@@ -1676,6 +1676,7 @@ def test_pre_live_runtime_artifact_packets_preserve_hashes_and_contract_shapes(t
         "run_packet_path",
         "run_packet_status",
         "checklist_rows",
+        "crosswalk_contract",
         "summary",
         "blockers",
         "live_controls_enabled",
@@ -1687,6 +1688,7 @@ def test_pre_live_runtime_artifact_packets_preserve_hashes_and_contract_shapes(t
     assert crosswalk["packet_name"] == "pre_live_evidence_crosswalk"
     assert crosswalk["status"] == "mapped_pre_live_handoff_evidence"
     assert crosswalk["source_spec"] == "spec/s10_pre_live_handoff.md"
+    assert all(crosswalk["crosswalk_contract"].values())
     assert crosswalk["summary"] == {
         "checklist_item_count": 11,
         "ready_item_count": 11,
@@ -1893,6 +1895,20 @@ def test_pre_live_evidence_crosswalk_maps_s10_requirements_to_repo_proofs(tmp_pa
     assert payload["summary"]["all_items_ready"] is True
     assert payload["summary"]["closed_control_contract_ok"] is True
     assert payload["blockers"] == []
+    assert payload["crosswalk_contract"] == {
+        "run_packet_ready": True,
+        "closed_control_contract_ok": True,
+        "all_rows_ready": True,
+        "all_rows_have_steps": True,
+        "all_rows_have_artifacts": True,
+        "all_rows_have_required_evidence": True,
+        "all_rows_have_closed_control_keys": True,
+        "all_rows_have_blocker_conditions": True,
+        "no_missing_mappings": True,
+        "no_opened_controls": True,
+        "all_rows_have_artifact_checks": True,
+        "all_artifacts_hash_bound_before_live_authority": True,
+    }
     assert all(row["ready"] for row in payload["checklist_rows"])
     assert all(row["required_evidence"] for row in payload["checklist_rows"])
     assert all(not row["opened_controls"] for row in payload["checklist_rows"])
@@ -1903,6 +1919,39 @@ def test_pre_live_evidence_crosswalk_maps_s10_requirements_to_repo_proofs(tmp_pa
     )
     assert payload["live_controls_enabled"] is False
     assert Path(payload["artifact_path"]).is_file()
+
+
+def test_pre_live_evidence_crosswalk_contract_fails_closed_on_weak_row_binding():
+    rows = [
+        {
+            "ready": True,
+            "mapped_step_count": 1,
+            "mapped_artifact_count": 1,
+            "required_evidence": ["projection_checks_verified"],
+            "artifact_checks": [
+                {
+                    "name": "target_machine_validation_run_packet",
+                    "exists": True,
+                    "sha256": "a" * 64,
+                    "required_before_live_authority": True,
+                }
+            ],
+            "closed_control_keys": ["live_controls_enabled"],
+            "missing_steps": [],
+            "missing_artifacts": [],
+            "opened_controls": [],
+            "blocker_conditions": [],
+        }
+    ]
+
+    result = runtime_compat._pre_live_evidence_crosswalk_contract(
+        rows,
+        run_packet_status="ready_for_target_machine_execution",
+        closed_control_ok=True,
+    )
+
+    assert result["contract"]["all_rows_have_blocker_conditions"] is False
+    assert "pre_live_crosswalk_rows_missing_blocker_conditions" in result["blockers"]
 
 
 def test_pre_live_evidence_crosswalk_fails_closed_on_open_control_contract(tmp_path, monkeypatch):
@@ -1977,6 +2026,9 @@ def test_pre_live_evidence_crosswalk_fails_closed_on_open_control_contract(tmp_p
 
     assert payload["status"] == "blocked"
     assert "closed_control_contract_opened_live_control" in payload["blockers"]
+    assert "pre_live_crosswalk_closed_control_contract_open" in payload["blockers"]
+    assert payload["crosswalk_contract"]["closed_control_contract_ok"] is False
+    assert payload["crosswalk_contract"]["no_opened_controls"] is False
     assert payload["summary"]["closed_control_contract_ok"] is False
     assert any("paid_provider_calls_enabled" in row["opened_controls"] for row in payload["checklist_rows"])
     assert payload["live_controls_enabled"] is False
