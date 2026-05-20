@@ -197,6 +197,42 @@ class KernelModelIntelligenceTests(unittest.TestCase):
             decision,
         )
 
+    def promotion_gate_packet(
+        self,
+        *,
+        decision_id: str,
+        eval_run_ids: list[str],
+        holdout_use_ids: list[str],
+    ) -> dict:
+        return {
+            "decision_type": "model_promotion",
+            "authority_route": "operator_gate",
+            "proposed_routing_role": "research_local",
+            "role_assignment_effect": "none_until_operator_decision",
+            "eval_evidence_ids": eval_run_ids,
+            "holdout_use_record_ids": holdout_use_ids,
+            "demotion_rules": [
+                "quality_regression",
+                "latency_regression",
+                "license_or_terms_change",
+                "eval_drift",
+                "replacement_regression",
+            ],
+            "closed_route_mutation_controls": {
+                "route_mutation_enabled": False,
+                "production_route_mutation_enabled": False,
+                "active_promotion_enabled": False,
+                "candidate_state_effect": "shadow_only",
+            },
+            "operator_gate_defaults": {
+                "required_authority": "operator_gate",
+                "decision_id": decision_id,
+                "default_on_timeout": "keep_current_route",
+                "route_assignment_effect": "none_until_operator_approval",
+            },
+            "fail_closed_unless_all_bindings_present": True,
+        }
+
     def test_seed_task_eval_holdout_and_candidate_records_are_replayable(self):
         candidate, policy_id, eval_set = self.seed_registry()
 
@@ -641,12 +677,11 @@ class KernelModelIntelligenceTests(unittest.TestCase):
             ],
             frozen_holdout_confidence=0.81,
             confidence_threshold=0.80,
-            gate_packet={
-                "decision_type": "model_promotion",
-                "authority_route": "operator_gate",
-                "proposed_routing_role": "research_local",
-                "role_assignment_effect": "none_until_operator_decision",
-            },
+            gate_packet=self.promotion_gate_packet(
+                decision_id=decision_id,
+                eval_run_ids=[eval_run_id],
+                holdout_use_ids=[holdout_use_id],
+            ),
             risk_flags=["seed_pre_hermes_packet"],
         )
         packet_id = self.mi.create_promotion_decision_packet(
@@ -698,6 +733,22 @@ class KernelModelIntelligenceTests(unittest.TestCase):
         self.assertEqual(
             replay.model_promotion_decision_packets[packet_id]["gate_packet"]["authority_route"],
             "operator_gate",
+        )
+        self.assertEqual(
+            replay.model_promotion_decision_packets[packet_id]["gate_packet"]["eval_evidence_ids"],
+            [eval_run_id],
+        )
+        self.assertEqual(
+            replay.model_promotion_decision_packets[packet_id]["gate_packet"]["closed_route_mutation_controls"][
+                "route_mutation_enabled"
+            ],
+            False,
+        )
+        self.assertEqual(
+            replay.model_promotion_decision_packets[packet_id]["gate_packet"]["operator_gate_defaults"][
+                "default_on_timeout"
+            ],
+            "keep_current_route",
         )
         self.assertEqual(replay.model_candidates[candidate.model_id]["promotion_state"], "shadow")
 
@@ -778,6 +829,34 @@ class KernelModelIntelligenceTests(unittest.TestCase):
                 no_evidence,
             )
 
+        missing_gate_bindings = ModelPromotionDecisionPacket(
+            model_id=candidate.model_id,
+            task_class="quick_research_summarization",
+            proposed_routing_role="research_local",
+            recommendation="promote",
+            required_authority="operator_gate",
+            decision_id=decision_id,
+            eval_run_ids=[eval_run_id],
+            holdout_use_ids=[holdout_use_id],
+            evidence_refs=[
+                f"kernel:model_eval_runs/{eval_run_id}",
+                f"kernel:model_holdout_use_records/{holdout_use_id}",
+            ],
+            frozen_holdout_confidence=0.81,
+            confidence_threshold=0.80,
+            gate_packet={"decision_type": "model_promotion"},
+            risk_flags=[],
+            default_on_timeout="keep_current_route",
+        )
+        with self.assertRaisesRegex(ValueError, "gate bindings incomplete"):
+            self.mi.create_promotion_decision_packet(
+                model_intelligence_command(
+                    "model.promotion_decision_packet.create",
+                    "promotion-missing-gate-bindings",
+                ),
+                missing_gate_bindings,
+            )
+
         model_command = Command(
             command_type="model.promotion_decision_packet.create",
             requested_by="model",
@@ -799,7 +878,11 @@ class KernelModelIntelligenceTests(unittest.TestCase):
             evidence_refs=[f"kernel:model_eval_runs/{eval_run_id}"],
             frozen_holdout_confidence=0.81,
             confidence_threshold=0.80,
-            gate_packet={"decision_type": "model_promotion"},
+            gate_packet=self.promotion_gate_packet(
+                decision_id=decision_id,
+                eval_run_ids=[eval_run_id],
+                holdout_use_ids=[holdout_use_id],
+            ),
             risk_flags=[],
             default_on_timeout="keep_current_route",
         )

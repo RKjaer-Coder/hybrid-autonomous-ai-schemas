@@ -88,6 +88,55 @@ from .store_common import (
 )
 
 
+MODEL_PROMOTION_DEMOTION_RULES: tuple[str, ...] = (
+    "quality_regression",
+    "latency_regression",
+    "license_or_terms_change",
+    "eval_drift",
+    "replacement_regression",
+)
+
+
+def _model_promotion_gate_packet_blockers(packet: ModelPromotionDecisionPacket) -> list[str]:
+    gate = packet.gate_packet if isinstance(packet.gate_packet, dict) else {}
+    blockers: list[str] = []
+
+    if set(gate.get("eval_evidence_ids", [])) != set(packet.eval_run_ids):
+        blockers.append("eval_evidence_ids")
+    if set(gate.get("holdout_use_record_ids", [])) != set(packet.holdout_use_ids):
+        blockers.append("holdout_use_record_ids")
+
+    demotion_rules = gate.get("demotion_rules", [])
+    if not isinstance(demotion_rules, list) or not set(MODEL_PROMOTION_DEMOTION_RULES).issubset(set(demotion_rules)):
+        blockers.append("demotion_rules")
+
+    controls = gate.get("closed_route_mutation_controls", {})
+    controls_closed = (
+        isinstance(controls, dict)
+        and controls.get("route_mutation_enabled") is False
+        and controls.get("production_route_mutation_enabled") is False
+        and controls.get("active_promotion_enabled") is False
+        and controls.get("candidate_state_effect") == "shadow_only"
+    )
+    if not controls_closed:
+        blockers.append("closed_route_mutation_controls")
+
+    defaults = gate.get("operator_gate_defaults", {})
+    defaults_bound = (
+        isinstance(defaults, dict)
+        and defaults.get("required_authority") == "operator_gate"
+        and defaults.get("decision_id") == packet.decision_id
+        and defaults.get("default_on_timeout") == packet.default_on_timeout
+        and defaults.get("route_assignment_effect") == "none_until_operator_approval"
+    )
+    if not defaults_bound:
+        blockers.append("operator_gate_defaults")
+
+    if gate.get("fail_closed_unless_all_bindings_present") is not True:
+        blockers.append("fail_closed")
+    return blockers
+
+
 class ModelIntelligenceKernelTransactionMixin:
     def register_model_task_class(self, task_class: ModelTaskClassRecord) -> str:
         if task_class.expansion_allowed:
@@ -578,6 +627,13 @@ class ModelIntelligenceKernelTransactionMixin:
             if use_row["decision_id"] != packet.decision_id:
                 raise ValueError("model promotion packet holdout-use Decision id mismatch")
 
+        gate_blockers = _model_promotion_gate_packet_blockers(packet)
+        if gate_blockers:
+            raise ValueError(
+                "model promotion packet gate bindings incomplete: "
+                + ", ".join(gate_blockers)
+            )
+
         payload = _model_promotion_packet_payload(packet)
         event_id = self.append_event("model_promotion_decision_packet_created", "decision", packet.packet_id, payload)
         self.conn.execute(
@@ -821,4 +877,3 @@ class ModelIntelligenceKernelTransactionMixin:
         if decision["decision_type"] != "model_promotion":
             raise ValueError("referenced Decision record is not a model-promotion decision")
         return decision
-
