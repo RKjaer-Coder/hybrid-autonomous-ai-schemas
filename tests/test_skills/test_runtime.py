@@ -66,6 +66,32 @@ from skills.runtime import (
     workspace_overview,
 )
 
+_TARGET_MACHINE_PROOF_KEY_BY_EVIDENCE = {
+    "projection_checks_verified": "readiness_requires_projection_checks",
+    "first_live_project_events_before_projection_verified": "first_live_project_events_before_projection",
+    "resume_replay_intents_reconstructed_only": "resume_replay_reconstructs_intents_only",
+    "external_side_effect_replay_disabled_verified": "external_side_effect_replay_disabled",
+    "manifest_artifacts_hash_bound_before_live_authority": "manifest_artifacts_hash_bound_before_live_authority",
+}
+
+
+def _bound_target_machine_evidence_records(run_packet):
+    artifact_name = run_packet["evidence_manifest"][0]["name"]
+    records = {}
+    for step in run_packet["run_steps"]:
+        for evidence_id in step["required_evidence"]:
+            record = {
+                "status": "present",
+                "run_step": step["name"],
+                "run_step_number": step["step"],
+                "artifact_names": [artifact_name],
+            }
+            proof_key = _TARGET_MACHINE_PROOF_KEY_BY_EVIDENCE.get(evidence_id)
+            if proof_key:
+                record["proof_contract_key"] = proof_key
+            records[evidence_id] = record
+    return {"evidence": records}
+
 
 def test_prepare_runtime_directories_creates_layout(tmp_path):
     cfg = IntegrationConfig(
@@ -1726,12 +1752,7 @@ def test_pre_live_runtime_artifact_packets_preserve_hashes_and_contract_shapes(t
     target_run_packet = bundle / run_packet_path.name
     target_run_packet.write_bytes(run_packet_path.read_bytes())
     copied.append(target_run_packet)
-    evidence_ids = {
-        evidence_id
-        for step in run_packet["run_steps"]
-        for evidence_id in step["required_evidence"]
-    }
-    evidence_records = {"evidence": {evidence_id: {"status": "present"} for evidence_id in sorted(evidence_ids)}}
+    evidence_records = _bound_target_machine_evidence_records(run_packet)
     evidence_records_path = bundle / "evidence_records.json"
     evidence_records_path.write_text(json.dumps(evidence_records, sort_keys=True), encoding="utf-8")
     copied.append(evidence_records_path)
@@ -2144,12 +2165,7 @@ def test_target_machine_evidence_check_validates_preserved_bundle(tmp_path):
         (bundle / source.name).write_bytes(source.read_bytes())
     run_packet_path = Path(run_packet["artifact_path"])
     (bundle / run_packet_path.name).write_bytes(run_packet_path.read_bytes())
-    evidence_ids = {
-        evidence_id
-        for step in run_packet["run_steps"]
-        for evidence_id in step["required_evidence"]
-    }
-    evidence_records = {"evidence": {evidence_id: {"status": "present"} for evidence_id in sorted(evidence_ids)}}
+    evidence_records = _bound_target_machine_evidence_records(run_packet)
     (bundle / "evidence_records.json").write_text(json.dumps(evidence_records, sort_keys=True), encoding="utf-8")
     sha_lines = []
     for path in sorted(bundle.iterdir()):
@@ -2207,12 +2223,7 @@ def test_target_machine_evidence_check_fails_closed_when_run_packet_proof_contra
     drifted_packet["replay_projection_proof_contract"]["resume_replay_reconstructs_intents_only"] = False
     run_packet_path = bundle / Path(run_packet["artifact_path"]).name
     run_packet_path.write_text(json.dumps(drifted_packet, sort_keys=True), encoding="utf-8")
-    evidence_ids = {
-        evidence_id
-        for step in run_packet["run_steps"]
-        for evidence_id in step["required_evidence"]
-    }
-    evidence_records = {"evidence": {evidence_id: {"status": "present"} for evidence_id in sorted(evidence_ids)}}
+    evidence_records = _bound_target_machine_evidence_records(run_packet)
     (bundle / "evidence_records.json").write_text(json.dumps(evidence_records, sort_keys=True), encoding="utf-8")
     sha_lines = []
     for path in sorted(bundle.iterdir()):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 
 from kernel.services.runtime_artifacts import (
@@ -107,6 +108,66 @@ def test_target_machine_evidence_check_packet_fails_closed_on_missing_evidence(t
     assert "required_evidence_missing" in payload["blockers"]
     assert "manifest_artifact_missing" in payload["blockers"]
     assert payload["live_controls_enabled"] is False
+
+
+def test_target_machine_evidence_check_packet_fails_closed_on_unbound_preserved_records(tmp_path):
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    artifact = bundle / "pre_live_mission_control.json"
+    artifact.write_text('{"live_controls_enabled": false}\n', encoding="utf-8")
+    artifact_hash = artifact.read_bytes()
+    packet_path = bundle / "target_machine_validation_run_packet.json"
+    sha_path = bundle / "SHA256SUMS"
+    packet = {
+        "run_steps": [
+            {
+                "step": 1,
+                "name": "pre_live_mission_control",
+                "required_evidence": ["projection_checks_verified"],
+            }
+        ],
+        "evidence_manifest": [
+            {
+                "name": "pre_live_mission_control",
+                "path": str(artifact),
+                "sha256": hashlib.sha256(artifact_hash).hexdigest(),
+                "required_before_live_authority": True,
+            }
+        ],
+        "replay_projection_proof_contract": {
+            "first_live_project_events_before_projection": True,
+            "readiness_requires_projection_checks": True,
+            "resume_replay_reconstructs_intents_only": True,
+            "external_side_effect_replay_disabled": True,
+            "manifest_artifacts_hash_bound_before_live_authority": True,
+        },
+        "closed_control_contract": {
+            "live_controls_enabled": False,
+            "dashboard_writes_enabled": False,
+            "paid_provider_calls_enabled": False,
+            "customer_visible_commitments_enabled": False,
+            "model_route_promotion_enabled": False,
+            "autonomous_patch_application_enabled": False,
+            "side_effect_replay_enabled": False,
+        },
+        "live_controls_enabled": False,
+    }
+
+    payload = target_machine_evidence_check_packet(
+        bundle=bundle,
+        packet_path=packet_path,
+        sha_path=sha_path,
+        packet=packet,
+        sha_entries={"pre_live_mission_control.json": hashlib.sha256(artifact_hash).hexdigest()},
+        evidence_records={"projection_checks_verified": {"status": "present"}},
+        generated_at="2026-05-12T00:00:00+00:00",
+        artifact_path=tmp_path / "out.json",
+    )
+
+    assert payload["status"] == "blocked"
+    assert "preserved_evidence_record_binding_missing" in payload["blockers"]
+    assert "replay_projection_contract_not_proven" in payload["blockers"]
+    assert payload["replay_projection_contract"]["preserved_evidence_records_bound_to_contract"] is False
 
 
 def test_first_live_project_acceptance_check_packet_preserves_gate_shape(tmp_path):

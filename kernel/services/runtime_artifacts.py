@@ -76,6 +76,14 @@ TARGET_MACHINE_REPLAY_PROJECTION_EVIDENCE: tuple[str, ...] = (
     "manifest_artifacts_hash_bound_before_live_authority",
 )
 
+TARGET_MACHINE_REPLAY_PROJECTION_EVIDENCE_PROOF_KEYS: dict[str, str] = {
+    "projection_checks_verified": "readiness_requires_projection_checks",
+    "first_live_project_events_before_projection_verified": "first_live_project_events_before_projection",
+    "resume_replay_intents_reconstructed_only": "resume_replay_reconstructs_intents_only",
+    "external_side_effect_replay_disabled_verified": "external_side_effect_replay_disabled",
+    "manifest_artifacts_hash_bound_before_live_authority": "manifest_artifacts_hash_bound_before_live_authority",
+}
+
 
 def runtime_artifact_path(config: IntegrationConfig, artifact_name: str) -> Path:
     paths = runtime_support_artifact_paths(config)
@@ -184,6 +192,15 @@ def target_machine_evidence_check_packet(
     generated_at: str,
     artifact_path: Path,
 ) -> dict[str, Any]:
+    evidence_step_by_id = {
+        str(item): {
+            "step": step.get("step"),
+            "name": step.get("name"),
+        }
+        for step in packet.get("run_steps", [])
+        if isinstance(step, dict)
+        for item in step.get("required_evidence", [])
+    }
     required_evidence = sorted(
         {
             str(item)
@@ -266,6 +283,11 @@ def target_machine_evidence_check_packet(
         for item in packet.get("evidence_manifest", [])
         if isinstance(item, dict)
     )
+    evidence_record_binding_failures = _target_machine_evidence_record_binding_failures(
+        evidence_records=evidence_records,
+        evidence_step_by_id=evidence_step_by_id,
+        required_artifact_names=required_artifact_names,
+    )
     replay_projection_contract = {
         "run_packet_proof_contract_declared": isinstance(proof_contract, dict)
         and all(proof_contract.get(key) is True for key in TARGET_MACHINE_REPLAY_PROJECTION_PROOF_KEYS),
@@ -287,7 +309,10 @@ def target_machine_evidence_check_packet(
             for item in artifact_results
         ),
         "required_evidence_non_ambiguous": not missing_required_evidence and not ambiguous_required_evidence,
+        "preserved_evidence_records_bound_to_contract": not evidence_record_binding_failures,
     }
+    if evidence_record_binding_failures:
+        blockers.append("preserved_evidence_record_binding_missing")
     if packet and not all(replay_projection_contract.values()):
         blockers.append("replay_projection_contract_not_proven")
     status = "validated_preserved_target_machine_bundle" if not blockers else "blocked"
@@ -314,6 +339,43 @@ def target_machine_evidence_check_packet(
         "activation_effect": "none",
         "artifact_path": str(artifact_path),
     }
+
+
+def _target_machine_evidence_record_binding_failures(
+    *,
+    evidence_records: dict[str, dict[str, Any]],
+    evidence_step_by_id: dict[str, dict[str, Any]],
+    required_artifact_names: list[str],
+) -> list[str]:
+    failures: list[str] = []
+    required_artifacts = set(required_artifact_names)
+    for evidence_id, record in sorted(evidence_records.items()):
+        step = evidence_step_by_id.get(evidence_id)
+        if not step:
+            failures.append(f"{evidence_id}:run_step")
+            continue
+
+        bound_step = record.get("run_step_name") or record.get("run_step")
+        bound_step_number = record.get("run_step_number")
+        step_name = step.get("name")
+        step_number = step.get("step")
+        if bound_step != step_name and bound_step_number != step_number:
+            failures.append(f"{evidence_id}:run_step")
+
+        bound_artifacts = record.get("artifact_names", record.get("artifacts", record.get("artifact_name")))
+        if isinstance(bound_artifacts, str):
+            bound_artifact_names = {bound_artifacts}
+        elif isinstance(bound_artifacts, list):
+            bound_artifact_names = {str(item) for item in bound_artifacts if item}
+        else:
+            bound_artifact_names = set()
+        if not bound_artifact_names or not bound_artifact_names.issubset(required_artifacts):
+            failures.append(f"{evidence_id}:artifact")
+
+        proof_key = TARGET_MACHINE_REPLAY_PROJECTION_EVIDENCE_PROOF_KEYS.get(evidence_id)
+        if proof_key and record.get("proof_contract_key") != proof_key:
+            failures.append(f"{evidence_id}:proof_contract_key")
+    return failures
 
 
 def first_live_project_acceptance_check_packet(
