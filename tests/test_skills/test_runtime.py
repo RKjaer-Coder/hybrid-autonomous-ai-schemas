@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from kernel import runtime_compat
 from harness_variants import HarnessVariantManager
 from kernel import KernelStore
 from runtime_control import RuntimeControlManager
@@ -1143,6 +1144,39 @@ def test_migration_readiness_creates_kernel_map_and_workspace_surface(tmp_path):
     assert projected["live_controls_enabled"] == 0
 
 
+def test_migration_readiness_repeated_run_recovers_idempotent_kernel_payloads(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+    as_of = "2026-05-12T00:00:00+00:00"
+
+    first = migration_readiness(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of=as_of,
+    )
+    repeated = migration_readiness(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of=as_of,
+    )
+
+    assert repeated["available"] is True
+    assert repeated["as_of"] == first["as_of"]
+    assert repeated["summary"] == first["summary"]
+    assert repeated["record_ids"] == first["record_ids"]
+    assert repeated["comparison"]["matches"] is True
+    assert repeated["comparison"]["scope"] == "legacy_repo"
+    assert repeated["comparison"]["replay_records"] == repeated["comparison"]["projection_records"]
+    assert "idempotent" not in repeated["comparison"]
+    assert repeated["operator_projection_comparison"]["matches"] is True
+    assert repeated["live_controls_enabled"] is False
+    assert json.loads(Path(repeated["artifact_path"]).read_text(encoding="utf-8")) == repeated
+
+
 def test_pre_hermes_readiness_summarizes_blocked_substrate_without_live_controls(tmp_path):
     cfg = IntegrationConfig(
         data_dir=str(tmp_path / "data"),
@@ -1301,6 +1335,9 @@ def test_model_efficiency_service_packet_is_operator_gated_local_only_offer(tmp_
     assert payload["summary"]["route_mutation_enabled"] is False
     assert payload["summary"]["operator_gate_required_for_customer_delivery"] is True
     assert payload["summary"]["external_side_effects_allowed"] is False
+    assert payload["summary"]["operator_decision_options"] == 2
+    assert payload["operator_decision_packet"]["required_authority"] == "operator_gate"
+    assert "model_route_promotion" in payload["operator_decision_packet"]["forbidden_without_operator_gate"]
     assert payload["kernel_boundaries"]["model_intelligence_supplies_evidence_only"] is True
     assert "customer_visible_delivery" in payload["blocked_autonomous_actions"]
     assert payload["live_controls_enabled"] is False
@@ -1485,6 +1522,7 @@ def test_target_machine_validation_run_packet_preserves_evidence_manifest(tmp_pa
     assert payload["component_summary"]["model_shadow_seed_task_class_count"] == 3
     assert payload["component_summary"]["model_efficiency_seed_task_class_count"] == 3
     assert all(payload["execution_order_contract"].values())
+    assert all(payload["replay_projection_proof_contract"].values())
     assert payload["closed_control_contract"] == {
         "live_controls_enabled": False,
         "dashboard_writes_enabled": False,
@@ -1501,6 +1539,278 @@ def test_target_machine_validation_run_packet_preserves_evidence_manifest(tmp_pa
     assert "paid_provider_calls" in payload["fail_closed_controls"]
     assert payload["live_controls_enabled"] is False
     assert Path(payload["artifact_path"]).is_file()
+
+
+def test_pre_live_runtime_artifact_packets_preserve_hashes_and_contract_shapes(tmp_path):
+    def cfg_for(name: str) -> IntegrationConfig:
+        root = tmp_path / name
+        return IntegrationConfig(
+            data_dir=str(root / "data"),
+            skills_dir=str(root / "skills"),
+            checkpoints_dir=str(root / "skills" / "checkpoints"),
+            alerts_dir=str(root / "alerts"),
+        )
+
+    cfg = cfg_for("run-packet")
+    timestamp = "2026-05-12T00:08:00+00:00"
+
+    run_packet = target_machine_validation_run_packet(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of=timestamp,
+        candidate_limit=2,
+    )
+    expected_run_keys = {
+        "available",
+        "generated_at",
+        "packet_name",
+        "status",
+        "repo_root",
+        "run_steps",
+        "evidence_manifest",
+        "component_summary",
+        "execution_order_contract",
+        "replay_projection_proof_contract",
+        "closed_control_contract",
+        "blockers",
+        "fail_closed_controls",
+        "operator_signoffs_required",
+        "artifact_path",
+        "live_controls_enabled",
+        "activation_effect",
+        "packet_hash",
+    }
+    assert set(run_packet) == expected_run_keys
+    assert run_packet["packet_name"] == "target_machine_validation_run_packet"
+    assert run_packet["status"] == "ready_for_target_machine_execution"
+    assert run_packet["closed_control_contract"] == {
+        "live_controls_enabled": False,
+        "dashboard_writes_enabled": False,
+        "paid_provider_calls_enabled": False,
+        "customer_visible_commitments_enabled": False,
+        "model_route_promotion_enabled": False,
+        "autonomous_patch_application_enabled": False,
+        "side_effect_replay_enabled": False,
+    }
+    assert [step["step"] for step in run_packet["run_steps"]] == list(range(1, 11))
+    assert run_packet["replay_projection_proof_contract"] == {
+        "first_live_project_events_before_projection": True,
+        "readiness_requires_projection_checks": True,
+        "resume_replay_reconstructs_intents_only": True,
+        "external_side_effect_replay_disabled": True,
+        "manifest_artifacts_hash_bound_before_live_authority": True,
+    }
+    assert {item["name"] for item in run_packet["evidence_manifest"]} == {
+        "pre_live_mission_control",
+        "hermes_adapter_gauntlet",
+        "first_live_project_packet",
+        "model_shadow_ops",
+        "model_efficiency_service_packet",
+    }
+
+    for item in run_packet["evidence_manifest"]:
+        artifact = json.loads(Path(item["path"]).read_text(encoding="utf-8"))
+        assert item["sha256"] == hashlib.sha256(Path(item["path"]).read_bytes()).hexdigest()
+        assert item["packet_hash"] == artifact["packet_hash"]
+        assert item["required_before_live_authority"] is True
+
+    crosswalk = pre_live_evidence_crosswalk(
+        cfg_for("crosswalk"),
+        repo_root=str(Path.cwd()),
+        as_of=timestamp,
+        candidate_limit=2,
+    )
+    expected_crosswalk_keys = {
+        "available",
+        "generated_at",
+        "packet_name",
+        "status",
+        "repo_root",
+        "source_spec",
+        "run_packet_path",
+        "run_packet_status",
+        "checklist_rows",
+        "summary",
+        "blockers",
+        "live_controls_enabled",
+        "activation_effect",
+        "artifact_path",
+        "packet_hash",
+    }
+    assert set(crosswalk) == expected_crosswalk_keys
+    assert crosswalk["packet_name"] == "pre_live_evidence_crosswalk"
+    assert crosswalk["status"] == "mapped_pre_live_handoff_evidence"
+    assert crosswalk["source_spec"] == "spec/s10_pre_live_handoff.md"
+    assert crosswalk["summary"] == {
+        "checklist_item_count": 11,
+        "ready_item_count": 11,
+        "all_items_ready": True,
+        "closed_control_contract_ok": True,
+        "artifact_count": 6,
+    }
+    assert all(set(row) == {
+        "checklist_id",
+        "requirement",
+        "step_names",
+        "artifact_names",
+        "mapped_step_count",
+        "mapped_artifact_count",
+        "required_evidence",
+        "artifact_checks",
+        "closed_control_keys",
+        "missing_steps",
+        "missing_artifacts",
+        "failing_artifacts",
+        "opened_controls",
+        "blocker_conditions",
+        "ready",
+    } for row in crosswalk["checklist_rows"])
+
+    bundle = tmp_path / "target-machine-bundle"
+    bundle.mkdir()
+    copied = []
+    for item in run_packet["evidence_manifest"]:
+        source = Path(item["path"])
+        target = bundle / source.name
+        target.write_bytes(source.read_bytes())
+        copied.append(target)
+    run_packet_path = Path(run_packet["artifact_path"])
+    target_run_packet = bundle / run_packet_path.name
+    target_run_packet.write_bytes(run_packet_path.read_bytes())
+    copied.append(target_run_packet)
+    evidence_ids = {
+        evidence_id
+        for step in run_packet["run_steps"]
+        for evidence_id in step["required_evidence"]
+    }
+    evidence_records = {"evidence": {evidence_id: {"status": "present"} for evidence_id in sorted(evidence_ids)}}
+    evidence_records_path = bundle / "evidence_records.json"
+    evidence_records_path.write_text(json.dumps(evidence_records, sort_keys=True), encoding="utf-8")
+    copied.append(evidence_records_path)
+    (bundle / "SHA256SUMS").write_text(
+        "".join(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n" for path in sorted(copied)),
+        encoding="utf-8",
+    )
+
+    evidence_check = target_machine_evidence_check(
+        cfg,
+        bundle_dir=str(bundle),
+        as_of="2026-05-12T00:09:00+00:00",
+    )
+    expected_evidence_check_keys = {
+        "available",
+        "generated_at",
+        "packet_name",
+        "status",
+        "bundle_dir",
+        "run_packet_path",
+        "sha256sums_path",
+        "required_evidence",
+        "required_artifacts",
+        "missing_required_evidence",
+        "ambiguous_required_evidence",
+        "artifact_results",
+        "closed_control_contract_ok",
+        "replay_projection_contract",
+        "blockers",
+        "live_controls_enabled",
+        "activation_effect",
+        "artifact_path",
+        "packet_hash",
+    }
+    assert set(evidence_check) == expected_evidence_check_keys
+    assert evidence_check["packet_name"] == "target_machine_evidence_check"
+    assert evidence_check["status"] == "validated_preserved_target_machine_bundle"
+    assert evidence_check["blockers"] == []
+    assert evidence_check["closed_control_contract_ok"] is True
+    assert all(evidence_check["replay_projection_contract"].values())
+    assert all(set(item) == {
+        "name",
+        "filename",
+        "exists",
+        "sha256",
+        "sha256sum_entry",
+        "run_packet_sha256",
+        "matches_sha256sums",
+        "matches_run_packet_manifest",
+        "required_before_live_authority",
+    } for item in evidence_check["artifact_results"])
+    assert all(item["matches_sha256sums"] and item["matches_run_packet_manifest"] for item in evidence_check["artifact_results"])
+
+    acceptance = first_live_project_acceptance_check(
+        cfg_for("acceptance"),
+        repo_root=str(Path.cwd()),
+        as_of=timestamp,
+    )
+    expected_acceptance_keys = {
+        "available",
+        "generated_at",
+        "packet_name",
+        "status",
+        "fixture_id",
+        "checks",
+        "blockers",
+        "live_controls_enabled",
+        "activation_effect",
+        "artifact_path",
+        "packet_hash",
+    }
+    assert set(acceptance) == expected_acceptance_keys
+    assert acceptance["packet_name"] == "first_live_project_acceptance_check"
+    assert acceptance["status"] == "accepted_pre_live_local_only"
+    assert acceptance["checks"] == {
+        "local_only_artifact_output": True,
+        "operator_gate_presence": True,
+        "feedback_ingestion": True,
+        "no_external_side_effect_execution": True,
+        "live_controls_disabled": True,
+        "external_commitments_disabled": True,
+    }
+
+    for packet in [run_packet, crosswalk, evidence_check, acceptance]:
+        emitted = json.loads(Path(packet["artifact_path"]).read_text(encoding="utf-8"))
+        assert emitted == packet
+        assert packet["packet_hash"] == runtime_compat._stable_json_hash(
+            {key: value for key, value in packet.items() if key != "packet_hash"}
+        )
+        assert packet["live_controls_enabled"] is False
+        assert packet["activation_effect"] in {
+            "none",
+            "none_until_target_machine_evidence_and_operator_gates_pass",
+        }
+        assert "events" not in packet
+        assert "event_id" not in packet
+        assert "command_id" not in packet
+
+
+def test_pre_live_crosswalk_can_reuse_warmed_target_packet_runtime_layout(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+    as_of = "2026-05-12T00:08:00+00:00"
+
+    run_packet = target_machine_validation_run_packet(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of=as_of,
+        candidate_limit=2,
+    )
+    crosswalk = pre_live_evidence_crosswalk(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of=as_of,
+        candidate_limit=2,
+    )
+
+    assert run_packet["status"] == "ready_for_target_machine_execution"
+    assert crosswalk["status"] == "mapped_pre_live_handoff_evidence"
+    assert crosswalk["summary"]["ready_item_count"] == 11
+    assert crosswalk["blockers"] == []
+    assert crosswalk["live_controls_enabled"] is False
+    assert json.loads(Path(crosswalk["artifact_path"]).read_text(encoding="utf-8")) == crosswalk
 
 
 def test_pre_live_evidence_crosswalk_maps_s10_requirements_to_repo_proofs(tmp_path):
@@ -1535,6 +1845,83 @@ def test_pre_live_evidence_crosswalk_maps_s10_requirements_to_repo_proofs(tmp_pa
     )
     assert payload["live_controls_enabled"] is False
     assert Path(payload["artifact_path"]).is_file()
+
+
+def test_pre_live_evidence_crosswalk_fails_closed_on_open_control_contract(tmp_path, monkeypatch):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+    artifact_names = [
+        "hermes_adapter_gauntlet",
+        "pre_live_mission_control",
+        "model_efficiency_service_packet",
+        "model_shadow_ops",
+    ]
+    evidence_manifest = []
+    for name in artifact_names:
+        path = tmp_path / f"{name}.json"
+        path.write_text(json.dumps({"packet_name": name}, sort_keys=True), encoding="utf-8")
+        evidence_manifest.append(
+            {
+                "name": name,
+                "path": str(path),
+                "exists": True,
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "required_before_live_authority": True,
+            }
+        )
+    run_packet_path = tmp_path / "target_machine_validation_run_packet.json"
+    run_packet_path.write_text("{}", encoding="utf-8")
+    closed_contract = {
+        "live_controls_enabled": False,
+        "dashboard_writes_enabled": False,
+        "paid_provider_calls_enabled": True,
+        "customer_visible_commitments_enabled": False,
+        "model_route_promotion_enabled": False,
+        "autonomous_patch_application_enabled": False,
+        "side_effect_replay_enabled": False,
+    }
+    step_names = [
+        "repo_metadata_snapshot",
+        "handoff_checksum_verification",
+        "recovery_and_migration_readiness",
+        "hermes_adapter_gauntlet",
+        "pre_live_mission_control",
+        "model_shadow_ops",
+        "first_live_project_packet",
+        "known_bad_manual_patch_gate_review",
+        "model_efficiency_service_packet",
+        "preserve_target_machine_outputs",
+    ]
+
+    def opened_run_packet(*args, **kwargs):
+        return {
+            "status": "ready_for_target_machine_execution",
+            "artifact_path": str(run_packet_path),
+            "run_steps": [
+                {"name": name, "required_evidence": [f"{name}_evidence"]}
+                for name in step_names
+            ],
+            "evidence_manifest": evidence_manifest,
+            "closed_control_contract": closed_contract,
+        }
+
+    monkeypatch.setattr(runtime_compat, "target_machine_validation_run_packet", opened_run_packet)
+
+    payload = pre_live_evidence_crosswalk(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of="2026-05-12T00:08:00+00:00",
+    )
+
+    assert payload["status"] == "blocked"
+    assert "closed_control_contract_opened_live_control" in payload["blockers"]
+    assert payload["summary"]["closed_control_contract_ok"] is False
+    assert any("paid_provider_calls_enabled" in row["opened_controls"] for row in payload["checklist_rows"])
+    assert payload["live_controls_enabled"] is False
 
 
 def test_pre_live_bundle_verification_checks_required_packets_and_checksums(tmp_path):
@@ -1583,6 +1970,50 @@ def test_pre_live_bundle_verification_checks_required_packets_and_checksums(tmp_
     assert Path(payload["artifact_path"]).is_file()
 
 
+def test_pre_live_bundle_verification_fails_closed_on_open_control_contract(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+    run_packet = target_machine_validation_run_packet(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of="2026-05-12T00:08:00+00:00",
+        candidate_limit=2,
+    )
+    bundle = tmp_path / "pre-live-bundle"
+    bundle.mkdir()
+    copied = []
+    for item in run_packet["evidence_manifest"]:
+        source = Path(item["path"])
+        target = bundle / source.name
+        target.write_bytes(source.read_bytes())
+        copied.append(target)
+    opened_packet = dict(run_packet)
+    opened_packet["closed_control_contract"] = dict(run_packet["closed_control_contract"])
+    opened_packet["closed_control_contract"]["paid_provider_calls_enabled"] = True
+    target = bundle / Path(run_packet["artifact_path"]).name
+    target.write_text(json.dumps(opened_packet, sort_keys=True), encoding="utf-8")
+    copied.append(target)
+    (bundle / "SHA256SUMS").write_text(
+        "".join(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n" for path in sorted(copied)),
+        encoding="utf-8",
+    )
+
+    payload = pre_live_bundle_verification(
+        cfg,
+        bundle_dir=str(bundle),
+        as_of="2026-05-12T00:08:30+00:00",
+    )
+
+    assert payload["status"] == "blocked"
+    assert "closed_control_contract_opened_live_control" in payload["blockers"]
+    assert payload["summary"]["required_checksums_match"] is True
+    assert payload["live_controls_enabled"] is False
+
+
 def test_target_machine_evidence_check_validates_preserved_bundle(tmp_path):
     cfg = IntegrationConfig(
         data_dir=str(tmp_path / "data"),
@@ -1626,6 +2057,15 @@ def test_target_machine_evidence_check_validates_preserved_bundle(tmp_path):
     assert payload["status"] == "validated_preserved_target_machine_bundle"
     assert payload["blockers"] == []
     assert payload["missing_required_evidence"] == []
+    assert payload["closed_control_contract_ok"] is True
+    assert payload["required_artifacts"] == [
+        "first_live_project_packet",
+        "hermes_adapter_gauntlet",
+        "model_efficiency_service_packet",
+        "model_shadow_ops",
+        "pre_live_mission_control",
+    ]
+    assert all(payload["replay_projection_contract"].values())
     assert all(item["matches_sha256sums"] for item in payload["artifact_results"])
     assert all(item["matches_run_packet_manifest"] for item in payload["artifact_results"])
     assert payload["live_controls_enabled"] is False

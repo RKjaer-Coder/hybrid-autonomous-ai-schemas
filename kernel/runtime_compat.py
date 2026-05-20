@@ -67,6 +67,20 @@ from kernel.projections import (
     apply_operator_digest_projection_outbox,
     compare_operator_digest_migration_readiness_projection,
 )
+from kernel.services import (
+    file_sha256,
+    first_live_project_acceptance_check_packet,
+    pre_live_artifact_controls_disabled,
+    pre_live_closed_control_contract,
+    pre_live_controls_are_closed,
+    pre_live_evidence_crosswalk_row,
+    pre_live_fail_closed_controls,
+    runtime_evidence_manifest_item,
+    stable_json_hash,
+    target_machine_evidence_check_packet,
+    write_hashed_runtime_artifact,
+    write_runtime_artifact,
+)
 from migrate import LEGACY_SCHEMAS as SCHEMAS, apply_schema, verify_database
 from runtime_control import RuntimeControlManager
 from eval.fixtures.live_project_handoff import generate_first_live_project_test_set
@@ -940,6 +954,45 @@ def _latest_kernel_comparison_row(
     return payload
 
 
+def _latest_migration_readiness_comparison_row(
+    db_path: Path,
+    scope: str,
+) -> dict[str, Any] | None:
+    if not db_path.is_file():
+        return None
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT *
+            FROM migration_readiness_replay_projection_comparisons
+            WHERE scope=?
+            ORDER BY created_at DESC, rowid DESC
+            LIMIT 1
+            """,
+            (scope,),
+        ).fetchone()
+    if row is None:
+        return None
+    payload = _json_row(
+        row,
+        (
+            "replay_records_json",
+            "projection_records_json",
+            "mismatches_json",
+        ),
+    )
+    for raw_name, public_name in (
+        ("replay_records_json", "replay_records"),
+        ("projection_records_json", "projection_records"),
+        ("mismatches_json", "mismatches"),
+    ):
+        if raw_name in payload:
+            payload[public_name] = payload.pop(raw_name)
+    payload["matches"] = bool(payload["matches"])
+    return payload
+
+
 def _kernel_row_by_id(db_path: Path, table: str, id_column: str, row_id: str) -> dict[str, Any] | None:
     if not db_path.is_file():
         return None
@@ -1208,25 +1261,35 @@ def _repo_local_hermes_adapter_proof_inputs(
 
 
 def _write_hermes_adapter_readiness_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
-    artifact = dict(payload)
-    artifact.setdefault("artifact_path", str(_runtime_hermes_adapter_readiness_path(config)))
-    artifact.setdefault("live_controls_enabled", False)
-    artifact.setdefault(
-        "disabled_live_controls",
-        ["dashboard_write_controls", "customer_commitments", "provider_calls", "provider_plugin_mutation"],
+    write_runtime_artifact(
+        config,
+        "hermes_adapter_readiness",
+        payload,
+        default_fields={
+            "disabled_live_controls": [
+                "dashboard_write_controls",
+                "customer_commitments",
+                "provider_calls",
+                "provider_plugin_mutation",
+            ],
+        },
     )
-    _write_json_yaml(_runtime_hermes_adapter_readiness_path(config), artifact)
 
 
 def _write_recovery_readiness_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
-    artifact = dict(payload)
-    artifact.setdefault("artifact_path", str(_runtime_recovery_readiness_path(config)))
-    artifact.setdefault("live_controls_enabled", False)
-    artifact.setdefault(
-        "disabled_live_controls",
-        ["live_hermes_attachment", "dashboard_write_controls", "provider_calls", "payload_file_access"],
+    write_runtime_artifact(
+        config,
+        "recovery_readiness",
+        payload,
+        default_fields={
+            "disabled_live_controls": [
+                "live_hermes_attachment",
+                "dashboard_write_controls",
+                "provider_calls",
+                "payload_file_access",
+            ],
+        },
     )
-    _write_json_yaml(_runtime_recovery_readiness_path(config), artifact)
 
 
 def recovery_readiness(
@@ -1476,17 +1539,11 @@ def latest_hermes_adapter_readiness(config: IntegrationConfig | None = None) -> 
 
 
 def _write_migration_readiness_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
-    artifact = dict(payload)
-    artifact.setdefault("artifact_path", str(_runtime_migration_readiness_path(config)))
-    artifact.setdefault("live_controls_enabled", False)
-    _write_json_yaml(_runtime_migration_readiness_path(config), artifact)
+    write_runtime_artifact(config, "migration_readiness", payload)
 
 
 def _write_pre_hermes_readiness_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
-    artifact = dict(payload)
-    artifact.setdefault("artifact_path", str(_runtime_pre_hermes_readiness_path(config)))
-    artifact.setdefault("live_controls_enabled", False)
-    _write_json_yaml(_runtime_pre_hermes_readiness_path(config), artifact)
+    write_runtime_artifact(config, "pre_hermes_readiness", payload)
 
 
 def _migration_record_payloads(config: IntegrationConfig, repo_root: Path, as_of: str) -> list[dict[str, Any]]:
@@ -1780,12 +1837,11 @@ def migration_readiness(
             live_controls_enabled=False,
             created_at=payload["created_at"],
         )
-        record_ids.append(
-            store.record_migration_readiness(
-                _kernel_command("migration.readiness_record", f"{timestamp}:{record.surface_ref}"),
-                record,
-            )
+        store.record_migration_readiness(
+            _kernel_command("migration.readiness_record", f"{timestamp}:{record.surface_ref}"),
+            record,
         )
+        record_ids.append(record.record_id)
     operator_projection = apply_operator_digest_projection_outbox(
         _kernel_db_path(resolved),
         Path(resolved.data_dir) / "operator_digest.db",
@@ -1798,6 +1854,12 @@ def migration_readiness(
         _kernel_command("migration.readiness_compare", f"{timestamp}:projection"),
         "legacy_repo",
     )
+    comparison_payload = _record_payload(comparison)
+    if "matches" not in comparison_payload:
+        comparison_payload = (
+            _latest_migration_readiness_comparison_row(_kernel_db_path(resolved), "legacy_repo")
+            or comparison_payload
+        )
     records = _migration_readiness_rows(resolved)
     payload = {
         "available": True,
@@ -1805,7 +1867,7 @@ def migration_readiness(
         "summary": _migration_readiness_summary(records),
         "records": records,
         "record_ids": record_ids,
-        "comparison": asdict(comparison),
+        "comparison": comparison_payload,
         "operator_projection": operator_projection,
         "operator_projection_comparison": operator_projection_comparison,
         "kernel_db_path": str(_kernel_db_path(resolved)),
@@ -2017,91 +2079,51 @@ def readiness_suite(
 
 
 def _write_pre_live_mission_control_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
-    artifact = dict(payload)
-    artifact.setdefault("artifact_path", str(_runtime_pre_live_mission_control_path(config)))
-    artifact.setdefault("live_controls_enabled", False)
-    _write_json_yaml(_runtime_pre_live_mission_control_path(config), artifact)
+    write_hashed_runtime_artifact(config, "pre_live_mission_control", payload)
 
 
 def _write_hermes_adapter_gauntlet_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
-    artifact = dict(payload)
-    artifact.setdefault("artifact_path", str(_runtime_hermes_adapter_gauntlet_path(config)))
-    artifact.setdefault("live_controls_enabled", False)
-    _write_json_yaml(_runtime_hermes_adapter_gauntlet_path(config), artifact)
+    write_hashed_runtime_artifact(config, "hermes_adapter_gauntlet", payload)
 
 
 def _write_first_live_project_packet_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
-    artifact = dict(payload)
-    artifact.setdefault("artifact_path", str(_runtime_first_live_project_packet_path(config)))
-    artifact.setdefault("live_controls_enabled", False)
-    _write_json_yaml(_runtime_first_live_project_packet_path(config), artifact)
+    write_hashed_runtime_artifact(config, "first_live_project_packet", payload)
 
 
 def _write_model_shadow_ops_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
-    artifact = dict(payload)
-    artifact.setdefault("artifact_path", str(_runtime_model_shadow_ops_path(config)))
-    artifact.setdefault("live_controls_enabled", False)
-    _write_json_yaml(_runtime_model_shadow_ops_path(config), artifact)
+    write_hashed_runtime_artifact(config, "model_shadow_ops", payload)
 
 
 def _write_target_machine_validation_run_packet_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
-    artifact = dict(payload)
-    artifact.setdefault("artifact_path", str(_runtime_target_machine_validation_run_packet_path(config)))
-    artifact.setdefault("live_controls_enabled", False)
-    _write_json_yaml(_runtime_target_machine_validation_run_packet_path(config), artifact)
+    write_hashed_runtime_artifact(config, "target_machine_validation_run_packet", payload)
 
 
 def _write_pre_live_bundle_verification_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
-    artifact = dict(payload)
-    artifact.setdefault("artifact_path", str(_runtime_pre_live_bundle_verification_path(config)))
-    artifact.setdefault("live_controls_enabled", False)
-    _write_json_yaml(_runtime_pre_live_bundle_verification_path(config), artifact)
+    write_hashed_runtime_artifact(config, "pre_live_bundle_verification", payload)
 
 
 def _write_target_machine_evidence_check_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
-    artifact = dict(payload)
-    artifact.setdefault("artifact_path", str(_runtime_target_machine_evidence_check_path(config)))
-    artifact.setdefault("live_controls_enabled", False)
-    _write_json_yaml(_runtime_target_machine_evidence_check_path(config), artifact)
+    write_hashed_runtime_artifact(config, "target_machine_evidence_check", payload)
 
 
 def _write_first_live_project_acceptance_check_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
-    artifact = dict(payload)
-    artifact.setdefault("artifact_path", str(_runtime_first_live_project_acceptance_check_path(config)))
-    artifact.setdefault("live_controls_enabled", False)
-    _write_json_yaml(_runtime_first_live_project_acceptance_check_path(config), artifact)
+    write_hashed_runtime_artifact(config, "first_live_project_acceptance_check", payload)
 
 
 def _write_model_efficiency_service_packet_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
-    artifact = dict(payload)
-    artifact.setdefault("artifact_path", str(_runtime_model_efficiency_service_packet_path(config)))
-    artifact.setdefault("live_controls_enabled", False)
-    _write_json_yaml(_runtime_model_efficiency_service_packet_path(config), artifact)
+    write_hashed_runtime_artifact(config, "model_efficiency_service_packet", payload)
 
 
 def _write_pre_live_completion_bundle_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
-    artifact = dict(payload)
-    artifact.setdefault("artifact_path", str(_runtime_pre_live_completion_bundle_path(config)))
-    artifact.setdefault("live_controls_enabled", False)
-    _write_json_yaml(_runtime_pre_live_completion_bundle_path(config), artifact)
+    write_hashed_runtime_artifact(config, "pre_live_completion_bundle", payload)
 
 
 def _write_pre_live_evidence_crosswalk_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
-    artifact = dict(payload)
-    artifact.setdefault("artifact_path", str(_runtime_pre_live_evidence_crosswalk_path(config)))
-    artifact.setdefault("live_controls_enabled", False)
-    _write_json_yaml(_runtime_pre_live_evidence_crosswalk_path(config), artifact)
+    write_hashed_runtime_artifact(config, "pre_live_evidence_crosswalk", payload)
 
 
 def _file_sha256(path: Path) -> str | None:
-    try:
-        with path.open("rb") as handle:
-            digest = hashlib.sha256()
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-    except OSError:
-        return None
-    return digest.hexdigest()
+    return file_sha256(path)
 
 
 def _status_rank(status: str) -> int:
@@ -2198,7 +2220,6 @@ def pre_live_mission_control(
             "side_effect_replay",
         ],
     }
-    payload["packet_hash"] = _stable_json_hash({k: v for k, v in payload.items() if k != "packet_hash"})
     _write_pre_live_mission_control_artifact(resolved, payload)
     return payload
 
@@ -2352,7 +2373,6 @@ def hermes_adapter_gauntlet(
         "live_controls_enabled": False,
         "activation_effect": "none",
     }
-    payload["packet_hash"] = _stable_json_hash({k: v for k, v in payload.items() if k != "packet_hash"})
     _write_hermes_adapter_gauntlet_artifact(resolved, payload)
     return payload
 
@@ -2420,7 +2440,6 @@ def first_live_project_packet(
         "live_controls_enabled": False,
         "activation_effect": "none_until_live_hermes_worker_attached",
     }
-    payload["packet_hash"] = _stable_json_hash({k: v for k, v in payload.items() if k != "packet_hash"})
     _write_first_live_project_packet_artifact(resolved, payload)
     return payload
 
@@ -2514,7 +2533,6 @@ def model_shadow_ops(
         "live_controls_enabled": False,
         "activation_effect": "shadow_evidence_only",
     }
-    payload["packet_hash"] = _stable_json_hash({k: v for k, v in payload.items() if k != "packet_hash"})
     _write_model_shadow_ops_artifact(resolved, payload)
     return payload
 
@@ -2531,11 +2549,47 @@ def model_efficiency_service_packet(
     test_set = generate_first_live_project_test_set()
     packet = test_set["model_efficiency_service_packet"]
     seed_task_classes = packet["seed_task_classes"]
+    operator_decision_packet = {
+        "decision_type": "commercial_model_efficiency_service",
+        "required_authority": "operator_gate",
+        "decision_target": "governed-ai-model-efficiency-control-plane",
+        "options": [
+            {
+                "option": "pursue_first_control_plane_customer",
+                "conditions": [
+                    "customer problem matches governed model offload",
+                    "delivery remains local-artifact-only until explicit gate",
+                    "seed task class evidence is sufficient for shadow-only savings claims",
+                ],
+            },
+            {
+                "option": "pause_until_customer_evidence",
+                "conditions": [
+                    "no qualified buyer interview",
+                    "operator load would exceed pre-live budget",
+                    "savings claims require live production traces",
+                ],
+            },
+        ],
+        "required_evidence": [
+            "seed_task_class_eval_evidence",
+            "shadow_route_savings_report",
+            "operator_gate_before_customer_visible_delivery",
+            "kill_criteria_review",
+        ],
+        "forbidden_without_operator_gate": [
+            "customer_visible_delivery",
+            "revenue_claim_publication",
+            "model_route_promotion",
+            "paid_provider_call_execution",
+        ],
+    }
     payload = {
         "available": True,
         "generated_at": as_of or _utc_now(),
         "packet_name": "model_efficiency_service_packet",
         **packet,
+        "operator_decision_packet": operator_decision_packet,
         "summary": {
             "buyer_profile_count": len(packet["offer"]["buyer_profiles"]),
             "seed_task_class_count": len(seed_task_classes),
@@ -2545,6 +2599,7 @@ def model_efficiency_service_packet(
             ),
             "external_side_effects_allowed": packet["offer"]["external_side_effects_allowed"],
             "kill_criteria_count": len(packet["kill_criteria"]),
+            "operator_decision_options": len(operator_decision_packet["options"]),
         },
         "blocked_autonomous_actions": [
             "customer_visible_delivery",
@@ -2557,7 +2612,6 @@ def model_efficiency_service_packet(
         "live_controls_enabled": False,
         "activation_effect": "operator_decision_packet_only",
     }
-    payload["packet_hash"] = _stable_json_hash({k: v for k, v in payload.items() if k != "packet_hash"})
     _write_model_efficiency_service_packet_artifact(resolved, payload)
     return payload
 
@@ -2639,7 +2693,7 @@ def pre_live_completion_bundle(
     mission_ready = mission.get("go_no_go") == "ready_for_target_machine_validation"
     target_ready = target_run.get("status") == "ready_for_target_machine_execution"
     closed_controls = target_run.get("closed_control_contract", {})
-    closed_control_ok = closed_controls and not any(bool(value) for value in closed_controls.values())
+    closed_control_ok = pre_live_controls_are_closed(closed_controls)
 
     goals = [
         _pre_live_goal(
@@ -2763,7 +2817,6 @@ def pre_live_completion_bundle(
         "live_controls_enabled": False,
         "artifact_path": str(_runtime_pre_live_completion_bundle_path(resolved)),
     }
-    payload["packet_hash"] = _stable_json_hash({k: v for k, v in payload.items() if k != "packet_hash"})
     _write_pre_live_completion_bundle_artifact(resolved, payload)
     return payload
 
@@ -2812,6 +2865,10 @@ def target_machine_validation_run_packet(
     readiness = mission["components"]["readiness_suite"]
     patch_gate = mission["components"]["known_bad_manual_patch_gate"]
     efficiency = model_efficiency_service_packet(resolved, repo_root=str(root), as_of=timestamp)
+    _write_hermes_adapter_gauntlet_artifact(resolved, adapter)
+    _write_first_live_project_packet_artifact(resolved, project)
+    _write_model_shadow_ops_artifact(resolved, shadow)
+    _write_model_efficiency_service_packet_artifact(resolved, efficiency)
     generated_artifacts = [
         ("pre_live_mission_control", _runtime_pre_live_mission_control_path(resolved), mission.get("packet_hash")),
         ("hermes_adapter_gauntlet", _runtime_hermes_adapter_gauntlet_path(resolved), adapter.get("packet_hash")),
@@ -2819,18 +2876,10 @@ def target_machine_validation_run_packet(
         ("model_shadow_ops", _runtime_model_shadow_ops_path(resolved), shadow.get("packet_hash")),
         ("model_efficiency_service_packet", _runtime_model_efficiency_service_packet_path(resolved), efficiency.get("packet_hash")),
     ]
-    evidence_manifest = []
-    for name, path, packet_hash in generated_artifacts:
-        evidence_manifest.append(
-            {
-                "name": name,
-                "path": str(path),
-                "exists": path.is_file(),
-                "sha256": _file_sha256(path),
-                "packet_hash": packet_hash,
-                "required_before_live_authority": True,
-            }
-        )
+    evidence_manifest = [
+        runtime_evidence_manifest_item(name, path, packet_hash=packet_hash)
+        for name, path, packet_hash in generated_artifacts
+    ]
     run_steps = [
         {
             "step": 1,
@@ -2923,6 +2972,7 @@ def target_machine_validation_run_packet(
         blockers.append("model_efficiency_packet_allows_live_mutation_or_side_effects")
     if any(not item["exists"] or item["sha256"] is None for item in evidence_manifest):
         blockers.append("missing_generated_evidence_artifact")
+    closed_control_contract = pre_live_closed_control_contract()
     execution_order_contract = {
         "metadata_before_artifact_use": run_steps[0]["name"] == "repo_metadata_snapshot",
         "checksums_before_readiness": run_steps[1]["name"] == "handoff_checksum_verification",
@@ -2945,6 +2995,25 @@ def target_machine_validation_run_packet(
     }
     if not all(execution_order_contract.values()):
         blockers.append("target_machine_execution_order_invalid")
+    replay_projection_proof_contract = {
+        "first_live_project_events_before_projection": all(
+            step.get("event_before_projection") is True for step in project.get("workflow", [])
+        ),
+        "readiness_requires_projection_checks": "projection_checks_verified"
+        in run_steps[2]["required_evidence"],
+        "resume_replay_reconstructs_intents_only": adapter.get("resume_replay_summary", {}).get(
+            "replay_intents_reconstructed_only"
+        )
+        is True,
+        "external_side_effect_replay_disabled": closed_control_contract.get("side_effect_replay_enabled") is False,
+        "manifest_artifacts_hash_bound_before_live_authority": bool(evidence_manifest)
+        and all(
+            item["exists"] and item["sha256"] and item["required_before_live_authority"]
+            for item in evidence_manifest
+        ),
+    }
+    if not all(replay_projection_proof_contract.values()):
+        blockers.append("replay_projection_proof_contract_incomplete")
     packet = {
         "available": True,
         "generated_at": timestamp,
@@ -2964,25 +3033,10 @@ def target_machine_validation_run_packet(
             "known_bad_manual_patch_gate_available": bool(patch_gate.get("available")),
         },
         "execution_order_contract": execution_order_contract,
-        "closed_control_contract": {
-            "live_controls_enabled": False,
-            "dashboard_writes_enabled": False,
-            "paid_provider_calls_enabled": False,
-            "customer_visible_commitments_enabled": False,
-            "model_route_promotion_enabled": False,
-            "autonomous_patch_application_enabled": False,
-            "side_effect_replay_enabled": False,
-        },
+        "replay_projection_proof_contract": replay_projection_proof_contract,
+        "closed_control_contract": closed_control_contract,
         "blockers": blockers,
-        "fail_closed_controls": [
-            "live_hermes_attachment",
-            "dashboard_write_controls",
-            "paid_provider_calls",
-            "customer_visible_commitments",
-            "model_route_promotion",
-            "autonomous_patch_application",
-            "side_effect_replay",
-        ],
+        "fail_closed_controls": pre_live_fail_closed_controls(),
         "operator_signoffs_required": [
             "target_machine_environment_confirmed",
             "handoff_checksums_verified",
@@ -2995,7 +3049,6 @@ def target_machine_validation_run_packet(
         "live_controls_enabled": False,
         "activation_effect": "none_until_target_machine_evidence_and_operator_gates_pass",
     }
-    packet["packet_hash"] = _stable_json_hash({k: v for k, v in packet.items() if k != "packet_hash"})
     _write_target_machine_validation_run_packet_artifact(resolved, packet)
     return packet
 
@@ -3022,13 +3075,20 @@ def pre_live_evidence_crosswalk(
         for item in run_packet.get("evidence_manifest", [])
         if isinstance(item, dict) and item.get("name")
     }
-    run_packet_artifact = {
-        "name": "target_machine_validation_run_packet",
-        "path": run_packet.get("artifact_path"),
-        "exists": bool(run_packet.get("artifact_path") and Path(str(run_packet["artifact_path"])).is_file()),
-        "sha256": _file_sha256(Path(str(run_packet["artifact_path"]))) if run_packet.get("artifact_path") else None,
-        "required_before_live_authority": True,
-    }
+    run_packet_artifact = (
+        runtime_evidence_manifest_item(
+            "target_machine_validation_run_packet",
+            Path(str(run_packet["artifact_path"])),
+        )
+        if run_packet.get("artifact_path")
+        else {
+            "name": "target_machine_validation_run_packet",
+            "path": None,
+            "exists": False,
+            "sha256": None,
+            "required_before_live_authority": True,
+        }
+    )
     artifacts_by_name[run_packet_artifact["name"]] = run_packet_artifact
     steps_by_name = {
         str(step.get("name")): step
@@ -3036,7 +3096,7 @@ def pre_live_evidence_crosswalk(
         if isinstance(step, dict) and step.get("name")
     }
     closed_controls = run_packet.get("closed_control_contract", {})
-    closed_control_ok = bool(closed_controls) and not any(bool(value) for value in closed_controls.values())
+    closed_control_ok = pre_live_controls_are_closed(closed_controls)
 
     def row(
         checklist_id: str,
@@ -3046,51 +3106,17 @@ def pre_live_evidence_crosswalk(
         closed_control_keys: list[str],
         blocker_conditions: list[str],
     ) -> dict[str, Any]:
-        mapped_steps = [steps_by_name[name] for name in step_names if name in steps_by_name]
-        mapped_artifacts = [artifacts_by_name[name] for name in artifact_names if name in artifacts_by_name]
-        missing_steps = [name for name in step_names if name not in steps_by_name]
-        missing_artifacts = [name for name in artifact_names if name not in artifacts_by_name]
-        artifact_checks = [
-            {
-                "name": item["name"],
-                "path": item.get("path"),
-                "exists": bool(item.get("exists")),
-                "sha256": item.get("sha256"),
-                "required_before_live_authority": bool(item.get("required_before_live_authority")),
-            }
-            for item in mapped_artifacts
-        ]
-        failing_artifacts = [
-            item["name"]
-            for item in artifact_checks
-            if not item["exists"] or not item["sha256"] or not item["required_before_live_authority"]
-        ]
-        opened_controls = [key for key in closed_control_keys if closed_controls.get(key) is not False]
-        required_evidence = sorted(
-            {
-                str(evidence_id)
-                for step in mapped_steps
-                for evidence_id in step.get("required_evidence", [])
-            }
+        return pre_live_evidence_crosswalk_row(
+            checklist_id=checklist_id,
+            requirement=requirement,
+            step_names=step_names,
+            artifact_names=artifact_names,
+            closed_control_keys=closed_control_keys,
+            blocker_conditions=blocker_conditions,
+            steps_by_name=steps_by_name,
+            artifacts_by_name=artifacts_by_name,
+            closed_controls=closed_controls,
         )
-        ready = not missing_steps and not missing_artifacts and not failing_artifacts and not opened_controls
-        return {
-            "checklist_id": checklist_id,
-            "requirement": requirement,
-            "step_names": step_names,
-            "artifact_names": artifact_names,
-            "mapped_step_count": len(mapped_steps),
-            "mapped_artifact_count": len(mapped_artifacts),
-            "required_evidence": required_evidence,
-            "artifact_checks": artifact_checks,
-            "closed_control_keys": closed_control_keys,
-            "missing_steps": missing_steps,
-            "missing_artifacts": missing_artifacts,
-            "failing_artifacts": failing_artifacts,
-            "opened_controls": opened_controls,
-            "blocker_conditions": blocker_conditions,
-            "ready": ready,
-        }
 
     rows = [
         row(
@@ -3216,7 +3242,6 @@ def pre_live_evidence_crosswalk(
         "activation_effect": "none",
         "artifact_path": str(_runtime_pre_live_evidence_crosswalk_path(resolved)),
     }
-    payload["packet_hash"] = _stable_json_hash({k: v for k, v in payload.items() if k != "packet_hash"})
     _write_pre_live_evidence_crosswalk_artifact(resolved, payload)
     return payload
 
@@ -3282,7 +3307,7 @@ def pre_live_bundle_verification(
                 "required": filename in required_json_files,
                 "exists": path.is_file(),
                 "json_non_empty": bool(parsed),
-                "live_controls_disabled": parsed.get("live_controls_enabled") is False if parsed else False,
+                "live_controls_disabled": pre_live_artifact_controls_disabled(parsed) if parsed else False,
                 "sha256": actual_hash,
                 "matches_sha256sums": bool(actual_hash and manifest_hash and actual_hash == manifest_hash),
                 "status": parsed.get("status") or parsed.get("go_no_go") or parsed.get("packet_name"),
@@ -3311,7 +3336,7 @@ def pre_live_bundle_verification(
         blockers.append("mission_control_not_ready_for_target_machine_validation")
     if execution_order_contract and not all(bool(value) for value in execution_order_contract.values()):
         blockers.append("target_machine_execution_order_invalid")
-    if closed_control_contract and any(bool(value) for value in closed_control_contract.values()):
+    if closed_control_contract and not pre_live_controls_are_closed(closed_control_contract):
         blockers.append("closed_control_contract_opened_live_control")
     payload = {
         "available": True,
@@ -3334,7 +3359,6 @@ def pre_live_bundle_verification(
         "activation_effect": "none",
         "artifact_path": str(_runtime_pre_live_bundle_verification_path(resolved)),
     }
-    payload["packet_hash"] = _stable_json_hash({k: v for k, v in payload.items() if k != "packet_hash"})
     _write_pre_live_bundle_verification_artifact(resolved, payload)
     return payload
 
@@ -3353,83 +3377,17 @@ def target_machine_evidence_check(
     sha_path = bundle / "SHA256SUMS"
     packet = _bundle_json(packet_path)
     sha_entries = _parse_sha256sums(sha_path)
-    required_evidence = sorted(
-        {
-            str(item)
-            for step in packet.get("run_steps", [])
-            if isinstance(step, dict)
-            for item in step.get("required_evidence", [])
-        }
-    )
     evidence_records = _bundle_evidence_records(bundle)
-    missing_required_evidence = [item for item in required_evidence if item not in evidence_records and not (bundle / "evidence" / f"{item}.json").is_file()]
-    ambiguous_required_evidence = [
-        item
-        for item, record in evidence_records.items()
-        if item in required_evidence
-        and (record.get("status") in {"ambiguous", "stale"} or record.get("ambiguous") is True)
-    ]
-    artifact_results = []
-    for item in packet.get("evidence_manifest", []):
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name") or Path(str(item.get("path", ""))).stem)
-        basename = Path(str(item.get("path") or f"{name}.json")).name
-        bundle_path = bundle / basename
-        actual_hash = _file_sha256(bundle_path)
-        manifest_hash = sha_entries.get(basename)
-        expected_hash = item.get("sha256")
-        artifact_results.append(
-            {
-                "name": name,
-                "filename": basename,
-                "exists": bundle_path.is_file(),
-                "sha256": actual_hash,
-                "sha256sum_entry": manifest_hash,
-                "run_packet_sha256": expected_hash,
-                "matches_sha256sums": bool(actual_hash and manifest_hash and actual_hash == manifest_hash),
-                "matches_run_packet_manifest": bool(actual_hash and expected_hash and actual_hash == expected_hash),
-                "required_before_live_authority": bool(item.get("required_before_live_authority")),
-            }
-        )
-    blockers = []
-    if not bundle.is_dir():
-        blockers.append("target_machine_artifact_bundle_missing")
-    if not packet:
-        blockers.append("target_machine_run_packet_missing_or_invalid")
-    if not sha_entries:
-        blockers.append("sha256sums_missing_or_empty")
-    if missing_required_evidence:
-        blockers.append("required_evidence_missing")
-    if ambiguous_required_evidence:
-        blockers.append("required_evidence_stale_or_ambiguous")
-    if any(not item["exists"] for item in artifact_results):
-        blockers.append("manifest_artifact_missing")
-    if any(not item["matches_sha256sums"] for item in artifact_results):
-        blockers.append("sha256sum_mismatch")
-    if any(not item["matches_run_packet_manifest"] for item in artifact_results):
-        blockers.append("run_packet_manifest_hash_mismatch")
-    if packet.get("live_controls_enabled") is not False:
-        blockers.append("run_packet_live_controls_not_disabled")
-    status = "validated_preserved_target_machine_bundle" if not blockers else "blocked"
-    payload = {
-        "available": True,
-        "generated_at": as_of or _utc_now(),
-        "packet_name": "target_machine_evidence_check",
-        "status": status,
-        "bundle_dir": str(bundle),
-        "run_packet_path": str(packet_path),
-        "sha256sums_path": str(sha_path),
-        "required_evidence": required_evidence,
-        "missing_required_evidence": missing_required_evidence,
-        "ambiguous_required_evidence": ambiguous_required_evidence,
-        "artifact_results": artifact_results,
-        "blockers": blockers,
-        "live_controls_enabled": False,
-        "activation_effect": "none",
-        "artifact_path": str(_runtime_target_machine_evidence_check_path(resolved)),
-    }
-    payload["packet_hash"] = _stable_json_hash({k: v for k, v in payload.items() if k != "packet_hash"})
+    payload = target_machine_evidence_check_packet(
+        bundle=bundle,
+        packet_path=packet_path,
+        sha_path=sha_path,
+        packet=packet,
+        sha_entries=sha_entries,
+        evidence_records=evidence_records,
+        generated_at=as_of or _utc_now(),
+        artifact_path=_runtime_target_machine_evidence_check_path(resolved),
+    )
     _write_target_machine_evidence_check_artifact(resolved, payload)
     return payload
 
@@ -3445,31 +3403,11 @@ def first_live_project_acceptance_check(
     resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
     root = Path(repo_root).expanduser().resolve() if repo_root else _repo_root()
     packet = _bundle_json(Path(packet_path).expanduser().resolve()) if packet_path else first_live_project_packet(resolved, repo_root=str(root), as_of=as_of)
-    workflow = packet.get("workflow", [])
-    dry_run = packet.get("dry_run", {})
-    close_path = dry_run.get("close_path", {}) if isinstance(dry_run, dict) else {}
-    checks = {
-        "local_only_artifact_output": bool(packet.get("summary", {}).get("local_artifact_only")) and packet.get("artifact_contract", {}).get("external_delivery") == "prepared_intent_only_until_operator_gate",
-        "operator_gate_presence": any(item.get("operator_gate_required") for item in workflow if isinstance(item, dict)),
-        "feedback_ingestion": bool(close_path.get("feedback_ingested")) and bool(close_path.get("close_or_continue_requires_operator_gate")),
-        "no_external_side_effect_execution": all(item.get("external_side_effects_executed") is False for item in workflow if isinstance(item, dict)),
-        "live_controls_disabled": packet.get("live_controls_enabled") is False,
-        "external_commitments_disabled": packet.get("summary", {}).get("external_commitments_allowed") is False,
-    }
-    blockers = [name for name, ok in checks.items() if not ok]
-    payload = {
-        "available": True,
-        "generated_at": as_of or _utc_now(),
-        "packet_name": "first_live_project_acceptance_check",
-        "status": "accepted_pre_live_local_only" if not blockers else "blocked",
-        "fixture_id": packet.get("fixture_id"),
-        "checks": checks,
-        "blockers": blockers,
-        "live_controls_enabled": False,
-        "activation_effect": "none",
-        "artifact_path": str(_runtime_first_live_project_acceptance_check_path(resolved)),
-    }
-    payload["packet_hash"] = _stable_json_hash({k: v for k, v in payload.items() if k != "packet_hash"})
+    payload = first_live_project_acceptance_check_packet(
+        packet=packet,
+        generated_at=as_of or _utc_now(),
+        artifact_path=_runtime_first_live_project_acceptance_check_path(resolved),
+    )
     _write_first_live_project_acceptance_check_artifact(resolved, payload)
     return payload
 
@@ -4282,8 +4220,7 @@ def known_bad_hardening_operator_review_bundle(
 
 
 def _stable_json_hash(payload: dict[str, Any]) -> str:
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return stable_json_hash(payload)
 
 
 def _known_bad_hardening_patch_review_packets(
@@ -4916,31 +4853,19 @@ def _write_env_launcher(path: Path, lines: list[str]) -> None:
 
 
 def _write_replay_readiness_report_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
-    artifact = dict(payload)
-    artifact.setdefault("generated_at", _utc_now())
-    artifact.setdefault("artifact_path", str(_runtime_replay_readiness_report_path(config)))
-    _write_json_yaml(_runtime_replay_readiness_report_path(config), artifact)
+    write_runtime_artifact(config, "replay_readiness_report", payload)
 
 
 def _write_replay_corpus_export_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
-    artifact = dict(payload)
-    artifact.setdefault("generated_at", _utc_now())
-    artifact.setdefault("artifact_path", str(_runtime_replay_corpus_export_path(config)))
-    _write_json_yaml(_runtime_replay_corpus_export_path(config), artifact)
+    write_runtime_artifact(config, "replay_corpus_export", payload)
 
 
 def _write_optimizer_snapshot_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
-    artifact = dict(payload)
-    artifact.setdefault("generated_at", _utc_now())
-    artifact.setdefault("artifact_path", str(_runtime_optimizer_snapshot_path(config)))
-    _write_json_yaml(_runtime_optimizer_snapshot_path(config), artifact)
+    write_runtime_artifact(config, "optimizer_snapshot", payload)
 
 
 def _write_harness_candidate_report_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
-    artifact = dict(payload)
-    artifact.setdefault("generated_at", _utc_now())
-    artifact.setdefault("artifact_path", str(_runtime_harness_candidate_report_path(config)))
-    _write_json_yaml(_runtime_harness_candidate_report_path(config), artifact)
+    write_runtime_artifact(config, "harness_candidate_report", payload)
 
 
 def _write_mac_studio_day_one_handoff(
