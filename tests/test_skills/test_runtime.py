@@ -2184,6 +2184,141 @@ def test_pre_live_bundle_verification_fails_closed_on_open_control_contract(tmp_
     assert payload["live_controls_enabled"] is False
 
 
+def test_pre_live_bundle_verification_rejects_unexpected_authority_bearing_artifact(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+    run_packet = target_machine_validation_run_packet(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of="2026-05-12T00:08:00+00:00",
+        candidate_limit=2,
+    )
+    bundle = tmp_path / "pre-live-bundle"
+    bundle.mkdir()
+    copied = []
+    for item in run_packet["evidence_manifest"]:
+        source = Path(item["path"])
+        target = bundle / source.name
+        target.write_bytes(source.read_bytes())
+        copied.append(target)
+    target = bundle / Path(run_packet["artifact_path"]).name
+    target.write_bytes(Path(run_packet["artifact_path"]).read_bytes())
+    copied.append(target)
+    extra = bundle / "unexpected_operator_packet.json"
+    extra.write_text(
+        json.dumps(
+            {
+                "packet_name": "unexpected_operator_packet",
+                "required_authority": "operator_gate",
+                "live_controls_enabled": False,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    copied.append(extra)
+    (bundle / "SHA256SUMS").write_text(
+        "".join(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n" for path in sorted(copied)),
+        encoding="utf-8",
+    )
+
+    payload = pre_live_bundle_verification(
+        cfg,
+        bundle_dir=str(bundle),
+        as_of="2026-05-12T00:08:30+00:00",
+    )
+
+    assert payload["status"] == "blocked"
+    assert "unexpected_authority_bearing_artifact" in payload["blockers"]
+    assert payload["extra_artifact_checks"] == [
+        {
+            "filename": "unexpected_operator_packet.json",
+            "json_non_empty": True,
+            "authority_bearing": True,
+            "declared_inert_read_only": False,
+            "status": "unexpected_authority_bearing_artifact",
+        }
+    ]
+    assert payload["live_controls_enabled"] is False
+
+
+def test_pre_live_bundle_verification_allows_declared_inert_read_only_extra_artifact(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+    run_packet = target_machine_validation_run_packet(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of="2026-05-12T00:08:00+00:00",
+        candidate_limit=2,
+    )
+    bundle = tmp_path / "pre-live-bundle"
+    bundle.mkdir()
+    copied = []
+    for item in run_packet["evidence_manifest"]:
+        source = Path(item["path"])
+        target = bundle / source.name
+        target.write_bytes(source.read_bytes())
+        copied.append(target)
+    target = bundle / Path(run_packet["artifact_path"]).name
+    target.write_bytes(Path(run_packet["artifact_path"]).read_bytes())
+    copied.append(target)
+    extra = bundle / "operator_packet_observation.json"
+    extra.write_text(
+        json.dumps(
+            {
+                "packet_name": "operator_packet_observation",
+                "required_authority": "operator_gate",
+                "live_controls_enabled": False,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    copied.append(extra)
+    evidence_records = bundle / "evidence_records.json"
+    evidence_records.write_text(
+        json.dumps(
+            {
+                "evidence": {},
+                "inert_artifacts": [
+                    {
+                        "filename": "operator_packet_observation.json",
+                        "mode": "read_only",
+                        "authority_effect": "inert_evidence",
+                        "may_grant_authority": False,
+                    }
+                ],
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    copied.append(evidence_records)
+    (bundle / "SHA256SUMS").write_text(
+        "".join(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n" for path in sorted(copied)),
+        encoding="utf-8",
+    )
+
+    payload = pre_live_bundle_verification(
+        cfg,
+        bundle_dir=str(bundle),
+        as_of="2026-05-12T00:08:30+00:00",
+    )
+
+    assert payload["status"] == "verified_pre_live_bundle"
+    assert payload["blockers"] == []
+    assert payload["extra_artifact_checks"][0]["status"] == "allowed_inert_evidence"
+    assert payload["live_controls_enabled"] is False
+
+
 def test_target_machine_evidence_check_validates_preserved_bundle(tmp_path):
     cfg = IntegrationConfig(
         data_dir=str(tmp_path / "data"),

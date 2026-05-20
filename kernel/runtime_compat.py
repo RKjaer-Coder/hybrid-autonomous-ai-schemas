@@ -3619,6 +3619,77 @@ def _bundle_evidence_records(bundle_dir: Path) -> dict[str, dict[str, Any]]:
     return {str(key): value for key, value in records.items() if isinstance(value, dict)}
 
 
+def _bundle_inert_artifact_declarations(bundle_dir: Path) -> dict[str, dict[str, Any]]:
+    parsed = _bundle_json(bundle_dir / "evidence_records.json")
+    declarations = parsed.get("inert_artifacts", [])
+    if not isinstance(declarations, list):
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    for declaration in declarations:
+        if not isinstance(declaration, dict):
+            continue
+        filename = declaration.get("filename") or declaration.get("artifact")
+        if filename:
+            result[Path(str(filename)).name] = declaration
+    return result
+
+
+def _pre_live_bundle_extra_artifact_checks(
+    *,
+    bundle: Path,
+    expected_filenames: set[str],
+    inert_declarations: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    checks: list[dict[str, Any]] = []
+    for path in sorted(bundle.glob("*.json")):
+        if path.name in expected_filenames or path.name == "evidence_records.json":
+            continue
+        parsed = _bundle_json(path)
+        authority_bearing = _pre_live_extra_artifact_is_authority_bearing(parsed)
+        declaration = inert_declarations.get(path.name, {})
+        declared_inert_read_only = (
+            isinstance(declaration, dict)
+            and declaration.get("mode") == "read_only"
+            and declaration.get("authority_effect") == "inert_evidence"
+            and declaration.get("may_grant_authority") is False
+        )
+        checks.append(
+            {
+                "filename": path.name,
+                "json_non_empty": bool(parsed),
+                "authority_bearing": authority_bearing,
+                "declared_inert_read_only": declared_inert_read_only,
+                "status": "allowed_inert_evidence"
+                if authority_bearing and declared_inert_read_only
+                else ("unexpected_authority_bearing_artifact" if authority_bearing else "ignored_extra_artifact"),
+            }
+        )
+    return checks
+
+
+def _pre_live_extra_artifact_is_authority_bearing(payload: dict[str, Any]) -> bool:
+    if not isinstance(payload, dict) or not payload:
+        return False
+    authority_keys = {
+        "closed_control_contract",
+        "operator_decision_packet",
+        "operator_acceptance_packet",
+        "required_authority",
+        "capability_grants",
+        "side_effect_intents",
+        "customer_visible_delivery",
+        "external_commitments_allowed",
+    }
+    if any(key in payload for key in authority_keys):
+        return True
+    if payload.get("live_controls_enabled") is not None:
+        return True
+    return any(
+        isinstance(value, dict) and _pre_live_extra_artifact_is_authority_bearing(value)
+        for value in payload.values()
+    )
+
+
 def pre_live_bundle_verification(
     config: IntegrationConfig | None = None,
     *,
@@ -3637,6 +3708,13 @@ def pre_live_bundle_verification(
         "target_machine_validation_run_packet.json",
     ]
     optional_json_files = ["model_efficiency_service_packet.json"]
+    expected_json_files = {*required_json_files, *optional_json_files}
+    inert_declarations = _bundle_inert_artifact_declarations(bundle)
+    extra_artifact_checks = _pre_live_bundle_extra_artifact_checks(
+        bundle=bundle,
+        expected_filenames=expected_json_files,
+        inert_declarations=inert_declarations,
+    )
     file_checks = []
     for filename in [*required_json_files, *optional_json_files]:
         path = bundle / filename
@@ -3680,6 +3758,8 @@ def pre_live_bundle_verification(
         blockers.append("target_machine_execution_order_invalid")
     if closed_control_contract and not pre_live_controls_are_closed(closed_control_contract):
         blockers.append("closed_control_contract_opened_live_control")
+    if any(item["authority_bearing"] and not item["declared_inert_read_only"] for item in extra_artifact_checks):
+        blockers.append("unexpected_authority_bearing_artifact")
     payload = {
         "available": True,
         "generated_at": as_of or _utc_now(),
@@ -3688,6 +3768,7 @@ def pre_live_bundle_verification(
         "bundle_dir": str(bundle),
         "sha256sums_path": str(bundle / "SHA256SUMS"),
         "file_checks": file_checks,
+        "extra_artifact_checks": extra_artifact_checks,
         "summary": {
             "required_file_count": len(required_json_files),
             "required_files_present": sum(1 for item in file_checks if item["required"] and item["exists"]),
@@ -3695,6 +3776,9 @@ def pre_live_bundle_verification(
             "required_checksums_match": all(item["matches_sha256sums"] for item in file_checks if item["required"]),
             "live_controls_disabled": all(item["live_controls_disabled"] for item in file_checks if item["required"]),
             "target_machine_status": run_packet.get("status"),
+            "extra_authority_bearing_artifacts": sum(
+                1 for item in extra_artifact_checks if item["authority_bearing"]
+            ),
         },
         "blockers": blockers,
         "live_controls_enabled": False,
