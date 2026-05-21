@@ -80,6 +80,7 @@ from kernel.services import (
     TARGET_MACHINE_REPLAY_PROJECTION_EVIDENCE,
     target_machine_evidence_check_packet,
     write_hashed_runtime_artifact,
+    write_placeholder_runtime_artifact,
     write_runtime_artifact,
 )
 from migrate import LEGACY_SCHEMAS as SCHEMAS, apply_schema, verify_database
@@ -522,6 +523,7 @@ from kernel.runtime_paths import (
     _runtime_first_live_project_acceptance_check_path,
     _runtime_model_shadow_ops_path,
     _runtime_model_efficiency_service_packet_path,
+    _runtime_model_efficiency_customer_validation_brief_path,
     _runtime_pre_live_completion_bundle_path,
     _runtime_pre_live_evidence_crosswalk_path,
     _runtime_pre_live_bundle_verification_path,
@@ -1759,12 +1761,15 @@ def _migration_record_payloads(config: IntegrationConfig, repo_root: Path, as_of
 def _migration_readiness_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
     status_counts: dict[str, int] = {}
     action_counts: dict[str, int] = {}
+    classification_counts: dict[str, int] = {}
     component_counts: dict[str, int] = {}
     blockers: list[dict[str, Any]] = []
     next_actions: list[dict[str, Any]] = []
     for record in records:
         status_counts[record["readiness_status"]] = status_counts.get(record["readiness_status"], 0) + 1
         action_counts[record["ownership_action"]] = action_counts.get(record["ownership_action"], 0) + 1
+        classification = _implementation_classification(record)
+        classification_counts[classification] = classification_counts.get(classification, 0) + 1
         component_counts[record["component_type"]] = component_counts.get(record["component_type"], 0) + 1
         blockers.extend(record["blockers"])
         next_actions.extend(record["next_operator_actions"])
@@ -1772,10 +1777,62 @@ def _migration_readiness_summary(records: list[dict[str, Any]]) -> dict[str, Any
         "total_records": len(records),
         "status_counts": status_counts,
         "ownership_action_counts": action_counts,
+        "implementation_classification_counts": classification_counts,
         "component_type_counts": component_counts,
         "blocker_count": len(blockers),
         "next_operator_action_count": len(next_actions),
     }
+
+
+def _implementation_classification(record: dict[str, Any]) -> str:
+    action_map = {
+        "adopt": "keep",
+        "adapt": "compatibility",
+        "wrap": "wrap",
+        "convert-to-projection": "projection",
+        "retire": "retire",
+    }
+    return action_map.get(str(record.get("ownership_action")), "compatibility")
+
+
+def _implementation_inventory(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    inventory = [
+        {
+            "candidate": record["surface_ref"],
+            "component_type": record["component_type"],
+            "classification": _implementation_classification(record),
+            "superseded_by_kernel_authority": record["ownership_action"] != "adopt",
+            "removal_decision": "keep_or_gate_until_kernel_replacement_is_proven"
+            if record["ownership_action"] in {"adapt", "convert-to-projection"}
+            else "preserve",
+            "proof": {
+                "evidence_refs": record["evidence_refs"],
+                "readiness_status": record["readiness_status"],
+                "blockers": record["blockers"],
+            },
+        }
+        for record in records
+    ]
+    inventory.append(
+        {
+            "candidate": "duplicated_runtime_artifact_and_launcher_catalogs",
+            "component_type": "runtime_catalog",
+            "classification": "retire",
+            "superseded_by_kernel_authority": True,
+            "removal_decision": "duplicate_definitions_removed; compatibility_imports_preserved",
+            "proof": {
+                "evidence_refs": [
+                    "file:kernel/runtime_catalog.py",
+                    "file:kernel/runtime_paths.py",
+                    "file:skills/milestone_status.py",
+                    "file:tests/test_skills/test_runtime.py",
+                ],
+                "readiness_status": "ready",
+                "blockers": [],
+            },
+        }
+    )
+    return inventory
 
 
 def _migration_readiness_rows(config: IntegrationConfig) -> list[dict[str, Any]]:
@@ -1790,22 +1847,22 @@ def _migration_readiness_rows(config: IntegrationConfig) -> list[dict[str, Any]]
             return []
     records: list[dict[str, Any]] = []
     for row in rows:
-        records.append(
-            {
-                "record_id": row["record_id"],
-                "surface_ref": row["surface_ref"],
-                "component_type": row["component_type"],
-                "ownership_action": row["ownership_action"],
-                "owner_domain": row["owner_domain"],
-                "summary": row["summary"],
-                "blockers": json.loads(row["blockers_json"]),
-                "evidence_refs": json.loads(row["evidence_refs_json"]),
-                "next_operator_actions": json.loads(row["next_operator_actions_json"]),
-                "readiness_status": row["readiness_status"],
-                "live_controls_enabled": bool(row["live_controls_enabled"]),
-                "created_at": row["created_at"],
-            }
-        )
+        record = {
+            "record_id": row["record_id"],
+            "surface_ref": row["surface_ref"],
+            "component_type": row["component_type"],
+            "ownership_action": row["ownership_action"],
+            "owner_domain": row["owner_domain"],
+            "summary": row["summary"],
+            "blockers": json.loads(row["blockers_json"]),
+            "evidence_refs": json.loads(row["evidence_refs_json"]),
+            "next_operator_actions": json.loads(row["next_operator_actions_json"]),
+            "readiness_status": row["readiness_status"],
+            "live_controls_enabled": bool(row["live_controls_enabled"]),
+            "created_at": row["created_at"],
+        }
+        record["implementation_classification"] = _implementation_classification(record)
+        records.append(record)
     return records
 
 
@@ -1862,11 +1919,13 @@ def migration_readiness(
             or comparison_payload
         )
     records = _migration_readiness_rows(resolved)
+    implementation_inventory = _implementation_inventory(records)
     payload = {
         "available": True,
         "as_of": timestamp,
         "summary": _migration_readiness_summary(records),
         "records": records,
+        "implementation_inventory": implementation_inventory,
         "record_ids": record_ids,
         "comparison": comparison_payload,
         "operator_projection": operator_projection,
@@ -1890,6 +1949,7 @@ def latest_migration_readiness(config: IntegrationConfig | None = None) -> dict[
     resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
     records = _migration_readiness_rows(resolved)
     if records:
+        implementation_inventory = _implementation_inventory(records)
         operator_projection_comparison = compare_operator_digest_migration_readiness_projection(
             _kernel_db_path(resolved),
             Path(resolved.data_dir) / "operator_digest.db",
@@ -1898,6 +1958,7 @@ def latest_migration_readiness(config: IntegrationConfig | None = None) -> dict[
             "available": True,
             "summary": _migration_readiness_summary(records),
             "records": records,
+            "implementation_inventory": implementation_inventory,
             "kernel_db_path": str(_kernel_db_path(resolved)),
             "artifact_path": str(_runtime_migration_readiness_path(resolved)),
             "operator_projection_comparison": operator_projection_comparison,
@@ -2115,12 +2176,27 @@ def _write_model_efficiency_service_packet_artifact(config: IntegrationConfig, p
     write_hashed_runtime_artifact(config, "model_efficiency_service_packet", payload)
 
 
+def _write_model_efficiency_customer_validation_brief_artifact(
+    config: IntegrationConfig,
+    payload: dict[str, Any],
+) -> None:
+    write_hashed_runtime_artifact(config, "model_efficiency_customer_validation_brief", payload)
+
+
 def _write_pre_live_completion_bundle_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
     write_hashed_runtime_artifact(config, "pre_live_completion_bundle", payload)
 
 
 def _write_pre_live_evidence_crosswalk_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
     write_hashed_runtime_artifact(config, "pre_live_evidence_crosswalk", payload)
+
+
+def _write_placeholder_runtime_artifact(
+    config: IntegrationConfig,
+    artifact_name: str,
+    payload: dict[str, Any],
+) -> None:
+    write_placeholder_runtime_artifact(config, artifact_name, payload)
 
 
 def _file_sha256(path: Path) -> str | None:
@@ -2614,10 +2690,35 @@ def model_efficiency_service_packet(
         "operator_confirms_live_controls_closed",
         "operator_confirms_budget_grants_before_paid_provider_calls",
     ]
+    pre_live_readiness_boundary = {
+        "demoable_pre_live_evidence": [
+            "seed task-class eval and holdout records",
+            "shadow route savings report from fixture or local proxy traces",
+            "operator-gated first-live local artifact fixture",
+            "pre-live evidence crosswalk and target-machine run packet",
+            "customer-validation brief for a named buyer or internal proxy",
+        ],
+        "live_customer_commitments_still_blocked": [
+            "production route changes",
+            "customer-visible delivery",
+            "paid provider calls",
+            "savings or revenue claims without recorded customer/proxy evidence",
+            "deployment, purchase, public publishing, or external messaging",
+        ],
+        "pre_live_demo_claim": "ready to validate locally with operator-reviewed evidence",
+        "live_commitment_requires": [
+            "target-machine evidence bundle passes preserved-evidence checks",
+            "operator confirms customer or internal proxy evidence",
+            "operator approves delivery packet and customer-data handling",
+            "budget grant exists before any paid provider call",
+            "side-effect receipt exists before any external commitment is considered complete",
+        ],
+    }
     operator_decision_packet = {
         "decision_type": "commercial_model_efficiency_service",
         "required_authority": "operator_gate",
         "decision_target": "governed-ai-model-efficiency-control-plane",
+        "pre_live_readiness_boundary": pre_live_readiness_boundary,
         "options": [
             {
                 "option": "pursue_first_control_plane_customer",
@@ -2663,6 +2764,7 @@ def model_efficiency_service_packet(
         "forbidden_without_operator_gate": list(forbidden_autonomous_actions),
         "closed_live_control_contract": closed_live_control_contract,
         "operator_signoff_requirements": operator_signoff_requirements,
+        "pre_live_readiness_boundary": pre_live_readiness_boundary,
         "default_on_timeout": "pause",
     }
     decision_contract = _model_efficiency_operator_decision_contract(operator_decision_packet, packet)
@@ -2672,6 +2774,7 @@ def model_efficiency_service_packet(
         "packet_name": "model_efficiency_service_packet",
         **packet,
         "operator_decision_packet": operator_decision_packet,
+        "pre_live_readiness_boundary": pre_live_readiness_boundary,
         "decision_packet_contract": decision_contract["contract"],
         "blockers": decision_contract["blockers"],
         "status": "operator_decision_packet_ready" if not decision_contract["blockers"] else "blocked",
@@ -2685,6 +2788,12 @@ def model_efficiency_service_packet(
             "external_side_effects_allowed": packet["offer"]["external_side_effects_allowed"],
             "kill_criteria_count": len(packet["kill_criteria"]),
             "operator_decision_options": len(operator_decision_packet["options"]),
+            "demoable_pre_live_evidence_count": len(
+                pre_live_readiness_boundary["demoable_pre_live_evidence"]
+            ),
+            "blocked_live_customer_commitment_count": len(
+                pre_live_readiness_boundary["live_customer_commitments_still_blocked"]
+            ),
         },
         "blocked_autonomous_actions": forbidden_autonomous_actions,
         "artifact_path": str(_runtime_model_efficiency_service_packet_path(resolved)),
@@ -2706,6 +2815,7 @@ def _model_efficiency_operator_decision_contract(
     required_signoffs = set(operator_decision_packet.get("operator_signoff_requirements", []))
     closed_contract = operator_decision_packet.get("closed_live_control_contract", {})
     options = operator_decision_packet.get("options", [])
+    boundary = operator_decision_packet.get("pre_live_readiness_boundary", {})
     option_by_id = {
         str(option.get("option")): option
         for option in options
@@ -2736,6 +2846,18 @@ def _model_efficiency_operator_decision_contract(
         blockers.append("model_efficiency_forbidden_actions_missing")
     if not required_signoffs:
         blockers.append("model_efficiency_operator_signoff_requirements_missing")
+    boundary_separates_pre_live_from_live = (
+        isinstance(boundary, dict)
+        and bool(boundary.get("demoable_pre_live_evidence"))
+        and bool(boundary.get("live_customer_commitments_still_blocked"))
+        and bool(boundary.get("live_commitment_requires"))
+        and "customer-visible delivery" in boundary.get("live_customer_commitments_still_blocked", [])
+        and "production route changes" in boundary.get("live_customer_commitments_still_blocked", [])
+        and "paid provider calls" in boundary.get("live_customer_commitments_still_blocked", [])
+        and "operator confirms customer or internal proxy evidence" in boundary.get("live_commitment_requires", [])
+    )
+    if not boundary_separates_pre_live_from_live:
+        blockers.append("model_efficiency_pre_live_live_boundary_missing")
 
     option_bindings: dict[str, dict[str, bool]] = {}
     for option_id, recommendation in required_options.items():
@@ -2800,11 +2922,263 @@ def _model_efficiency_operator_decision_contract(
         "operator_gate_required": operator_decision_packet.get("required_authority") == "operator_gate",
         "timeout_defaults_to_pause": operator_decision_packet.get("default_on_timeout") == "pause",
         "live_control_contract_closed": live_control_contract_closed,
+        "pre_live_demo_separated_from_live_commitments": boundary_separates_pre_live_from_live,
         "option_bindings": option_bindings,
     }
     if not all(value for key, value in contract.items() if key != "option_bindings"):
         blockers.append("model_efficiency_decision_packet_contract_incomplete")
     return {"contract": contract, "blockers": sorted(set(blockers))}
+
+
+def model_efficiency_customer_validation_brief(
+    config: IntegrationConfig | None = None,
+    *,
+    repo_root: str | None = None,
+    as_of: str | None = None,
+) -> dict[str, Any]:
+    """Create the narrow pre-live customer-validation brief for the service thesis."""
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    prepare_runtime_directories(resolved)
+    timestamp = as_of or _utc_now()
+    service_packet = model_efficiency_service_packet(
+        resolved,
+        repo_root=repo_root,
+        as_of=timestamp,
+    )
+    first_project_packet = first_live_project_packet(
+        resolved,
+        repo_root=repo_root,
+        as_of=timestamp,
+    )
+    closed_live_control_contract = {
+        "live_controls_enabled": False,
+        "paid_provider_calls_enabled": False,
+        "customer_visible_delivery_enabled": False,
+        "route_mutation_enabled": False,
+        "autonomous_customer_commitments_enabled": False,
+        "external_side_effects_allowed": False,
+    }
+    required_operator_signoffs = [
+        "operator_confirms_named_customer_or_internal_proxy",
+        "operator_approves_local_only_validation_interview_or_workshop",
+        "operator_approves_customer_data_handling_plan",
+        "operator_reviews_audit_report_before_external_delivery",
+        "operator_confirms_no_paid_provider_calls_without_budget_grant",
+        "operator_confirms_no_route_mutation_or_live_control_enablement",
+    ]
+    brief = {
+        "brief_id": "governed-model-efficiency-customer-validation-v1",
+        "first_buyer_profile": {
+            "recommended_profile": "ai_native_b2b_saas_with_recurring_frontier_model_spend",
+            "economic_buyer": "Head of Engineering, AI Platform lead, or CTO accountable for model spend and quality",
+            "must_have_traits": [
+                "monthly frontier-model spend large enough that 20 percent quality-adjusted savings matters",
+                "repeatable AI workflows with observable task classes",
+                "ability to provide 50-200 representative traces or an internal proxy set",
+                "human acceptance labels or a practical quality rubric",
+                "privacy and audit concerns that make governed routing valuable",
+            ],
+            "exclude_for_first_validation": [
+                "broad enterprise procurement without a named workflow owner",
+                "teams seeking generic agent automation rather than model-efficiency evidence",
+                "customers unable to share representative traces or proxy examples",
+            ],
+        },
+        "exact_problem_to_validate": {
+            "problem_statement": (
+                "Can a governed control plane identify specific AI task classes where frontier-model "
+                "dependence can be reduced by at least 20 percent on a quality-adjusted basis while "
+                "preserving acceptance quality, privacy constraints, auditability, and operator control?"
+            ),
+            "validation_scope": [
+                "audit and classify existing or proxy AI workflows",
+                "build a customer-specific eval slice for the first three seed task classes when applicable",
+                "compare frontier baseline cost and quality against local or cheaper shadow routes",
+                "recommend gates only; do not mutate production routes",
+            ],
+            "non_goals": [
+                "deploying a customer-facing gateway",
+                "calling paid providers",
+                "changing production model routes",
+                "making autonomous customer commitments",
+            ],
+        },
+        "evidence_needed": {
+            "real_customer_or_proxy": [
+                "one named buyer or internal proxy owner confirms the spend or governance pain",
+                "current frontier spend receipts, budget exports, or usage estimates",
+                "representative workflow trace sample with sensitive payloads replaced by governed artifact refs",
+                "acceptance rubric, reviewer labels, or known-good outputs for quality comparison",
+                "privacy, retention, residency, and audit constraints",
+                "operator time estimate for running the audit and reviewing outputs",
+                "explicit willingness-to-pay or internal value threshold for the first audit",
+            ],
+            "minimum_to_continue": [
+                "one buyer/proxy names a costly repeatable workflow",
+                "one task class has enough examples to score quality",
+                "the audit can remain local-only until operator delivery approval",
+            ],
+        },
+        "first_audit_report_artifact": {
+            "artifact_name": "governed_model_efficiency_audit_report",
+            "delivery_state": "local_artifact_only_until_operator_gate",
+            "required_sections": [
+                "buyer_context_and_validated_problem",
+                "workflow_inventory_and_task_class_map",
+                "baseline_frontier_spend_and_quality",
+                "customer_specific_eval_set_description",
+                "shadow_route_savings_and_quality_delta",
+                "privacy_data_residency_and_audit_constraints",
+                "operator_load_delta",
+                "recommended_gates_before_any_route_change",
+                "kill_criteria_assessment",
+                "open_questions_and_evidence_gaps",
+            ],
+            "must_not_contain": [
+                "unsupported savings claims",
+                "customer-visible commitments",
+                "route mutation instructions",
+                "raw sensitive customer payloads",
+            ],
+        },
+        "kill_criteria": [
+            "no named buyer or internal proxy confirms a costly repeatable AI workflow",
+            "customer or proxy cannot provide representative traces, labels, or spend evidence",
+            "no seed task class can be evaluated with enough confidence to compare quality",
+            "quality-adjusted savings are below 20 percent for every evaluated task class",
+            "privacy, retention, residency, or audit constraints cannot be satisfied locally",
+            "operator review load exceeds the expected value of the first audit",
+            "the work requires live controls, paid provider calls, route mutation, or customer delivery before signoff",
+        ],
+        "operator_signoffs_required": required_operator_signoffs,
+        "repo_packet_or_checker_required": {
+            "packet_name": "model_efficiency_customer_validation_brief",
+            "checker_contract": [
+                "brief binds buyer profile, exact problem, evidence, audit report, kill criteria, signoffs, and drift guard",
+                "all live controls and external side effects remain closed",
+                "first audit report is local-only until operator-gated delivery",
+                "customer claims require real customer or internal proxy evidence",
+            ],
+            "drift_blocker": "customer_validation_brief_missing_or_speculative",
+            "hash_bound_artifact": str(_runtime_model_efficiency_customer_validation_brief_path(resolved)),
+        },
+        "source_packets": {
+            "model_efficiency_service_packet": service_packet["packet_name"],
+            "first_live_project_packet": first_project_packet["packet_name"],
+        },
+        "closed_live_control_contract": closed_live_control_contract,
+        "activation_effect": "local_validation_brief_only",
+    }
+    contract = _model_efficiency_customer_validation_brief_contract(
+        brief,
+        service_packet,
+        first_project_packet,
+    )
+    payload = {
+        "available": True,
+        "generated_at": timestamp,
+        "packet_name": "model_efficiency_customer_validation_brief",
+        "brief": brief,
+        "validation_contract": contract["contract"],
+        "blockers": contract["blockers"],
+        "status": "ready_for_operator_customer_validation_review" if not contract["blockers"] else "blocked",
+        "summary": {
+            "first_buyer_profile": brief["first_buyer_profile"]["recommended_profile"],
+            "evidence_item_count": len(brief["evidence_needed"]["real_customer_or_proxy"]),
+            "audit_report_section_count": len(brief["first_audit_report_artifact"]["required_sections"]),
+            "kill_criteria_count": len(brief["kill_criteria"]),
+            "operator_signoff_count": len(required_operator_signoffs),
+            "local_only": True,
+        },
+        "artifact_path": str(_runtime_model_efficiency_customer_validation_brief_path(resolved)),
+        "live_controls_enabled": False,
+    }
+    _write_model_efficiency_customer_validation_brief_artifact(resolved, payload)
+    return payload
+
+
+def _model_efficiency_customer_validation_brief_contract(
+    brief: dict[str, Any],
+    service_packet: dict[str, Any],
+    first_project_packet: dict[str, Any],
+) -> dict[str, Any]:
+    closed_contract = brief.get("closed_live_control_contract", {})
+    audit_artifact = brief.get("first_audit_report_artifact", {})
+    repo_guard = brief.get("repo_packet_or_checker_required", {})
+    evidence = brief.get("evidence_needed", {})
+    required_signoffs = brief.get("operator_signoffs_required", [])
+    required_brief_sections = [
+        "first_buyer_profile",
+        "exact_problem_to_validate",
+        "evidence_needed",
+        "first_audit_report_artifact",
+        "kill_criteria",
+        "operator_signoffs_required",
+        "repo_packet_or_checker_required",
+    ]
+    closed = (
+        isinstance(closed_contract, dict)
+        and closed_contract.get("live_controls_enabled") is False
+        and closed_contract.get("paid_provider_calls_enabled") is False
+        and closed_contract.get("customer_visible_delivery_enabled") is False
+        and closed_contract.get("route_mutation_enabled") is False
+        and closed_contract.get("autonomous_customer_commitments_enabled") is False
+        and closed_contract.get("external_side_effects_allowed") is False
+    )
+    report_local_only = audit_artifact.get("delivery_state") == "local_artifact_only_until_operator_gate"
+    buyer_bound = bool(brief.get("first_buyer_profile", {}).get("recommended_profile"))
+    problem_bound = bool(brief.get("exact_problem_to_validate", {}).get("problem_statement"))
+    evidence_bound = bool(evidence.get("real_customer_or_proxy")) and bool(evidence.get("minimum_to_continue"))
+    report_bound = bool(audit_artifact.get("required_sections")) and bool(audit_artifact.get("must_not_contain"))
+    kill_bound = bool(brief.get("kill_criteria"))
+    signoffs_bound = bool(required_signoffs)
+    repo_guard_bound = (
+        repo_guard.get("packet_name") == "model_efficiency_customer_validation_brief"
+        and bool(repo_guard.get("checker_contract"))
+        and repo_guard.get("drift_blocker") == "customer_validation_brief_missing_or_speculative"
+        and bool(repo_guard.get("hash_bound_artifact"))
+    )
+    source_packets_bound = (
+        service_packet.get("packet_name") == "model_efficiency_service_packet"
+        and service_packet.get("live_controls_enabled") is False
+        and first_project_packet.get("packet_name") == "first_live_project_packet"
+        and first_project_packet.get("live_controls_enabled") is False
+    )
+    no_speculative_delivery = (
+        "unsupported savings claims" in audit_artifact.get("must_not_contain", [])
+        and "customer-visible commitments" in audit_artifact.get("must_not_contain", [])
+        and "route mutation instructions" in audit_artifact.get("must_not_contain", [])
+    )
+    contract = {
+        "required_sections_present": all(section in brief for section in required_brief_sections),
+        "buyer_profile_bound": buyer_bound,
+        "problem_statement_bound": problem_bound,
+        "customer_or_proxy_evidence_bound": evidence_bound,
+        "audit_report_artifact_bound": report_bound,
+        "kill_criteria_bound": kill_bound,
+        "operator_signoffs_bound": signoffs_bound,
+        "repo_packet_checker_bound": repo_guard_bound,
+        "source_packets_bound": source_packets_bound,
+        "closed_live_controls_bound": closed,
+        "first_report_local_only_until_operator_gate": report_local_only,
+        "speculative_claims_blocked": no_speculative_delivery,
+    }
+    blocker_by_key = {
+        "required_sections_present": "customer_validation_required_sections_missing",
+        "buyer_profile_bound": "customer_validation_buyer_profile_missing",
+        "problem_statement_bound": "customer_validation_problem_missing",
+        "customer_or_proxy_evidence_bound": "customer_validation_evidence_missing",
+        "audit_report_artifact_bound": "customer_validation_audit_report_unbound",
+        "kill_criteria_bound": "customer_validation_kill_criteria_missing",
+        "operator_signoffs_bound": "customer_validation_operator_signoffs_missing",
+        "repo_packet_checker_bound": "customer_validation_repo_checker_missing",
+        "source_packets_bound": "customer_validation_source_packets_unbound",
+        "closed_live_controls_bound": "customer_validation_live_controls_open",
+        "first_report_local_only_until_operator_gate": "customer_validation_report_delivery_not_gated",
+        "speculative_claims_blocked": "customer_validation_speculative_claims_allowed",
+    }
+    blockers = [blocker_by_key[key] for key, ok in contract.items() if not ok]
+    return {"contract": contract, "blockers": sorted(blockers)}
 
 
 def pre_live_completion_bundle(
@@ -5552,6 +5926,11 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "--model-efficiency-service-packet",
             repo_root,
         ),
+        "model_efficiency_customer_validation_brief_command": _command_string(
+            config,
+            "--model-efficiency-customer-validation-brief",
+            repo_root,
+        ),
         "pre_live_completion_bundle_command": _command_string(config, "--pre-live-completion-bundle", repo_root),
         "target_machine_validation_run_packet_command": _command_string(
             config,
@@ -5588,6 +5967,7 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "first_live_project_packet",
             "model_shadow_ops",
             "model_efficiency_service_packet",
+            "model_efficiency_customer_validation_brief",
             "pre_live_completion_bundle",
             "target_machine_validation_run_packet",
             "pre_live_bundle_verification",
@@ -5728,8 +6108,9 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "candidates": [],
         },
     )
-    _write_recovery_readiness_artifact(
+    _write_placeholder_runtime_artifact(
         config,
+        "recovery_readiness",
         {
             "available": False,
             "status": "NOT_RUN",
@@ -5737,8 +6118,9 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "live_controls_enabled": False,
         },
     )
-    _write_hermes_adapter_readiness_artifact(
+    _write_placeholder_runtime_artifact(
         config,
+        "hermes_adapter_readiness",
         {
             "available": False,
             "status": "NOT_RUN",
@@ -5746,8 +6128,9 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "live_controls_enabled": False,
         },
     )
-    _write_migration_readiness_artifact(
+    _write_placeholder_runtime_artifact(
         config,
+        "migration_readiness",
         {
             "available": False,
             "status": "NOT_RUN",
@@ -5755,8 +6138,9 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "live_controls_enabled": False,
         },
     )
-    _write_pre_hermes_readiness_artifact(
+    _write_placeholder_runtime_artifact(
         config,
+        "pre_hermes_readiness",
         {
             "available": False,
             "status": "NOT_RUN",
@@ -5764,8 +6148,9 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "live_controls_enabled": False,
         },
     )
-    _write_pre_live_mission_control_artifact(
+    _write_placeholder_runtime_artifact(
         config,
+        "pre_live_mission_control",
         {
             "available": False,
             "status": "NOT_RUN",
@@ -5773,8 +6158,9 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "live_controls_enabled": False,
         },
     )
-    _write_hermes_adapter_gauntlet_artifact(
+    _write_placeholder_runtime_artifact(
         config,
+        "hermes_adapter_gauntlet",
         {
             "available": False,
             "status": "NOT_RUN",
@@ -5782,8 +6168,9 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "live_controls_enabled": False,
         },
     )
-    _write_first_live_project_packet_artifact(
+    _write_placeholder_runtime_artifact(
         config,
+        "first_live_project_packet",
         {
             "available": False,
             "status": "NOT_RUN",
@@ -5791,8 +6178,9 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "live_controls_enabled": False,
         },
     )
-    _write_model_shadow_ops_artifact(
+    _write_placeholder_runtime_artifact(
         config,
+        "model_shadow_ops",
         {
             "available": False,
             "status": "NOT_RUN",
@@ -5800,8 +6188,9 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "live_controls_enabled": False,
         },
     )
-    _write_model_efficiency_service_packet_artifact(
+    _write_placeholder_runtime_artifact(
         config,
+        "model_efficiency_service_packet",
         {
             "available": False,
             "status": "NOT_RUN",
@@ -5809,8 +6198,19 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "live_controls_enabled": False,
         },
     )
-    _write_pre_live_completion_bundle_artifact(
+    _write_placeholder_runtime_artifact(
         config,
+        "model_efficiency_customer_validation_brief",
+        {
+            "available": False,
+            "status": "NOT_RUN",
+            "command": _command_string(config, "--model-efficiency-customer-validation-brief", repo_root),
+            "live_controls_enabled": False,
+        },
+    )
+    _write_placeholder_runtime_artifact(
+        config,
+        "pre_live_completion_bundle",
         {
             "available": False,
             "status": "NOT_RUN",
@@ -5818,8 +6218,9 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "live_controls_enabled": False,
         },
     )
-    _write_target_machine_validation_run_packet_artifact(
+    _write_placeholder_runtime_artifact(
         config,
+        "target_machine_validation_run_packet",
         {
             "available": False,
             "status": "NOT_RUN",
@@ -5827,8 +6228,9 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "live_controls_enabled": False,
         },
     )
-    _write_pre_live_bundle_verification_artifact(
+    _write_placeholder_runtime_artifact(
         config,
+        "pre_live_bundle_verification",
         {
             "available": False,
             "status": "NOT_RUN",
@@ -5836,8 +6238,9 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "live_controls_enabled": False,
         },
     )
-    _write_target_machine_evidence_check_artifact(
+    _write_placeholder_runtime_artifact(
         config,
+        "target_machine_evidence_check",
         {
             "available": False,
             "status": "NOT_RUN",
@@ -5845,8 +6248,9 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "live_controls_enabled": False,
         },
     )
-    _write_first_live_project_acceptance_check_artifact(
+    _write_placeholder_runtime_artifact(
         config,
+        "first_live_project_acceptance_check",
         {
             "available": False,
             "status": "NOT_RUN",
@@ -5854,8 +6258,9 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "live_controls_enabled": False,
         },
     )
-    _write_self_improvement_snapshot_artifact(
+    _write_placeholder_runtime_artifact(
         config,
+        "self_improvement_snapshot",
         {
             "available": True,
             "status": "EMPTY",
@@ -5963,6 +6368,9 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
         "first_live_project_packet_path": str(_runtime_first_live_project_packet_path(resolved)),
         "model_shadow_ops_path": str(_runtime_model_shadow_ops_path(resolved)),
         "model_efficiency_service_packet_path": str(_runtime_model_efficiency_service_packet_path(resolved)),
+        "model_efficiency_customer_validation_brief_path": str(
+            _runtime_model_efficiency_customer_validation_brief_path(resolved)
+        ),
         "pre_live_completion_bundle_path": str(_runtime_pre_live_completion_bundle_path(resolved)),
         "pre_live_evidence_crosswalk_path": str(_runtime_pre_live_evidence_crosswalk_path(resolved)),
         "target_machine_validation_run_packet_path": str(_runtime_target_machine_validation_run_packet_path(resolved)),
@@ -6037,6 +6445,11 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
             "model_efficiency_service_packet": _command_string(
                 resolved,
                 "--model-efficiency-service-packet",
+                root,
+            ),
+            "model_efficiency_customer_validation_brief": _command_string(
+                resolved,
+                "--model-efficiency-customer-validation-brief",
                 root,
             ),
             "pre_live_completion_bundle": _command_string(resolved, "--pre-live-completion-bundle", root),
@@ -6130,6 +6543,12 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
         resolved,
         root,
         "--model-efficiency-service-packet",
+    )
+    _write_launcher(
+        launcher_paths["model_efficiency_customer_validation_brief"],
+        resolved,
+        root,
+        "--model-efficiency-customer-validation-brief",
     )
     _write_launcher(launcher_paths["pre_live_completion_bundle"], resolved, root, "--pre-live-completion-bundle")
     _write_launcher(launcher_paths["pre_live_evidence_crosswalk"], resolved, root, "--pre-live-evidence-crosswalk")
@@ -6293,6 +6712,9 @@ def doctor_runtime(
         "first_live_project_packet": _runtime_first_live_project_packet_path(resolved).is_file(),
         "model_shadow_ops": _runtime_model_shadow_ops_path(resolved).is_file(),
         "model_efficiency_service_packet": _runtime_model_efficiency_service_packet_path(resolved).is_file(),
+        "model_efficiency_customer_validation_brief": _runtime_model_efficiency_customer_validation_brief_path(
+            resolved
+        ).is_file(),
         "pre_live_completion_bundle": _runtime_pre_live_completion_bundle_path(resolved).is_file(),
         "target_machine_validation_run_packet": _runtime_target_machine_validation_run_packet_path(resolved).is_file(),
         "pre_live_bundle_verification": _runtime_pre_live_bundle_verification_path(resolved).is_file(),
@@ -6322,6 +6744,9 @@ def doctor_runtime(
         "first_live_project_packet_launcher": launcher_paths["first_live_project_packet"].is_file(),
         "model_shadow_ops_launcher": launcher_paths["model_shadow_ops"].is_file(),
         "model_efficiency_service_packet_launcher": launcher_paths["model_efficiency_service_packet"].is_file(),
+        "model_efficiency_customer_validation_brief_launcher": launcher_paths[
+            "model_efficiency_customer_validation_brief"
+        ].is_file(),
         "pre_live_completion_bundle_launcher": launcher_paths["pre_live_completion_bundle"].is_file(),
         "target_machine_validation_run_packet_launcher": launcher_paths["target_machine_validation_run_packet"].is_file(),
         "pre_live_bundle_verification_launcher": launcher_paths["pre_live_bundle_verification"].is_file(),
@@ -9569,6 +9994,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--first-live-project-packet", action="store_true", help="Create the productized first-live-project handoff packet")
     parser.add_argument("--model-shadow-ops", action="store_true", help="Create the seed Model Intelligence shadow-ops packet")
     parser.add_argument("--model-efficiency-service-packet", action="store_true", help="Create the local-only governed model-efficiency service packet")
+    parser.add_argument("--model-efficiency-customer-validation-brief", action="store_true", help="Create the local-only customer-validation brief for the governed model-efficiency service")
     parser.add_argument("--pre-live-completion-bundle", action="store_true", help="Create the all-ten pre-live coding completion proof bundle")
     parser.add_argument("--pre-live-evidence-crosswalk", action="store_true", help="Map pre-live handoff checklist items to repo-owned evidence and blockers")
     parser.add_argument(
@@ -10041,6 +10467,14 @@ def _main_impl(
         )
         print(json.dumps(payload, indent=2, sort_keys=True, default=str))
         return 0
+
+    if args.model_efficiency_customer_validation_brief:
+        payload = model_efficiency_customer_validation_brief(
+            config=config,
+            repo_root=args.repo_root,
+        )
+        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+        return 0 if payload["status"] != "blocked" else 1
 
     if args.pre_live_completion_bundle:
         payload = pre_live_completion_bundle(

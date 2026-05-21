@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from kernel.runtime_catalog import runtime_support_artifact_paths
 from skills.config import IntegrationConfig
-from skills.milestone_status import runtime_support_artifact_paths
 
 
 @dataclass(frozen=True)
@@ -31,6 +31,7 @@ RUNTIME_ARTIFACT_DEFAULTS: dict[str, RuntimeArtifactDefaults] = {
     "target_machine_evidence_check": RuntimeArtifactDefaults(live_controls_enabled=False),
     "first_live_project_acceptance_check": RuntimeArtifactDefaults(live_controls_enabled=False),
     "model_efficiency_service_packet": RuntimeArtifactDefaults(live_controls_enabled=False),
+    "model_efficiency_customer_validation_brief": RuntimeArtifactDefaults(live_controls_enabled=False),
     "pre_live_completion_bundle": RuntimeArtifactDefaults(live_controls_enabled=False),
     "pre_live_evidence_crosswalk": RuntimeArtifactDefaults(live_controls_enabled=False),
     "replay_readiness_report": RuntimeArtifactDefaults(generated_at=True),
@@ -38,6 +39,10 @@ RUNTIME_ARTIFACT_DEFAULTS: dict[str, RuntimeArtifactDefaults] = {
     "optimizer_snapshot": RuntimeArtifactDefaults(generated_at=True),
     "harness_candidate_report": RuntimeArtifactDefaults(generated_at=True),
 }
+
+PLACEHOLDER_RUNTIME_ARTIFACT_STATUSES: frozenset[str] = frozenset(
+    {"NOT_RUN", "UNAVAILABLE", "PLACEHOLDER", "EMPTY"}
+)
 
 
 PRE_LIVE_CLOSED_CONTROL_CONTRACT: dict[str, bool] = {
@@ -120,6 +125,24 @@ def write_runtime_artifact(
     if live_control_default is not None:
         artifact.setdefault("live_controls_enabled", live_control_default)
     _write_json(path, artifact)
+    return path
+
+
+def write_placeholder_runtime_artifact(
+    config: IntegrationConfig,
+    artifact_name: str,
+    payload: dict[str, Any],
+) -> Path:
+    """Write install-time placeholders without replacing generated runtime packets."""
+    path = runtime_artifact_path(config, artifact_name)
+    existing = _read_json(path)
+    if (
+        isinstance(existing, dict)
+        and existing.get("available") is True
+        and existing.get("status") not in PLACEHOLDER_RUNTIME_ARTIFACT_STATUSES
+    ):
+        return path
+    write_hashed_runtime_artifact(config, artifact_name, payload)
     return path
 
 
@@ -587,3 +610,11 @@ def _utc_now() -> str:
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f"{json.dumps(payload, indent=2, sort_keys=True)}\n", encoding="utf-8")
+
+
+def _read_json(path: Path) -> dict[str, Any] | None:
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None

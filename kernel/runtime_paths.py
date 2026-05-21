@@ -7,8 +7,8 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from kernel.runtime import runtime_logs_dir as _kernel_runtime_logs_dir
+from kernel.runtime_catalog import runtime_bundle_dir, runtime_launcher_paths, runtime_support_artifact_paths
 from skills.config import IntegrationConfig
-from skills.milestone_status import runtime_support_artifact_paths
 
 
 def _repo_root() -> Path:
@@ -16,7 +16,7 @@ def _repo_root() -> Path:
 
 
 def _runtime_bundle_dir(config: IntegrationConfig) -> Path:
-    return Path(config.skills_dir) / "runtime"
+    return runtime_bundle_dir(config)
 
 
 def _runtime_profile_manifest_path(config: IntegrationConfig) -> Path:
@@ -24,53 +24,7 @@ def _runtime_profile_manifest_path(config: IntegrationConfig) -> Path:
 
 
 def _runtime_launcher_paths(config: IntegrationConfig) -> dict[str, Path]:
-    bin_dir = _runtime_bundle_dir(config) / "bin"
-    return {
-        "bootstrap": bin_dir / "bootstrap_runtime.sh",
-        "bootstrap_stack": bin_dir / "bootstrap_stack.sh",
-        "doctor": bin_dir / "doctor_runtime.sh",
-        "readiness": bin_dir / "readiness_runtime.sh",
-        "start_proxy": bin_dir / "start_local_forward_proxy.sh",
-        "proxy_self_test": bin_dir / "proxy_self_test.sh",
-        "operator_workflow": bin_dir / "run_operator_workflow.sh",
-        "contract_harness": bin_dir / "contract_harness_runtime.sh",
-        "task_loop_proof": bin_dir / "task_loop_proof.sh",
-        "research_cron_proof": bin_dir / "research_cron_proof.sh",
-        "flywheel_drill": bin_dir / "flywheel_drill.sh",
-        "evidence_factory": bin_dir / "evidence_factory.sh",
-        "replay_readiness_report": bin_dir / "replay_readiness_report.sh",
-        "export_replay_corpus": bin_dir / "export_replay_corpus.sh",
-        "optimizer_snapshot": bin_dir / "optimizer_snapshot.sh",
-        "analyze_harness_candidates": bin_dir / "analyze_harness_candidates.sh",
-        "propose_best_harness_candidate": bin_dir / "propose_best_harness_candidate.sh",
-        "known_bad_hardening_operator_review": bin_dir / "known_bad_hardening_operator_review.sh",
-        "known_bad_hardening_operator_review_summary": bin_dir / "known_bad_hardening_operator_review_summary.sh",
-        "known_bad_hardening_follow_on_review": bin_dir / "known_bad_hardening_follow_on_review.sh",
-        "known_bad_hardening_operator_patch_gate": bin_dir / "known_bad_hardening_operator_patch_gate.sh",
-        "mac_studio_day_one": bin_dir / "mac_studio_day_one.sh",
-        "recovery_readiness": bin_dir / "recovery_readiness.sh",
-        "hermes_adapter_readiness": bin_dir / "hermes_adapter_readiness.sh",
-        "migration_readiness": bin_dir / "migration_readiness.sh",
-        "pre_hermes_readiness": bin_dir / "pre_hermes_readiness.sh",
-        "pre_live_mission_control": bin_dir / "pre_live_mission_control.sh",
-        "hermes_adapter_gauntlet": bin_dir / "hermes_adapter_gauntlet.sh",
-        "first_live_project_packet": bin_dir / "first_live_project_packet.sh",
-        "model_shadow_ops": bin_dir / "model_shadow_ops.sh",
-        "target_machine_validation_run_packet": bin_dir / "target_machine_validation_run_packet.sh",
-        "pre_live_bundle_verification": bin_dir / "pre_live_bundle_verification.sh",
-        "target_machine_evidence_check": bin_dir / "target_machine_evidence_check.sh",
-        "first_live_project_acceptance_check": bin_dir / "first_live_project_acceptance_check.sh",
-        "model_efficiency_service_packet": bin_dir / "model_efficiency_service_packet.sh",
-        "pre_live_completion_bundle": bin_dir / "pre_live_completion_bundle.sh",
-        "pre_live_evidence_crosswalk": bin_dir / "pre_live_evidence_crosswalk.sh",
-        "self_improvement_evidence_pipeline": bin_dir / "self_improvement_evidence_pipeline.sh",
-        "self_improvement_snapshot": bin_dir / "self_improvement_snapshot.sh",
-        "gateway": bin_dir / "start_gateway.sh",
-        "workspace": bin_dir / "start_workspace.sh",
-        "operator_checklist": bin_dir / "operator_validation_checklist.sh",
-        "milestone_status": bin_dir / "milestone_status.sh",
-        "workspace_overview": bin_dir / "workspace_overview.sh",
-    }
+    return runtime_launcher_paths(config)
 
 
 def _linked_skills_dir(config: IntegrationConfig) -> Path:
@@ -224,6 +178,10 @@ def _runtime_first_live_project_acceptance_check_path(config: IntegrationConfig)
 
 def _runtime_model_efficiency_service_packet_path(config: IntegrationConfig) -> Path:
     return runtime_support_artifact_paths(config)["model_efficiency_service_packet"]
+
+
+def _runtime_model_efficiency_customer_validation_brief_path(config: IntegrationConfig) -> Path:
+    return runtime_support_artifact_paths(config)["model_efficiency_customer_validation_brief"]
 
 
 def _runtime_pre_live_completion_bundle_path(config: IntegrationConfig) -> Path:

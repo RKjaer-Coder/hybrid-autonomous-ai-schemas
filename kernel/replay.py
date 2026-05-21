@@ -10,15 +10,15 @@ KERNEL_EVENT_SCHEMA_VERSION = 1
 KERNEL_POLICY_VERSION = "v3.1-foundation"
 
 LEGACY_BOUNDARIES: dict[str, str] = {
-    "immune": "adapt: safety validation and broker-bypass helper only",
-    "financial_router": "adapt: route and spend helper subordinate to kernel budgets",
-    "skills/local_forward_proxy.py": "adapt: network/provider proxy behind grants",
-    "council": "adapt: deliberation recommendation only",
-    "eval": "adapt: replay/eval substrate, not promotion authority yet",
-    "harness_variants.py": "adapt: eval substrate behind kernel decisions",
+    "immune": "compatibility: safety validation and broker-bypass helper only",
+    "financial_router": "compatibility: route and spend helper subordinate to kernel budgets",
+    "skills/local_forward_proxy.py": "compatibility: network/provider proxy behind grants",
+    "council": "compatibility: deliberation recommendation only",
+    "eval": "compatibility: replay/eval substrate, not promotion authority yet",
+    "harness_variants.py": "compatibility: eval substrate behind kernel decisions",
     "kernel/runtime_compat.py": "wrap: CLI/proof compatibility harness, never kernel authority",
     "skills/runtime.py": "wrap: thin compatibility entrypoint for kernel runtime",
-    "schemas/*.sql": "convert-to-projection: legacy domain schemas are non-authoritative",
+    "schemas/*.sql": "projection: legacy domain schemas are non-authoritative",
 }
 
 
