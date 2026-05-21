@@ -79,6 +79,9 @@ from kernel.services import (
     stable_json_hash,
     TARGET_MACHINE_REPLAY_PROJECTION_EVIDENCE,
     target_machine_evidence_check_packet,
+    target_machine_replay_projection_proof_contract,
+    target_machine_replay_projection_proof_records,
+    target_machine_replay_projection_proof_records_contract,
     write_hashed_runtime_artifact,
     write_placeholder_runtime_artifact,
     write_runtime_artifact,
@@ -3571,84 +3574,16 @@ def target_machine_validation_run_packet(
     }
     if not all(execution_order_contract.values()):
         blockers.append("target_machine_execution_order_invalid")
-    replay_projection_proof_contract = {
-        "first_live_project_events_before_projection": all(
-            step.get("event_before_projection") is True for step in project.get("workflow", [])
-        ),
-        "readiness_requires_projection_checks": "projection_checks_verified"
-        in run_steps[2]["required_evidence"],
-        "resume_replay_reconstructs_intents_only": adapter.get("resume_replay_summary", {}).get(
-            "replay_intents_reconstructed_only"
-        )
-        is True,
-        "external_side_effect_replay_disabled": closed_control_contract.get("side_effect_replay_enabled") is False,
-        "manifest_artifacts_hash_bound_before_live_authority": bool(evidence_manifest)
-        and all(
-            item["exists"] and item["sha256"] and item["required_before_live_authority"]
-            for item in evidence_manifest
-        ),
-    }
-    replay_projection_proof_records = [
-        {
-            "proof_contract_key": "first_live_project_events_before_projection",
-            "evidence_id": "first_live_project_events_before_projection_verified",
-            "reconstructed_intent": "first_live_project workflow phase intents are reconstructed from kernel task events before projection",
-            "projected_state": "first_live_project_packet.workflow event_before_projection flags remain true for every phase",
-            "forbidden_side_effect_reexecution": {
-                "allowed": False,
-                "control": "workflow.external_side_effects_executed_false",
-            },
-        },
-        {
-            "proof_contract_key": "readiness_requires_projection_checks",
-            "evidence_id": "projection_checks_verified",
-            "reconstructed_intent": "readiness validation reconstructs recovery and migration intent before adapter use",
-            "projected_state": "readiness_suite projection checks must pass before live authority",
-            "forbidden_side_effect_reexecution": {
-                "allowed": False,
-                "control": "readiness_projection_checks_inspect_only",
-            },
-        },
-        {
-            "proof_contract_key": "resume_replay_reconstructs_intents_only",
-            "evidence_id": "resume_replay_intents_reconstructed_only",
-            "reconstructed_intent": "Hermes resume replay reconstructs side-effect intents and receipts only",
-            "projected_state": "adapter resume replay summary reports replay_intents_reconstructed_only",
-            "forbidden_side_effect_reexecution": {
-                "allowed": False,
-                "control": "adapter_resume_external_side_effects_reexecuted_false",
-            },
-        },
-        {
-            "proof_contract_key": "external_side_effect_replay_disabled",
-            "evidence_id": "external_side_effect_replay_disabled_verified",
-            "reconstructed_intent": "external side-effect intents remain inspect-or-compensate replay records",
-            "projected_state": "closed_control_contract.side_effect_replay_enabled remains false",
-            "forbidden_side_effect_reexecution": {
-                "allowed": False,
-                "control": "closed_control_contract.side_effect_replay_enabled_false",
-            },
-        },
-        {
-            "proof_contract_key": "manifest_artifacts_hash_bound_before_live_authority",
-            "evidence_id": "manifest_artifacts_hash_bound_before_live_authority",
-            "reconstructed_intent": "artifact manifest preserves generated packet identity before live authority",
-            "projected_state": "every manifest artifact has an existing SHA-256 and required_before_live_authority=true",
-            "forbidden_side_effect_reexecution": {
-                "allowed": False,
-                "control": "manifest_artifact_verification_read_only",
-            },
-        },
-    ]
-    replay_projection_proof_records_contract = all(
-        record.get("proof_contract_key")
-        and record.get("evidence_id")
-        and record.get("reconstructed_intent")
-        and record.get("projected_state")
-        and isinstance(record.get("forbidden_side_effect_reexecution"), dict)
-        and record["forbidden_side_effect_reexecution"].get("allowed") is False
-        and record["forbidden_side_effect_reexecution"].get("control")
-        for record in replay_projection_proof_records
+    replay_projection_proof_contract = target_machine_replay_projection_proof_contract(
+        project_packet=project,
+        adapter_packet=adapter,
+        closed_control_contract=closed_control_contract,
+        evidence_manifest=evidence_manifest,
+        run_steps=run_steps,
+    )
+    replay_projection_proof_records = target_machine_replay_projection_proof_records()
+    replay_projection_proof_records_contract = target_machine_replay_projection_proof_records_contract(
+        replay_projection_proof_records
     )
     if not replay_projection_proof_records_contract:
         blockers.append("replay_projection_proof_records_incomplete")
