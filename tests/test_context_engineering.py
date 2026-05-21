@@ -7,8 +7,10 @@ from pathlib import Path
 from kernel.services.runtime_artifacts import (
     first_live_project_acceptance_check_packet,
     pre_live_artifact_controls_disabled,
+    pre_live_bundle_verification_packet,
     pre_live_closed_control_contract,
     pre_live_controls_are_closed,
+    pre_live_evidence_crosswalk_contract,
     pre_live_evidence_crosswalk_row,
     pre_live_fail_closed_controls,
     runtime_evidence_manifest_item,
@@ -168,6 +170,99 @@ def test_target_machine_evidence_check_packet_fails_closed_on_unbound_preserved_
     assert "preserved_evidence_record_binding_missing" in payload["blockers"]
     assert "replay_projection_contract_not_proven" in payload["blockers"]
     assert payload["replay_projection_contract"]["preserved_evidence_records_bound_to_contract"] is False
+
+
+def test_pre_live_evidence_crosswalk_contract_is_service_owned_and_fail_closed(tmp_path):
+    artifact = tmp_path / "target_machine_validation_run_packet.json"
+    artifact.write_text('{"live_controls_enabled": false}\n', encoding="utf-8")
+    row = {
+        "ready": True,
+        "mapped_step_count": 1,
+        "mapped_artifact_count": 1,
+        "required_evidence": ["projection_checks_verified"],
+        "artifact_checks": [
+            {
+                "name": "target_machine_validation_run_packet",
+                "exists": True,
+                "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+                "required_before_live_authority": True,
+            }
+        ],
+        "closed_control_keys": ["live_controls_enabled"],
+        "blocker_conditions": ["replay_projection_contract_not_proven"],
+        "missing_steps": [],
+        "missing_artifacts": [],
+        "opened_controls": [],
+    }
+
+    passing = pre_live_evidence_crosswalk_contract(
+        [row],
+        run_packet_status="ready_for_target_machine_execution",
+        closed_control_ok=True,
+    )
+    drifted = pre_live_evidence_crosswalk_contract(
+        [{**row, "blocker_conditions": []}],
+        run_packet_status="ready_for_target_machine_execution",
+        closed_control_ok=True,
+    )
+
+    assert all(passing["contract"].values())
+    assert passing["blockers"] == []
+    assert drifted["contract"]["all_rows_have_blocker_conditions"] is False
+    assert "pre_live_crosswalk_rows_missing_blocker_conditions" in drifted["blockers"]
+
+
+def test_pre_live_bundle_verification_packet_is_service_owned_and_fail_closed(tmp_path):
+    bundle = tmp_path / "pre-live-bundle"
+    bundle.mkdir()
+    files = {
+        "pre_live_mission_control.json": {
+            "go_no_go": "ready_for_target_machine_validation",
+            "live_controls_enabled": False,
+        },
+        "hermes_adapter_gauntlet.json": {"status": "ready", "live_controls_enabled": False},
+        "first_live_project_packet.json": {"status": "ready", "live_controls_enabled": False},
+        "model_shadow_ops.json": {"status": "ready", "live_controls_enabled": False},
+        "target_machine_validation_run_packet.json": {
+            "status": "ready_for_target_machine_execution",
+            "live_controls_enabled": False,
+            "closed_control_contract": pre_live_closed_control_contract(),
+            "execution_order_contract": {"recovery_before_adapter": True},
+        },
+    }
+    copied = []
+    for filename, payload in files.items():
+        path = bundle / filename
+        path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        copied.append(path)
+    (bundle / "SHA256SUMS").write_text(
+        "".join(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n" for path in sorted(copied)),
+        encoding="utf-8",
+    )
+
+    passing = pre_live_bundle_verification_packet(
+        bundle=bundle,
+        generated_at="2026-05-12T00:08:30+00:00",
+        artifact_path=tmp_path / "pre_live_bundle_verification.json",
+    )
+    opened = json.loads((bundle / "target_machine_validation_run_packet.json").read_text(encoding="utf-8"))
+    opened["closed_control_contract"]["paid_provider_calls_enabled"] = True
+    (bundle / "target_machine_validation_run_packet.json").write_text(
+        json.dumps(opened, sort_keys=True),
+        encoding="utf-8",
+    )
+    drifted = pre_live_bundle_verification_packet(
+        bundle=bundle,
+        generated_at="2026-05-12T00:08:30+00:00",
+        artifact_path=tmp_path / "pre_live_bundle_verification.json",
+    )
+
+    assert passing["status"] == "verified_pre_live_bundle"
+    assert passing["blockers"] == []
+    assert passing["summary"]["required_checksums_match"] is True
+    assert drifted["status"] == "blocked"
+    assert "required_pre_live_artifact_checksum_mismatch" in drifted["blockers"]
+    assert "closed_control_contract_opened_live_control" in drifted["blockers"]
 
 
 def test_first_live_project_acceptance_check_packet_preserves_gate_shape(tmp_path):

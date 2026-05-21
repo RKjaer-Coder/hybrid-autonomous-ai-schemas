@@ -1488,6 +1488,12 @@ def test_model_efficiency_customer_validation_brief_is_narrow_and_operator_gated
     assert "operator_confirms_no_route_mutation_or_live_control_enablement" in brief["operator_signoffs_required"]
     assert brief["repo_packet_or_checker_required"]["packet_name"] == "model_efficiency_customer_validation_brief"
     assert brief["repo_packet_or_checker_required"]["drift_blocker"] == "customer_validation_brief_missing_or_speculative"
+    next_packet = brief["next_customer_validation_packet"]
+    assert next_packet["required_authority"] == "operator_gate"
+    assert next_packet["artifact_to_show"] == "governed_model_efficiency_audit_report"
+    assert next_packet["delivery_state"] == "local_artifact_only_until_operator_gate"
+    assert next_packet["validation_questions"]
+    assert "representative traces or proxy examples" in next_packet["minimum_continue_evidence"]
     assert brief["closed_live_control_contract"] == {
         "live_controls_enabled": False,
         "paid_provider_calls_enabled": False,
@@ -1725,6 +1731,19 @@ def test_target_machine_validation_run_packet_preserves_evidence_manifest(tmp_pa
     assert all(payload["execution_order_contract"].values())
     assert all(payload["replay_projection_proof_contract"].values())
     assert payload["replay_projection_proof_records_contract"] is True
+    inventory = payload["runtime_proof_builder_inventory"]
+    assert inventory["status"] == "inventoried"
+    assert inventory["next_service_slice"] == "pre_live_completion_bundle"
+    assert inventory["service_owned_count"] >= 5
+    assert any(
+        item["builder"] == "pre_live_bundle_verification"
+        and item["owner"] == "kernel.services.runtime_artifacts"
+        for item in inventory["builders"]
+    )
+    checklist = payload["pre_live_evidence_checklist"]
+    assert checklist["status"] == "ready_pre_live_with_target_machine_bundle_gated"
+    assert checklist["hardware_blocked_checks"] == ["preserved_target_machine_bundle"]
+    assert checklist["all_pre_live_checks_have_blockers"] is True
     assert {
         "proof_contract_key",
         "evidence_id",
@@ -1861,6 +1880,8 @@ def test_pre_live_runtime_artifact_packets_preserve_hashes_and_contract_shapes(t
         "replay_projection_proof_contract",
         "replay_projection_proof_records",
         "replay_projection_proof_records_contract",
+        "runtime_proof_builder_inventory",
+        "pre_live_evidence_checklist",
         "closed_control_contract",
         "blockers",
         "fail_closed_controls",

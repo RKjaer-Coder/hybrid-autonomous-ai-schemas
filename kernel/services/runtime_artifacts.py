@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -681,6 +682,257 @@ def pre_live_evidence_crosswalk_row(
         "blocker_conditions": blocker_conditions,
         "ready": ready,
     }
+
+
+def pre_live_evidence_crosswalk_contract(
+    rows: list[dict[str, Any]],
+    *,
+    run_packet_status: str,
+    closed_control_ok: bool,
+) -> dict[str, Any]:
+    all_rows_ready = bool(rows) and all(row.get("ready") is True for row in rows)
+    all_rows_have_steps = bool(rows) and all(row.get("mapped_step_count", 0) > 0 for row in rows)
+    all_rows_have_artifacts = bool(rows) and all(row.get("mapped_artifact_count", 0) > 0 for row in rows)
+    all_rows_have_required_evidence = bool(rows) and all(bool(row.get("required_evidence")) for row in rows)
+    all_rows_have_closed_control_keys = bool(rows) and all(bool(row.get("closed_control_keys")) for row in rows)
+    all_rows_have_blocker_conditions = bool(rows) and all(bool(row.get("blocker_conditions")) for row in rows)
+    no_missing_mappings = bool(rows) and all(
+        not row.get("missing_steps") and not row.get("missing_artifacts") for row in rows
+    )
+    no_opened_controls = bool(rows) and all(not row.get("opened_controls") for row in rows)
+    all_artifacts_hash_bound = bool(rows) and all(
+        artifact.get("exists") is True
+        and bool(artifact.get("sha256"))
+        and artifact.get("required_before_live_authority") is True
+        for row in rows
+        for artifact in row.get("artifact_checks", [])
+    )
+    all_rows_have_artifact_checks = bool(rows) and all(bool(row.get("artifact_checks")) for row in rows)
+    contract = {
+        "run_packet_ready": run_packet_status == "ready_for_target_machine_execution",
+        "closed_control_contract_ok": closed_control_ok,
+        "all_rows_ready": all_rows_ready,
+        "all_rows_have_steps": all_rows_have_steps,
+        "all_rows_have_artifacts": all_rows_have_artifacts,
+        "all_rows_have_required_evidence": all_rows_have_required_evidence,
+        "all_rows_have_closed_control_keys": all_rows_have_closed_control_keys,
+        "all_rows_have_blocker_conditions": all_rows_have_blocker_conditions,
+        "no_missing_mappings": no_missing_mappings,
+        "no_opened_controls": no_opened_controls,
+        "all_rows_have_artifact_checks": all_rows_have_artifact_checks,
+        "all_artifacts_hash_bound_before_live_authority": (
+            all_rows_have_artifact_checks and all_artifacts_hash_bound
+        ),
+    }
+    blocker_names = {
+        "run_packet_ready": "pre_live_crosswalk_run_packet_not_ready",
+        "closed_control_contract_ok": "pre_live_crosswalk_closed_control_contract_open",
+        "all_rows_ready": "pre_live_crosswalk_rows_not_ready",
+        "all_rows_have_steps": "pre_live_crosswalk_rows_missing_steps",
+        "all_rows_have_artifacts": "pre_live_crosswalk_rows_missing_artifacts",
+        "all_rows_have_required_evidence": "pre_live_crosswalk_rows_missing_required_evidence",
+        "all_rows_have_closed_control_keys": "pre_live_crosswalk_rows_missing_closed_control_keys",
+        "all_rows_have_blocker_conditions": "pre_live_crosswalk_rows_missing_blocker_conditions",
+        "no_missing_mappings": "pre_live_crosswalk_rows_have_missing_mappings",
+        "no_opened_controls": "pre_live_crosswalk_rows_have_opened_controls",
+        "all_rows_have_artifact_checks": "pre_live_crosswalk_rows_missing_artifact_checks",
+        "all_artifacts_hash_bound_before_live_authority": "pre_live_crosswalk_artifacts_not_hash_bound",
+    }
+    return {
+        "contract": contract,
+        "blockers": sorted({blocker_names[key] for key, ok in contract.items() if not ok}),
+    }
+
+
+def pre_live_bundle_verification_packet(
+    *,
+    bundle: Path,
+    generated_at: str,
+    artifact_path: Path,
+) -> dict[str, Any]:
+    """Build the pre-live bundle verification packet without runtime side effects."""
+    sha_entries = parse_sha256sums(bundle / "SHA256SUMS")
+    required_json_files = [
+        "pre_live_mission_control.json",
+        "hermes_adapter_gauntlet.json",
+        "first_live_project_packet.json",
+        "model_shadow_ops.json",
+        "target_machine_validation_run_packet.json",
+    ]
+    optional_json_files = ["model_efficiency_service_packet.json"]
+    expected_json_files = {*required_json_files, *optional_json_files}
+    inert_declarations = _bundle_inert_artifact_declarations(bundle)
+    extra_artifact_checks = _pre_live_bundle_extra_artifact_checks(
+        bundle=bundle,
+        expected_filenames=expected_json_files,
+        inert_declarations=inert_declarations,
+    )
+    file_checks = []
+    for filename in [*required_json_files, *optional_json_files]:
+        path = bundle / filename
+        parsed = _bundle_json(path)
+        actual_hash = file_sha256(path)
+        manifest_hash = sha_entries.get(filename)
+        file_checks.append(
+            {
+                "filename": filename,
+                "required": filename in required_json_files,
+                "exists": path.is_file(),
+                "json_non_empty": bool(parsed),
+                "live_controls_disabled": pre_live_artifact_controls_disabled(parsed) if parsed else False,
+                "sha256": actual_hash,
+                "matches_sha256sums": bool(actual_hash and manifest_hash and actual_hash == manifest_hash),
+                "status": parsed.get("status") or parsed.get("go_no_go") or parsed.get("packet_name"),
+            }
+        )
+    run_packet = _bundle_json(bundle / "target_machine_validation_run_packet.json")
+    mission = _bundle_json(bundle / "pre_live_mission_control.json")
+    closed_control_contract = run_packet.get("closed_control_contract", {})
+    execution_order_contract = run_packet.get("execution_order_contract", {})
+    blockers = []
+    if not bundle.is_dir():
+        blockers.append("pre_live_bundle_missing")
+    if not sha_entries:
+        blockers.append("sha256sums_missing_or_empty")
+    if any(item["required"] and not item["exists"] for item in file_checks):
+        blockers.append("required_pre_live_artifact_missing")
+    if any(item["required"] and not item["json_non_empty"] for item in file_checks):
+        blockers.append("required_pre_live_artifact_empty_or_invalid")
+    if any(item["required"] and not item["matches_sha256sums"] for item in file_checks):
+        blockers.append("required_pre_live_artifact_checksum_mismatch")
+    if any(item["required"] and not item["live_controls_disabled"] for item in file_checks):
+        blockers.append("required_pre_live_artifact_live_controls_not_disabled")
+    if run_packet.get("status") not in {"ready_for_target_machine_execution", "blocked"}:
+        blockers.append("target_machine_run_packet_status_missing")
+    if (
+        run_packet.get("status") == "ready_for_target_machine_execution"
+        and mission.get("go_no_go") != "ready_for_target_machine_validation"
+    ):
+        blockers.append("mission_control_not_ready_for_target_machine_validation")
+    if execution_order_contract and not all(bool(value) for value in execution_order_contract.values()):
+        blockers.append("target_machine_execution_order_invalid")
+    if closed_control_contract and not pre_live_controls_are_closed(closed_control_contract):
+        blockers.append("closed_control_contract_opened_live_control")
+    if any(item["authority_bearing"] and not item["declared_inert_read_only"] for item in extra_artifact_checks):
+        blockers.append("unexpected_authority_bearing_artifact")
+    return {
+        "available": True,
+        "generated_at": generated_at,
+        "packet_name": "pre_live_bundle_verification",
+        "status": "verified_pre_live_bundle" if not blockers else "blocked",
+        "bundle_dir": str(bundle),
+        "sha256sums_path": str(bundle / "SHA256SUMS"),
+        "file_checks": file_checks,
+        "extra_artifact_checks": extra_artifact_checks,
+        "summary": {
+            "required_file_count": len(required_json_files),
+            "required_files_present": sum(1 for item in file_checks if item["required"] and item["exists"]),
+            "required_json_non_empty": all(item["json_non_empty"] for item in file_checks if item["required"]),
+            "required_checksums_match": all(item["matches_sha256sums"] for item in file_checks if item["required"]),
+            "live_controls_disabled": all(item["live_controls_disabled"] for item in file_checks if item["required"]),
+            "target_machine_status": run_packet.get("status"),
+            "extra_authority_bearing_artifacts": sum(
+                1 for item in extra_artifact_checks if item["authority_bearing"]
+            ),
+        },
+        "blockers": blockers,
+        "live_controls_enabled": False,
+        "activation_effect": "none",
+        "artifact_path": str(artifact_path),
+    }
+
+
+def parse_sha256sums(path: Path) -> dict[str, str]:
+    entries: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return entries
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        parts = stripped.split(maxsplit=1)
+        if len(parts) != 2 or not re.fullmatch(r"[0-9a-fA-F]{64}", parts[0]):
+            continue
+        entries[Path(parts[1].lstrip("*")).name] = parts[0].lower()
+    return entries
+
+
+def _bundle_json(path: Path) -> dict[str, Any]:
+    parsed = _read_json(path)
+    return parsed if parsed is not None else {}
+
+
+def _bundle_inert_artifact_declarations(bundle_dir: Path) -> dict[str, dict[str, Any]]:
+    parsed = _bundle_json(bundle_dir / "evidence_records.json")
+    declarations = parsed.get("inert_artifacts", [])
+    if not isinstance(declarations, list):
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    for declaration in declarations:
+        if not isinstance(declaration, dict):
+            continue
+        filename = declaration.get("filename") or declaration.get("artifact")
+        if filename:
+            result[Path(str(filename)).name] = declaration
+    return result
+
+
+def _pre_live_bundle_extra_artifact_checks(
+    *,
+    bundle: Path,
+    expected_filenames: set[str],
+    inert_declarations: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    checks: list[dict[str, Any]] = []
+    for path in sorted(bundle.glob("*.json")):
+        if path.name in expected_filenames or path.name == "evidence_records.json":
+            continue
+        parsed = _bundle_json(path)
+        authority_bearing = _pre_live_extra_artifact_is_authority_bearing(parsed)
+        declaration = inert_declarations.get(path.name, {})
+        declared_inert_read_only = (
+            isinstance(declaration, dict)
+            and declaration.get("mode") == "read_only"
+            and declaration.get("authority_effect") == "inert_evidence"
+            and declaration.get("may_grant_authority") is False
+        )
+        checks.append(
+            {
+                "filename": path.name,
+                "json_non_empty": bool(parsed),
+                "authority_bearing": authority_bearing,
+                "declared_inert_read_only": declared_inert_read_only,
+                "status": "allowed_inert_evidence"
+                if authority_bearing and declared_inert_read_only
+                else ("unexpected_authority_bearing_artifact" if authority_bearing else "ignored_extra_artifact"),
+            }
+        )
+    return checks
+
+
+def _pre_live_extra_artifact_is_authority_bearing(payload: dict[str, Any]) -> bool:
+    if not isinstance(payload, dict) or not payload:
+        return False
+    authority_keys = {
+        "closed_control_contract",
+        "operator_decision_packet",
+        "operator_acceptance_packet",
+        "required_authority",
+        "capability_grants",
+        "side_effect_intents",
+        "customer_visible_delivery",
+        "external_commitments_allowed",
+    }
+    if any(key in payload for key in authority_keys):
+        return True
+    if payload.get("live_controls_enabled") is not None:
+        return True
+    return any(
+        isinstance(value, dict) and _pre_live_extra_artifact_is_authority_bearing(value)
+        for value in payload.values()
+    )
 
 
 def file_sha256(path: Path) -> str | None:
