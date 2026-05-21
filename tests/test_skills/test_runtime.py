@@ -11,9 +11,12 @@ import pytest
 from kernel import runtime_compat
 from harness_variants import HarnessVariantManager
 from kernel import KernelStore
+from kernel.runtime_catalog import runtime_launcher_paths, runtime_support_artifact_paths
+from kernel.services import TARGET_MACHINE_REPLAY_PROJECTION_EVIDENCE_PROOF_KEYS
 from runtime_control import RuntimeControlManager
 from skills.config import IntegrationConfig
 from skills.hermes_interfaces import HermesSessionContext, MockHermesRuntime
+from skills import milestone_status
 from skills.runtime import (
     VERSION_DRIFT_NOTE,
     ExternalCommandResult,
@@ -39,6 +42,7 @@ from skills.runtime import (
     first_live_project_packet,
     first_live_project_acceptance_check,
     hermes_adapter_gauntlet,
+    model_efficiency_customer_validation_brief,
     model_efficiency_service_packet,
     model_shadow_ops,
     migrate_runtime_databases,
@@ -66,15 +70,6 @@ from skills.runtime import (
     workspace_overview,
 )
 
-_TARGET_MACHINE_PROOF_KEY_BY_EVIDENCE = {
-    "projection_checks_verified": "readiness_requires_projection_checks",
-    "first_live_project_events_before_projection_verified": "first_live_project_events_before_projection",
-    "resume_replay_intents_reconstructed_only": "resume_replay_reconstructs_intents_only",
-    "external_side_effect_replay_disabled_verified": "external_side_effect_replay_disabled",
-    "manifest_artifacts_hash_bound_before_live_authority": "manifest_artifacts_hash_bound_before_live_authority",
-}
-
-
 def _bound_target_machine_evidence_records(run_packet):
     artifact_name = run_packet["evidence_manifest"][0]["name"]
     records = {}
@@ -86,7 +81,7 @@ def _bound_target_machine_evidence_records(run_packet):
                 "run_step_number": step["step"],
                 "artifact_names": [artifact_name],
             }
-            proof_key = _TARGET_MACHINE_PROOF_KEY_BY_EVIDENCE.get(evidence_id)
+            proof_key = TARGET_MACHINE_REPLAY_PROJECTION_EVIDENCE_PROOF_KEYS.get(evidence_id)
             if proof_key:
                 record["proof_contract_key"] = proof_key
             records[evidence_id] = record
@@ -282,6 +277,7 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
     assert Path(manifest["first_live_project_packet_path"]).is_file()
     assert Path(manifest["model_shadow_ops_path"]).is_file()
     assert Path(manifest["model_efficiency_service_packet_path"]).is_file()
+    assert Path(manifest["model_efficiency_customer_validation_brief_path"]).is_file()
     assert Path(manifest["pre_live_completion_bundle_path"]).is_file()
     assert Path(manifest["target_machine_validation_run_packet_path"]).is_file()
     assert Path(manifest["pre_live_bundle_verification_path"]).is_file()
@@ -306,6 +302,10 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
     assert "--first-live-project-packet" in workspace_manifest["first_live_project_packet_command"]
     assert "--model-shadow-ops" in workspace_manifest["model_shadow_ops_command"]
     assert "--model-efficiency-service-packet" in workspace_manifest["model_efficiency_service_packet_command"]
+    assert (
+        "--model-efficiency-customer-validation-brief"
+        in workspace_manifest["model_efficiency_customer_validation_brief_command"]
+    )
     assert "--pre-live-completion-bundle" in workspace_manifest["pre_live_completion_bundle_command"]
     assert "--target-machine-validation-run-packet" in workspace_manifest["target_machine_validation_run_packet_command"]
     assert "--pre-live-bundle-verification" in workspace_manifest["pre_live_bundle_verification_command"]
@@ -319,6 +319,7 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
     assert "first_live_project_packet" in workspace_manifest["read_only_readiness_surfaces"]
     assert "model_shadow_ops" in workspace_manifest["read_only_readiness_surfaces"]
     assert "model_efficiency_service_packet" in workspace_manifest["read_only_readiness_surfaces"]
+    assert "model_efficiency_customer_validation_brief" in workspace_manifest["read_only_readiness_surfaces"]
     assert "pre_live_completion_bundle" in workspace_manifest["read_only_readiness_surfaces"]
     assert "target_machine_validation_run_packet" in workspace_manifest["read_only_readiness_surfaces"]
     assert "pre_live_bundle_verification" in workspace_manifest["read_only_readiness_surfaces"]
@@ -389,6 +390,21 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
         launcher = Path(launcher_path)
         assert launcher.is_file()
         assert launcher.stat().st_mode & 0o111
+
+
+def test_runtime_catalog_is_kernel_owned_with_skill_compatibility_exports(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+
+    assert milestone_status.runtime_support_artifact_paths(cfg) == runtime_support_artifact_paths(cfg)
+    assert milestone_status._runtime_launcher_paths(cfg) == runtime_launcher_paths(cfg)
+    assert runtime_compat._runtime_launcher_paths(cfg) == runtime_launcher_paths(cfg)
+    assert "model_efficiency_customer_validation_brief" in runtime_support_artifact_paths(cfg)
+    assert "model_efficiency_customer_validation_brief" in runtime_launcher_paths(cfg)
 
 
 def test_doctor_runtime_reports_ready_runtime(tmp_path):
@@ -1141,18 +1157,29 @@ def test_migration_readiness_creates_kernel_map_and_workspace_surface(tmp_path):
     assert payload["operator_projection_comparison"]["matches"] is True
     assert payload["summary"]["ownership_action_counts"]["adopt"] >= 1
     assert payload["summary"]["ownership_action_counts"]["convert-to-projection"] >= 5
+    assert payload["summary"]["implementation_classification_counts"]["keep"] >= 1
+    assert payload["summary"]["implementation_classification_counts"]["projection"] >= 5
     assert Path(payload["artifact_path"]).is_file()
     by_surface = {record["surface_ref"]: record for record in payload["records"]}
     assert by_surface["kernel.db"]["ownership_action"] == "adopt"
+    assert by_surface["kernel.db"]["implementation_classification"] == "keep"
     assert by_surface["strategic_memory.db"]["ownership_action"] == "convert-to-projection"
+    assert by_surface["strategic_memory.db"]["implementation_classification"] == "projection"
     assert not any("mission_control" in surface_ref for surface_ref in by_surface)
     assert by_surface["hermes_adapter_readiness.json"]["readiness_status"] == "action_required"
     assert by_surface["strategic_memory.db"]["next_operator_actions"]
+    inventory_by_candidate = {item["candidate"]: item for item in payload["implementation_inventory"]}
+    assert inventory_by_candidate["duplicated_runtime_artifact_and_launcher_catalogs"]["classification"] == "retire"
+    assert (
+        inventory_by_candidate["duplicated_runtime_artifact_and_launcher_catalogs"]["removal_decision"]
+        == "duplicate_definitions_removed; compatibility_imports_preserved"
+    )
 
     overview = workspace_overview(cfg)
     migration = overview["migration_readiness"]
     assert migration["available"] is True
     assert migration["summary"]["total_records"] == payload["summary"]["total_records"]
+    assert migration["implementation_inventory"]
     assert migration["operator_projection_comparison"]["matches"] is True
     assert migration["live_controls_enabled"] is False
     assert overview["migration_readiness_path"] == payload["artifact_path"]
@@ -1362,11 +1389,20 @@ def test_model_efficiency_service_packet_is_operator_gated_local_only_offer(tmp_
     assert payload["summary"]["operator_gate_required_for_customer_delivery"] is True
     assert payload["summary"]["external_side_effects_allowed"] is False
     assert payload["summary"]["operator_decision_options"] == 2
+    assert payload["summary"]["demoable_pre_live_evidence_count"] == 5
+    assert payload["summary"]["blocked_live_customer_commitment_count"] == 5
     assert payload["status"] == "operator_decision_packet_ready"
     assert payload["blockers"] == []
     assert all(value for key, value in payload["decision_packet_contract"].items() if key != "option_bindings")
     assert payload["operator_decision_packet"]["required_authority"] == "operator_gate"
     assert payload["operator_decision_packet"]["default_on_timeout"] == "pause"
+    boundary = payload["operator_decision_packet"]["pre_live_readiness_boundary"]
+    assert boundary == payload["pre_live_readiness_boundary"]
+    assert "customer-validation brief for a named buyer or internal proxy" in boundary["demoable_pre_live_evidence"]
+    assert "customer-visible delivery" in boundary["live_customer_commitments_still_blocked"]
+    assert "production route changes" in boundary["live_customer_commitments_still_blocked"]
+    assert "operator confirms customer or internal proxy evidence" in boundary["live_commitment_requires"]
+    assert payload["decision_packet_contract"]["pre_live_demo_separated_from_live_commitments"] is True
     assert "model_route_promotion" in payload["operator_decision_packet"]["forbidden_without_operator_gate"]
     for option in payload["operator_decision_packet"]["options"]:
         assert option["fail_closed_unless_all_bindings_present"] is True
@@ -1402,6 +1438,7 @@ def test_model_efficiency_operator_packet_fails_closed_when_pursue_is_unbound(tm
     pursue["closed_live_control_contract"] = {"live_controls_enabled": True}
     pursue["operator_signoff_requirements"] = []
     pursue["fail_closed_unless_all_bindings_present"] = False
+    packet["pre_live_readiness_boundary"] = {}
 
     result = runtime_compat._model_efficiency_operator_decision_contract(packet, payload)
 
@@ -1411,9 +1448,84 @@ def test_model_efficiency_operator_packet_fails_closed_when_pursue_is_unbound(tm
     assert "model_efficiency_pursue_live_control_contract_bound" in result["blockers"]
     assert "model_efficiency_pursue_operator_signoff_bound" in result["blockers"]
     assert "model_efficiency_pursue_fail_closed" in result["blockers"]
+    assert "model_efficiency_pre_live_live_boundary_missing" in result["blockers"]
     assert result["contract"]["recommendations_bound_to_explicit_evidence"] is False
     assert result["contract"]["recommendations_bound_to_closed_live_controls"] is False
+    assert result["contract"]["pre_live_demo_separated_from_live_commitments"] is False
     assert result["contract"]["options_fail_closed"] is False
+
+
+def test_model_efficiency_customer_validation_brief_is_narrow_and_operator_gated(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+
+    payload = model_efficiency_customer_validation_brief(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of="2026-05-12T00:07:00+00:00",
+    )
+
+    brief = payload["brief"]
+    assert payload["status"] == "ready_for_operator_customer_validation_review"
+    assert payload["blockers"] == []
+    assert all(payload["validation_contract"].values())
+    assert payload["summary"]["first_buyer_profile"] == "ai_native_b2b_saas_with_recurring_frontier_model_spend"
+    assert "economic_buyer" in brief["first_buyer_profile"]
+    assert "problem_statement" in brief["exact_problem_to_validate"]
+    assert brief["evidence_needed"]["real_customer_or_proxy"]
+    assert brief["first_audit_report_artifact"]["delivery_state"] == "local_artifact_only_until_operator_gate"
+    assert "unsupported savings claims" in brief["first_audit_report_artifact"]["must_not_contain"]
+    assert "route mutation instructions" in brief["first_audit_report_artifact"]["must_not_contain"]
+    assert "operator_confirms_no_route_mutation_or_live_control_enablement" in brief["operator_signoffs_required"]
+    assert brief["repo_packet_or_checker_required"]["packet_name"] == "model_efficiency_customer_validation_brief"
+    assert brief["repo_packet_or_checker_required"]["drift_blocker"] == "customer_validation_brief_missing_or_speculative"
+    assert brief["closed_live_control_contract"] == {
+        "live_controls_enabled": False,
+        "paid_provider_calls_enabled": False,
+        "customer_visible_delivery_enabled": False,
+        "route_mutation_enabled": False,
+        "autonomous_customer_commitments_enabled": False,
+        "external_side_effects_allowed": False,
+    }
+    assert payload["live_controls_enabled"] is False
+    assert Path(payload["artifact_path"]).is_file()
+
+
+def test_model_efficiency_customer_validation_brief_checker_fails_closed_on_speculation(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+    payload = model_efficiency_customer_validation_brief(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of="2026-05-12T00:07:00+00:00",
+    )
+    brief = json.loads(json.dumps(payload["brief"]))
+    brief["first_buyer_profile"]["recommended_profile"] = ""
+    brief["evidence_needed"]["real_customer_or_proxy"] = []
+    brief["first_audit_report_artifact"]["delivery_state"] = "customer_visible"
+    brief["first_audit_report_artifact"]["must_not_contain"] = []
+    brief["closed_live_control_contract"]["route_mutation_enabled"] = True
+
+    result = runtime_compat._model_efficiency_customer_validation_brief_contract(
+        brief,
+        {"packet_name": "model_efficiency_service_packet", "live_controls_enabled": False},
+        {"packet_name": "first_live_project_packet", "live_controls_enabled": False},
+    )
+
+    assert "customer_validation_buyer_profile_missing" in result["blockers"]
+    assert "customer_validation_evidence_missing" in result["blockers"]
+    assert "customer_validation_report_delivery_not_gated" in result["blockers"]
+    assert "customer_validation_live_controls_open" in result["blockers"]
+    assert "customer_validation_speculative_claims_allowed" in result["blockers"]
+    assert result["contract"]["closed_live_controls_bound"] is False
 
 
 def test_pre_live_completion_bundle_proves_all_ten_goals_and_stays_closed(tmp_path):
@@ -1635,6 +1747,28 @@ def test_target_machine_validation_run_packet_preserves_evidence_manifest(tmp_pa
     assert "paid_provider_calls" in payload["fail_closed_controls"]
     assert payload["live_controls_enabled"] is False
     assert Path(payload["artifact_path"]).is_file()
+
+
+def test_install_runtime_profile_preserves_generated_pre_live_packets(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+    generated = target_machine_validation_run_packet(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of="2026-05-12T00:08:00+00:00",
+    )
+
+    install_runtime_profile(cfg, repo_root=str(Path.cwd()))
+
+    preserved = json.loads(Path(generated["artifact_path"]).read_text(encoding="utf-8"))
+    assert preserved["packet_name"] == "target_machine_validation_run_packet"
+    assert preserved["status"] == "ready_for_target_machine_execution"
+    assert preserved["run_steps"]
+    assert preserved["replay_projection_proof_records"]
 
 
 def test_pre_live_runtime_artifact_packets_preserve_hashes_and_contract_shapes(tmp_path):

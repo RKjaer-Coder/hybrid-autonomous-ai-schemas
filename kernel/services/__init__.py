@@ -11,10 +11,12 @@ from .runtime_artifacts import (
     runtime_evidence_manifest_item,
     runtime_artifact_path,
     TARGET_MACHINE_REPLAY_PROJECTION_EVIDENCE,
+    TARGET_MACHINE_REPLAY_PROJECTION_EVIDENCE_PROOF_KEYS,
     TARGET_MACHINE_REPLAY_PROJECTION_PROOF_KEYS,
     target_machine_evidence_check_packet,
     stable_json_hash,
     write_hashed_runtime_artifact,
+    write_placeholder_runtime_artifact,
     write_runtime_artifact,
 )
 
@@ -29,9 +31,11 @@ __all__ = [
     "runtime_evidence_manifest_item",
     "runtime_artifact_path",
     "TARGET_MACHINE_REPLAY_PROJECTION_EVIDENCE",
+    "TARGET_MACHINE_REPLAY_PROJECTION_EVIDENCE_PROOF_KEYS",
     "TARGET_MACHINE_REPLAY_PROJECTION_PROOF_KEYS",
     "target_machine_evidence_check_packet",
     "stable_json_hash",
     "write_hashed_runtime_artifact",
+    "write_placeholder_runtime_artifact",
     "write_runtime_artifact",
 ]
