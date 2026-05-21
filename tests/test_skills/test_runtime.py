@@ -12,7 +12,12 @@ from kernel import runtime_compat
 from harness_variants import HarnessVariantManager
 from kernel import KernelStore
 from kernel.runtime_catalog import runtime_launcher_paths, runtime_support_artifact_paths
-from kernel.services import TARGET_MACHINE_REPLAY_PROJECTION_EVIDENCE_PROOF_KEYS
+from kernel.services import (
+    TARGET_MACHINE_REPLAY_PROJECTION_EVIDENCE_PROOF_KEYS,
+    target_machine_replay_projection_proof_contract,
+    target_machine_replay_projection_proof_records,
+    target_machine_replay_projection_proof_records_contract,
+)
 from runtime_control import RuntimeControlManager
 from skills.config import IntegrationConfig
 from skills.hermes_interfaces import HermesSessionContext, MockHermesRuntime
@@ -1747,6 +1752,59 @@ def test_target_machine_validation_run_packet_preserves_evidence_manifest(tmp_pa
     assert "paid_provider_calls" in payload["fail_closed_controls"]
     assert payload["live_controls_enabled"] is False
     assert Path(payload["artifact_path"]).is_file()
+
+
+def test_target_machine_replay_projection_proof_builders_remain_service_owned_and_compat_exported():
+    run_steps = [
+        {"name": "repo_metadata_snapshot", "required_evidence": []},
+        {"name": "handoff_checksum_verification", "required_evidence": []},
+        {
+            "name": "recovery_and_migration_readiness",
+            "required_evidence": ["projection_checks_verified"],
+        },
+    ]
+    project = {"workflow": [{"event_before_projection": True}, {"event_before_projection": True}]}
+    adapter = {"resume_replay_summary": {"replay_intents_reconstructed_only": True}}
+    closed_control_contract = {"side_effect_replay_enabled": False}
+    evidence_manifest = [
+        {"exists": True, "sha256": "abc123", "required_before_live_authority": True}
+    ]
+
+    contract = target_machine_replay_projection_proof_contract(
+        project_packet=project,
+        adapter_packet=adapter,
+        closed_control_contract=closed_control_contract,
+        evidence_manifest=evidence_manifest,
+        run_steps=run_steps,
+    )
+    records = target_machine_replay_projection_proof_records()
+
+    assert runtime_compat.target_machine_replay_projection_proof_contract is target_machine_replay_projection_proof_contract
+    assert runtime_compat.target_machine_replay_projection_proof_records is target_machine_replay_projection_proof_records
+    assert (
+        runtime_compat.target_machine_replay_projection_proof_records_contract
+        is target_machine_replay_projection_proof_records_contract
+    )
+    assert contract == {
+        "first_live_project_events_before_projection": True,
+        "readiness_requires_projection_checks": True,
+        "resume_replay_reconstructs_intents_only": True,
+        "external_side_effect_replay_disabled": True,
+        "manifest_artifacts_hash_bound_before_live_authority": True,
+    }
+    assert target_machine_replay_projection_proof_records_contract(records) is True
+
+    drifted_records = [{**records[0], "forbidden_side_effect_reexecution": {"allowed": True, "control": "opened"}}, *records[1:]]
+    assert target_machine_replay_projection_proof_records_contract(drifted_records) is False
+
+    opened_contract = target_machine_replay_projection_proof_contract(
+        project_packet=project,
+        adapter_packet=adapter,
+        closed_control_contract={"side_effect_replay_enabled": True},
+        evidence_manifest=evidence_manifest,
+        run_steps=run_steps,
+    )
+    assert opened_contract["external_side_effect_replay_disabled"] is False
 
 
 def test_install_runtime_profile_preserves_generated_pre_live_packets(tmp_path):
