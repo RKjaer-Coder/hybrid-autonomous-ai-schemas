@@ -6,6 +6,8 @@ from pathlib import Path
 
 from kernel.services.runtime_artifacts import (
     first_live_project_acceptance_check_packet,
+    model_efficiency_customer_validation_brief_contract,
+    model_efficiency_customer_validation_brief_packet,
     pre_live_artifact_controls_disabled,
     pre_live_bundle_verification_packet,
     pre_live_closed_control_contract,
@@ -82,6 +84,32 @@ def test_runtime_evidence_manifest_item_records_file_hash(tmp_path):
     assert item["sha256"]
     assert item["packet_hash"] == "abc"
     assert item["required_before_live_authority"] is True
+
+
+def test_model_efficiency_customer_validation_brief_packet_is_service_owned_and_fail_closed(tmp_path):
+    service_packet = {"packet_name": "model_efficiency_service_packet", "live_controls_enabled": False}
+    first_project_packet = {"packet_name": "first_live_project_packet", "live_controls_enabled": False}
+    payload = model_efficiency_customer_validation_brief_packet(
+        service_packet=service_packet,
+        first_project_packet=first_project_packet,
+        generated_at="2026-05-12T00:07:00+00:00",
+        artifact_path=tmp_path / "model_efficiency_customer_validation_brief.json",
+    )
+
+    assert payload["status"] == "ready_for_operator_customer_validation_review"
+    assert payload["blockers"] == []
+    assert payload["live_controls_enabled"] is False
+
+    drifted = json.loads(json.dumps(payload["brief"]))
+    drifted["closed_live_control_contract"]["paid_provider_calls_enabled"] = True
+    result = model_efficiency_customer_validation_brief_contract(
+        drifted,
+        service_packet,
+        first_project_packet,
+    )
+
+    assert result["contract"]["closed_live_controls_bound"] is False
+    assert "customer_validation_live_controls_open" in result["blockers"]
 
 
 def test_target_machine_evidence_check_packet_fails_closed_on_missing_evidence(tmp_path):

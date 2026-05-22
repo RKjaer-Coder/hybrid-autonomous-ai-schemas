@@ -473,6 +473,325 @@ def pre_live_completion_bundle_packet(
     return payload
 
 
+def model_efficiency_customer_validation_brief_packet(
+    *,
+    service_packet: dict[str, Any],
+    first_project_packet: dict[str, Any],
+    generated_at: str,
+    artifact_path: Path,
+) -> dict[str, Any]:
+    """Build the local-only first-buyer validation brief without enabling live controls."""
+    required_operator_signoffs = [
+        "operator_confirms_named_customer_or_internal_proxy",
+        "operator_approves_local_only_validation_interview_or_workshop",
+        "operator_approves_customer_data_handling_plan",
+        "operator_reviews_audit_report_before_external_delivery",
+        "operator_confirms_no_paid_provider_calls_without_budget_grant",
+        "operator_confirms_no_route_mutation_or_live_control_enablement",
+    ]
+    closed_live_control_contract = {
+        "live_controls_enabled": False,
+        "paid_provider_calls_enabled": False,
+        "customer_visible_delivery_enabled": False,
+        "route_mutation_enabled": False,
+        "autonomous_customer_commitments_enabled": False,
+        "external_side_effects_allowed": False,
+    }
+    brief = {
+        "brief_id": "governed-model-efficiency-customer-validation-v1",
+        "first_buyer_profile": {
+            "recommended_profile": "ai_native_b2b_saas_with_recurring_frontier_model_spend",
+            "economic_buyer": "Head of Engineering, AI Platform lead, or CTO accountable for model spend and quality",
+            "must_have_traits": [
+                "monthly frontier-model spend large enough that 20 percent quality-adjusted savings matters",
+                "repeatable AI workflows with observable task classes",
+                "ability to provide 50-200 representative traces or an internal proxy set",
+                "human acceptance labels or a practical quality rubric",
+                "privacy and audit concerns that make governed routing valuable",
+            ],
+            "exclude_for_first_validation": [
+                "broad enterprise procurement without a named workflow owner",
+                "teams seeking generic agent automation rather than model-efficiency evidence",
+                "customers unable to share representative traces or proxy examples",
+            ],
+        },
+        "exact_problem_to_validate": {
+            "problem_statement": (
+                "Can a governed control plane identify specific AI task classes where frontier-model "
+                "dependence can be reduced by at least 20 percent on a quality-adjusted basis while "
+                "preserving acceptance quality, privacy constraints, auditability, and operator control?"
+            ),
+            "validation_scope": [
+                "audit and classify existing or proxy AI workflows",
+                "build a customer-specific eval slice for the first three seed task classes when applicable",
+                "compare frontier baseline cost and quality against local or cheaper shadow routes",
+                "recommend gates only; do not mutate production routes",
+            ],
+            "non_goals": [
+                "deploying a customer-facing gateway",
+                "calling paid providers",
+                "changing production model routes",
+                "making autonomous customer commitments",
+            ],
+        },
+        "evidence_needed": {
+            "real_customer_or_proxy": [
+                "one named buyer or internal proxy owner confirms the spend or governance pain",
+                "current frontier spend receipts, budget exports, or usage estimates",
+                "representative workflow trace sample with sensitive payloads replaced by governed artifact refs",
+                "acceptance rubric, reviewer labels, or known-good outputs for quality comparison",
+                "privacy, retention, residency, and audit constraints",
+                "operator time estimate for running the audit and reviewing outputs",
+                "explicit willingness-to-pay or internal value threshold for the first audit",
+            ],
+            "minimum_to_continue": [
+                "one buyer/proxy names a costly repeatable workflow",
+                "one task class has enough examples to score quality",
+                "the audit can remain local-only until operator delivery approval",
+            ],
+        },
+        "first_audit_report_artifact": {
+            "artifact_name": "governed_model_efficiency_audit_report",
+            "delivery_state": "local_artifact_only_until_operator_gate",
+            "required_sections": [
+                "buyer_context_and_validated_problem",
+                "workflow_inventory_and_task_class_map",
+                "baseline_frontier_spend_and_quality",
+                "customer_specific_eval_set_description",
+                "shadow_route_savings_and_quality_delta",
+                "privacy_data_residency_and_audit_constraints",
+                "operator_load_delta",
+                "recommended_gates_before_any_route_change",
+                "kill_criteria_assessment",
+                "open_questions_and_evidence_gaps",
+            ],
+            "must_not_contain": [
+                "unsupported savings claims",
+                "customer-visible commitments",
+                "route mutation instructions",
+                "raw sensitive customer payloads",
+            ],
+        },
+        "kill_criteria": [
+            "no named buyer or internal proxy confirms a costly repeatable AI workflow",
+            "customer or proxy cannot provide representative traces, labels, or spend evidence",
+            "no seed task class can be evaluated with enough confidence to compare quality",
+            "quality-adjusted savings are below 20 percent for every evaluated task class",
+            "privacy, retention, residency, or audit constraints cannot be satisfied locally",
+            "operator review load exceeds the expected value of the first audit",
+            "the work requires live controls, paid provider calls, route mutation, or customer delivery before signoff",
+        ],
+        "operator_signoffs_required": required_operator_signoffs,
+        "repo_packet_or_checker_required": {
+            "packet_name": "model_efficiency_customer_validation_brief",
+            "checker_contract": [
+                "brief binds buyer profile, exact problem, evidence, audit report, kill criteria, signoffs, and drift guard",
+                "all live controls and external side effects remain closed",
+                "first audit report is local-only until operator-gated delivery",
+                "customer claims require real customer or internal proxy evidence",
+                "first-buyer validation workshop packet is local-only, operator-gated, and hash-bound",
+            ],
+            "drift_blocker": "customer_validation_brief_missing_or_speculative",
+            "hash_bound_artifact": str(artifact_path),
+        },
+        "next_customer_validation_packet": {
+            "packet_id": "first-buyer-validation-workshop-v1",
+            "status": "ready_for_operator_review",
+            "checker_name": "first_buyer_model_efficiency_validation_workshop",
+            "checker_owner": "repo",
+            "target_buyer": "named buyer or internal proxy owner for one costly repeatable AI workflow",
+            "validation_questions": [
+                "Which workflow has recurring frontier-model spend or governance pain?",
+                "What trace sample, labels, rubric, or proxy examples can be shared locally?",
+                "What quality-adjusted savings threshold would justify a first audit?",
+                "Which privacy, retention, residency, and audit constraints are non-negotiable?",
+                "What operator review load would make the audit not worth doing?",
+            ],
+            "artifact_to_show": "governed_model_efficiency_audit_report",
+            "minimum_continue_evidence": [
+                "named buyer or internal proxy owner",
+                "repeatable workflow with spend or governance pain",
+                "representative traces or proxy examples",
+                "quality rubric or acceptance labels",
+                "operator-approved local-only handling plan",
+            ],
+            "required_local_inputs": [
+                "sanitized workflow traces or internal proxy examples",
+                "frontier spend export or operator-estimated spend baseline",
+                "acceptance rubric, labels, or known-good outputs",
+                "privacy, retention, residency, and audit constraints",
+            ],
+            "repo_owned_checker_contract": [
+                "requires named buyer or internal proxy before continue",
+                "requires local-only input handling and artifact references for sensitive data",
+                "requires explicit quality-adjusted savings threshold",
+                "blocks paid provider calls, production route mutation, and customer-visible delivery",
+                "defaults to pause when evidence or operator signoff is missing",
+            ],
+            "kill_criteria": [
+                "no named buyer or proxy owner",
+                "no representative traces or proxy examples",
+                "no quality rubric or labels",
+                "savings threshold below 20 percent quality-adjusted",
+                "requires paid calls, route mutation, or customer-visible delivery before operator gate",
+            ],
+            "forbidden_actions": [
+                "paid_provider_call",
+                "production_route_mutation",
+                "customer_visible_delivery",
+                "autonomous_customer_commitment",
+                "raw_sensitive_payload_storage",
+            ],
+            "required_authority": "operator_gate",
+            "operator_signoffs_required": required_operator_signoffs,
+            "delivery_state": "local_artifact_only_until_operator_gate",
+            "default_on_timeout": "pause",
+            "hash_bound_artifact": str(artifact_path),
+            "activation_effect": "none",
+        },
+        "source_packets": {
+            "model_efficiency_service_packet": service_packet["packet_name"],
+            "first_live_project_packet": first_project_packet["packet_name"],
+        },
+        "closed_live_control_contract": closed_live_control_contract,
+        "activation_effect": "local_validation_brief_only",
+    }
+    contract = model_efficiency_customer_validation_brief_contract(
+        brief,
+        service_packet,
+        first_project_packet,
+    )
+    return {
+        "available": True,
+        "generated_at": generated_at,
+        "packet_name": "model_efficiency_customer_validation_brief",
+        "brief": brief,
+        "validation_contract": contract["contract"],
+        "blockers": contract["blockers"],
+        "status": "ready_for_operator_customer_validation_review" if not contract["blockers"] else "blocked",
+        "summary": {
+            "first_buyer_profile": brief["first_buyer_profile"]["recommended_profile"],
+            "evidence_item_count": len(brief["evidence_needed"]["real_customer_or_proxy"]),
+            "audit_report_section_count": len(brief["first_audit_report_artifact"]["required_sections"]),
+            "kill_criteria_count": len(brief["kill_criteria"]),
+            "operator_signoff_count": len(required_operator_signoffs),
+            "local_only": True,
+        },
+        "artifact_path": str(artifact_path),
+        "live_controls_enabled": False,
+    }
+
+
+def model_efficiency_customer_validation_brief_contract(
+    brief: dict[str, Any],
+    service_packet: dict[str, Any],
+    first_project_packet: dict[str, Any],
+) -> dict[str, Any]:
+    closed_contract = brief.get("closed_live_control_contract", {})
+    audit_artifact = brief.get("first_audit_report_artifact", {})
+    repo_guard = brief.get("repo_packet_or_checker_required", {})
+    next_packet = brief.get("next_customer_validation_packet", {})
+    evidence = brief.get("evidence_needed", {})
+    required_signoffs = brief.get("operator_signoffs_required", [])
+    required_brief_sections = [
+        "first_buyer_profile",
+        "exact_problem_to_validate",
+        "evidence_needed",
+        "first_audit_report_artifact",
+        "kill_criteria",
+        "operator_signoffs_required",
+        "repo_packet_or_checker_required",
+        "next_customer_validation_packet",
+    ]
+    closed = (
+        isinstance(closed_contract, dict)
+        and closed_contract.get("live_controls_enabled") is False
+        and closed_contract.get("paid_provider_calls_enabled") is False
+        and closed_contract.get("customer_visible_delivery_enabled") is False
+        and closed_contract.get("route_mutation_enabled") is False
+        and closed_contract.get("autonomous_customer_commitments_enabled") is False
+        and closed_contract.get("external_side_effects_allowed") is False
+    )
+    report_local_only = audit_artifact.get("delivery_state") == "local_artifact_only_until_operator_gate"
+    buyer_bound = bool(brief.get("first_buyer_profile", {}).get("recommended_profile"))
+    problem_bound = bool(brief.get("exact_problem_to_validate", {}).get("problem_statement"))
+    evidence_bound = bool(evidence.get("real_customer_or_proxy")) and bool(evidence.get("minimum_to_continue"))
+    report_bound = bool(audit_artifact.get("required_sections")) and bool(audit_artifact.get("must_not_contain"))
+    kill_bound = bool(brief.get("kill_criteria"))
+    signoffs_bound = bool(required_signoffs)
+    repo_guard_bound = (
+        repo_guard.get("packet_name") == "model_efficiency_customer_validation_brief"
+        and bool(repo_guard.get("checker_contract"))
+        and repo_guard.get("drift_blocker") == "customer_validation_brief_missing_or_speculative"
+        and bool(repo_guard.get("hash_bound_artifact"))
+    )
+    source_packets_bound = (
+        service_packet.get("packet_name") == "model_efficiency_service_packet"
+        and service_packet.get("live_controls_enabled") is False
+        and first_project_packet.get("packet_name") == "first_live_project_packet"
+        and first_project_packet.get("live_controls_enabled") is False
+    )
+    no_speculative_delivery = (
+        "unsupported savings claims" in audit_artifact.get("must_not_contain", [])
+        and "customer-visible commitments" in audit_artifact.get("must_not_contain", [])
+        and "route mutation instructions" in audit_artifact.get("must_not_contain", [])
+    )
+    next_packet_bound = (
+        isinstance(next_packet, dict)
+        and next_packet.get("checker_name") == "first_buyer_model_efficiency_validation_workshop"
+        and next_packet.get("checker_owner") == "repo"
+        and bool(next_packet.get("target_buyer"))
+        and bool(next_packet.get("validation_questions"))
+        and bool(next_packet.get("minimum_continue_evidence"))
+        and bool(next_packet.get("required_local_inputs"))
+        and bool(next_packet.get("repo_owned_checker_contract"))
+        and bool(next_packet.get("kill_criteria"))
+        and bool(next_packet.get("forbidden_actions"))
+        and next_packet.get("artifact_to_show") == "governed_model_efficiency_audit_report"
+        and next_packet.get("required_authority") == "operator_gate"
+        and set(required_signoffs).issubset(set(next_packet.get("operator_signoffs_required", [])))
+        and next_packet.get("delivery_state") == "local_artifact_only_until_operator_gate"
+        and next_packet.get("default_on_timeout") == "pause"
+        and bool(next_packet.get("hash_bound_artifact"))
+        and next_packet.get("activation_effect") == "none"
+        and "paid_provider_call" in next_packet.get("forbidden_actions", [])
+        and "production_route_mutation" in next_packet.get("forbidden_actions", [])
+        and "customer_visible_delivery" in next_packet.get("forbidden_actions", [])
+    )
+    contract = {
+        "required_sections_present": all(section in brief for section in required_brief_sections),
+        "buyer_profile_bound": buyer_bound,
+        "problem_statement_bound": problem_bound,
+        "customer_or_proxy_evidence_bound": evidence_bound,
+        "audit_report_artifact_bound": report_bound,
+        "kill_criteria_bound": kill_bound,
+        "operator_signoffs_bound": signoffs_bound,
+        "repo_packet_checker_bound": repo_guard_bound,
+        "source_packets_bound": source_packets_bound,
+        "closed_live_controls_bound": closed,
+        "first_report_local_only_until_operator_gate": report_local_only,
+        "speculative_claims_blocked": no_speculative_delivery,
+        "next_validation_packet_bound": next_packet_bound,
+    }
+    blocker_by_key = {
+        "required_sections_present": "customer_validation_required_sections_missing",
+        "buyer_profile_bound": "customer_validation_buyer_profile_missing",
+        "problem_statement_bound": "customer_validation_problem_missing",
+        "customer_or_proxy_evidence_bound": "customer_validation_evidence_missing",
+        "audit_report_artifact_bound": "customer_validation_audit_report_unbound",
+        "kill_criteria_bound": "customer_validation_kill_criteria_missing",
+        "operator_signoffs_bound": "customer_validation_operator_signoffs_missing",
+        "repo_packet_checker_bound": "customer_validation_repo_checker_missing",
+        "source_packets_bound": "customer_validation_source_packets_unbound",
+        "closed_live_controls_bound": "customer_validation_live_controls_open",
+        "first_report_local_only_until_operator_gate": "customer_validation_report_delivery_not_gated",
+        "speculative_claims_blocked": "customer_validation_speculative_claims_allowed",
+        "next_validation_packet_bound": "customer_validation_next_packet_unbound",
+    }
+    blockers = [blocker_by_key[key] for key, ok in contract.items() if not ok]
+    return {"contract": contract, "blockers": sorted(blockers)}
+
+
 def _pre_live_goal(
     goal_id: str,
     title: str,

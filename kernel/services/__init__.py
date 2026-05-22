@@ -3,6 +3,8 @@
 from .runtime_artifacts import (
     file_sha256,
     first_live_project_acceptance_check_packet,
+    model_efficiency_customer_validation_brief_contract,
+    model_efficiency_customer_validation_brief_packet,
     parse_sha256sums,
     pre_live_artifact_controls_disabled,
     pre_live_bundle_verification_packet,
@@ -30,6 +32,8 @@ from .runtime_artifacts import (
 __all__ = [
     "file_sha256",
     "first_live_project_acceptance_check_packet",
+    "model_efficiency_customer_validation_brief_contract",
+    "model_efficiency_customer_validation_brief_packet",
     "parse_sha256sums",
     "pre_live_artifact_controls_disabled",
     "pre_live_bundle_verification_packet",
