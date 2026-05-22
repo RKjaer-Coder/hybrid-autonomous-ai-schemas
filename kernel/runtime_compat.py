@@ -74,6 +74,7 @@ from kernel.services import (
     pre_live_artifact_controls_disabled,
     pre_live_bundle_verification_packet,
     pre_live_closed_control_contract,
+    pre_live_completion_bundle_packet,
     pre_live_controls_are_closed,
     pre_live_evidence_crosswalk_contract,
     pre_live_evidence_crosswalk_row,
@@ -3064,6 +3065,7 @@ def model_efficiency_customer_validation_brief(
                 "all live controls and external side effects remain closed",
                 "first audit report is local-only until operator-gated delivery",
                 "customer claims require real customer or internal proxy evidence",
+                "first-buyer validation workshop packet is local-only, operator-gated, and hash-bound",
             ],
             "drift_blocker": "customer_validation_brief_missing_or_speculative",
             "hash_bound_artifact": str(_runtime_model_efficiency_customer_validation_brief_path(resolved)),
@@ -3071,6 +3073,8 @@ def model_efficiency_customer_validation_brief(
         "next_customer_validation_packet": {
             "packet_id": "first-buyer-validation-workshop-v1",
             "status": "ready_for_operator_review",
+            "checker_name": "first_buyer_model_efficiency_validation_workshop",
+            "checker_owner": "repo",
             "target_buyer": "named buyer or internal proxy owner for one costly repeatable AI workflow",
             "validation_questions": [
                 "Which workflow has recurring frontier-model spend or governance pain?",
@@ -3087,6 +3091,19 @@ def model_efficiency_customer_validation_brief(
                 "quality rubric or acceptance labels",
                 "operator-approved local-only handling plan",
             ],
+            "required_local_inputs": [
+                "sanitized workflow traces or internal proxy examples",
+                "frontier spend export or operator-estimated spend baseline",
+                "acceptance rubric, labels, or known-good outputs",
+                "privacy, retention, residency, and audit constraints",
+            ],
+            "repo_owned_checker_contract": [
+                "requires named buyer or internal proxy before continue",
+                "requires local-only input handling and artifact references for sensitive data",
+                "requires explicit quality-adjusted savings threshold",
+                "blocks paid provider calls, production route mutation, and customer-visible delivery",
+                "defaults to pause when evidence or operator signoff is missing",
+            ],
             "kill_criteria": [
                 "no named buyer or proxy owner",
                 "no representative traces or proxy examples",
@@ -3094,8 +3111,18 @@ def model_efficiency_customer_validation_brief(
                 "savings threshold below 20 percent quality-adjusted",
                 "requires paid calls, route mutation, or customer-visible delivery before operator gate",
             ],
+            "forbidden_actions": [
+                "paid_provider_call",
+                "production_route_mutation",
+                "customer_visible_delivery",
+                "autonomous_customer_commitment",
+                "raw_sensitive_payload_storage",
+            ],
             "required_authority": "operator_gate",
+            "operator_signoffs_required": required_operator_signoffs,
             "delivery_state": "local_artifact_only_until_operator_gate",
+            "default_on_timeout": "pause",
+            "hash_bound_artifact": str(_runtime_model_efficiency_customer_validation_brief_path(resolved)),
             "activation_effect": "none",
         },
         "source_packets": {
@@ -3189,14 +3216,25 @@ def _model_efficiency_customer_validation_brief_contract(
     )
     next_packet_bound = (
         isinstance(next_packet, dict)
+        and next_packet.get("checker_name") == "first_buyer_model_efficiency_validation_workshop"
+        and next_packet.get("checker_owner") == "repo"
         and bool(next_packet.get("target_buyer"))
         and bool(next_packet.get("validation_questions"))
         and bool(next_packet.get("minimum_continue_evidence"))
+        and bool(next_packet.get("required_local_inputs"))
+        and bool(next_packet.get("repo_owned_checker_contract"))
         and bool(next_packet.get("kill_criteria"))
+        and bool(next_packet.get("forbidden_actions"))
         and next_packet.get("artifact_to_show") == "governed_model_efficiency_audit_report"
         and next_packet.get("required_authority") == "operator_gate"
+        and set(required_signoffs).issubset(set(next_packet.get("operator_signoffs_required", [])))
         and next_packet.get("delivery_state") == "local_artifact_only_until_operator_gate"
+        and next_packet.get("default_on_timeout") == "pause"
+        and bool(next_packet.get("hash_bound_artifact"))
         and next_packet.get("activation_effect") == "none"
+        and "paid_provider_call" in next_packet.get("forbidden_actions", [])
+        and "production_route_mutation" in next_packet.get("forbidden_actions", [])
+        and "customer_visible_delivery" in next_packet.get("forbidden_actions", [])
     )
     contract = {
         "required_sections_present": all(section in brief for section in required_brief_sections),
@@ -3265,12 +3303,7 @@ def pre_live_completion_bundle(
             as_of=timestamp,
             candidate_limit=candidate_limit,
         )
-    first_project = mission["components"]["first_live_project"]
-    adapter = mission["components"]["hermes_adapter_gauntlet"]
-    shadow = mission["components"]["model_shadow_ops"]
     efficiency = model_efficiency_service_packet(resolved, repo_root=str(root), as_of=timestamp)
-    readiness = mission["components"]["readiness_suite"]
-
     source_files = {
         "kernel_pre_live": root / "kernel" / "pre_live.py",
         "kernel_research": root / "kernel" / "research.py",
@@ -3287,7 +3320,6 @@ def pre_live_completion_bundle(
         "runtime_tests": root / "tests" / "test_skills" / "test_runtime.py",
         "pre_live_tests": root / "tests" / "test_kernel_pre_live.py",
     }
-    source_status = {name: path.is_file() for name, path in source_files.items()}
     component_paths = {
         "pre_live_mission_control": _runtime_pre_live_mission_control_path(resolved),
         "hermes_adapter_gauntlet": _runtime_hermes_adapter_gauntlet_path(resolved),
@@ -3296,166 +3328,18 @@ def pre_live_completion_bundle(
         "model_efficiency_service_packet": _runtime_model_efficiency_service_packet_path(resolved),
         "target_machine_validation_run_packet": _runtime_target_machine_validation_run_packet_path(resolved),
     }
-    component_artifacts = {
-        name: {"path": str(path), "exists": path.is_file(), "sha256": _file_sha256(path)}
-        for name, path in component_paths.items()
-    }
-
-    workflow = first_project["workflow"]
-    workflow_has_events_and_grants = all(
-        step.get("event_before_projection") and step.get("capability_grants_required")
-        for step in workflow
+    payload = pre_live_completion_bundle_packet(
+        target_run=target_run,
+        mission=mission,
+        efficiency=efficiency,
+        source_files=source_files,
+        component_paths=component_paths,
+        generated_at=timestamp,
+        repo_root=root,
+        artifact_path=_runtime_pre_live_completion_bundle_path(resolved),
     )
-    mission_ready = mission.get("go_no_go") == "ready_for_target_machine_validation"
-    target_ready = target_run.get("status") == "ready_for_target_machine_execution"
-    closed_controls = target_run.get("closed_control_contract", {})
-    closed_control_ok = pre_live_controls_are_closed(closed_controls)
-
-    goals = [
-        _pre_live_goal(
-            "operator_project_loop",
-            "End-to-end operator validate/build/ship/feedback loop",
-            source_status["kernel_commercial"] and source_status["research_tests"],
-            first_project["summary"]["ready_for_target_machine_fixture"]
-            and first_project["summary"]["phase_count"] == 4
-            and first_project["summary"]["local_artifact_only"]
-            and not first_project["summary"]["external_commitments_allowed"],
-            ["kernel/commercial.py", "tests/test_kernel_research.py", "first_live_project_packet.json"],
-        ),
-        _pre_live_goal(
-            "model_efficiency_service",
-            "Governed model-efficiency service packet and shadow evidence",
-            source_status["kernel_model_intelligence"] and source_status["runtime_tests"],
-            efficiency["summary"]["seed_task_class_count"] == 3
-            and efficiency["summary"]["operator_gate_required_for_customer_delivery"]
-            and not efficiency["summary"]["route_mutation_enabled"]
-            and not efficiency["summary"]["external_side_effects_allowed"],
-            ["kernel/model_intelligence.py", "model_efficiency_service_packet.json"],
-        ),
-        _pre_live_goal(
-            "seed_model_intelligence",
-            "Seed Model Intelligence registry, eval, route, and promotion gates",
-            source_status["kernel_model_intelligence"] and source_status["model_tests"],
-            shadow["summary"]["seed_task_class_count"] == 3
-            and shadow["summary"]["shadow_mode_only"]
-            and shadow["summary"]["operator_gate_required_for_promotion"]
-            and not shadow["summary"]["live_route_mutation_enabled"],
-            ["kernel/model_intelligence.py", "tests/test_kernel_model_intelligence.py", "model_shadow_ops.json"],
-        ),
-        _pre_live_goal(
-            "research_retrieval",
-            "Research Engine retrieval planning, grants, acquisition, and evidence bundles",
-            source_status["kernel_research"] and source_status["research_tests"],
-            workflow_has_events_and_grants
-            and "research_findings" in first_project["artifact_contract"]["sections"],
-            ["kernel/research.py", "tests/test_kernel_research.py", "first_live_project_packet.json"],
-        ),
-        _pre_live_goal(
-            "council_execution",
-            "Council/scarce-deliberation records for high-uncertainty decisions",
-            source_status["kernel_commercial"] and source_status["research_tests"],
-            adapter["summary"]["authority_boundary_case_count"] >= 8
-            and "customer_visible_commitments" in target_run["fail_closed_controls"],
-            ["kernel/commercial.py", "tests/test_kernel_research.py", "hermes_adapter_gauntlet.json"],
-        ),
-        _pre_live_goal(
-            "hermes_adapter_proxy",
-            "Hermes adapter, migration, and proxy enforcement readiness",
-            source_status["kernel_runtime"] and source_status["kernel_runtime_compat"],
-            adapter["summary"]["all_surfaces_covered"]
-            and adapter["summary"]["surface_count"] >= 10
-            and readiness.get("ok")
-            and target_run["execution_order_contract"]["recovery_and_migration_before_adapter"],
-            ["kernel/runtime.py", "kernel/runtime_compat.py", "hermes_adapter_gauntlet.json"],
-        ),
-        _pre_live_goal(
-            "side_effect_delivery",
-            "Side-effect and customer-visible delivery governance",
-            source_status["kernel_commercial"] and source_status["foundation_tests"],
-            first_project["artifact_contract"]["external_delivery"] == "prepared_intent_only_until_operator_gate"
-            and "side_effect_replay" in target_run["fail_closed_controls"]
-            and not closed_controls.get("side_effect_replay_enabled", True),
-            ["kernel/commercial.py", "tests/test_kernel_foundation.py", "first_live_project_packet.json"],
-        ),
-        _pre_live_goal(
-            "operator_gate_surface",
-            "Local operator command and gate surface",
-            source_status["kernel_runtime_compat"] and source_status["runtime_tests"],
-            mission_ready
-            and closed_control_ok
-            and "operator_gate_before_external_delivery" in target_run["run_steps"][6]["required_evidence"],
-            ["kernel/runtime_compat.py", "tests/test_skills/test_runtime.py", "pre_live_mission_control.json"],
-        ),
-        _pre_live_goal(
-            "data_governance",
-            "Artifact, redaction, encrypted storage, backup, and recovery proof",
-            source_status["kernel_store_artifacts"] and source_status["kernel_store_recovery"],
-            readiness.get("ok")
-            and target_run["execution_order_contract"]["recovery_and_migration_before_adapter"]
-            and "artifact_descriptor_verified" in target_run["run_steps"][2]["required_evidence"],
-            ["kernel/store_artifacts.py", "kernel/store_recovery.py", "target_machine_validation_run_packet.json"],
-        ),
-        _pre_live_goal(
-            "evidence_packaging",
-            "Replay/projection comparisons and pre-live evidence packaging",
-            source_status["kernel_pre_live"] and source_status["pre_live_tests"],
-            target_ready
-            and all(item["exists"] and item["sha256"] for item in component_artifacts.values())
-            and "target_machine_artifact_bundle" in target_run["run_steps"][-1]["required_evidence"],
-            ["kernel/pre_live.py", "tests/test_kernel_pre_live.py", "target_machine_validation_run_packet.json"],
-        ),
-    ]
-    blockers = [
-        f"{goal['goal_id']}:{blocker}"
-        for goal in goals
-        for blocker in goal["blockers"]
-    ]
-    payload = {
-        "available": True,
-        "generated_at": timestamp,
-        "packet_name": "pre_live_completion_bundle",
-        "status": "complete_pre_live_coding" if not blockers else "blocked",
-        "repo_root": str(root),
-        "summary": {
-            "completed_goals": sum(1 for goal in goals if goal["complete"]),
-            "total_goals": len(goals),
-            "all_ten_complete": not blockers,
-            "mission_go_no_go": mission.get("go_no_go"),
-            "target_machine_run_status": target_run.get("status"),
-            "live_controls_enabled": False,
-        },
-        "goals": goals,
-        "source_status": source_status,
-        "component_artifacts": component_artifacts,
-        "closed_control_contract": closed_controls,
-        "blockers": blockers,
-        "activation_effect": "none_until_target_machine_evidence_and_operator_gates_pass",
-        "live_controls_enabled": False,
-        "artifact_path": str(_runtime_pre_live_completion_bundle_path(resolved)),
-    }
     _write_pre_live_completion_bundle_artifact(resolved, payload)
     return payload
-
-
-def _pre_live_goal(
-    goal_id: str,
-    title: str,
-    implementation_present: bool,
-    proof_present: bool,
-    evidence_refs: list[str],
-) -> dict[str, Any]:
-    blockers = []
-    if not implementation_present:
-        blockers.append("implementation_surface_missing")
-    if not proof_present:
-        blockers.append("proof_surface_missing_or_open_control")
-    return {
-        "goal_id": goal_id,
-        "title": title,
-        "complete": not blockers,
-        "blockers": blockers,
-        "evidence_refs": evidence_refs,
-    }
 
 
 def _target_machine_runtime_proof_builder_inventory() -> dict[str, Any]:
@@ -3497,10 +3381,17 @@ def _target_machine_runtime_proof_builder_inventory() -> dict[str, Any]:
         },
         {
             "builder": "pre_live_completion_bundle",
-            "owner": "kernel.runtime_compat",
+            "owner": "kernel.services.runtime_artifacts",
             "compatibility_surface": "pre_live_completion_bundle",
+            "status": "service_owned_this_slice",
+            "next_action": "preserve all-ten-goal, closed-control, hash-bound artifact, and no-live-authority fail-closed tests",
+        },
+        {
+            "builder": "model_efficiency_customer_validation_brief",
+            "owner": "kernel.runtime_compat",
+            "compatibility_surface": "model_efficiency_customer_validation_brief",
             "status": "candidate_for_next_service_slice",
-            "next_action": "extract all-ten-goal packet construction into runtime_artifacts after bundle verification lands",
+            "next_action": "extract customer-validation brief/checker construction into runtime_artifacts after completion bundle lands",
         },
         {
             "builder": "first_live_project_acceptance_check_packet",
@@ -3514,7 +3405,7 @@ def _target_machine_runtime_proof_builder_inventory() -> dict[str, Any]:
         "status": "inventoried",
         "builder_count": len(builders),
         "service_owned_count": sum(1 for item in builders if item["status"].startswith("service_owned")),
-        "next_service_slice": "pre_live_completion_bundle",
+        "next_service_slice": "model_efficiency_customer_validation_brief",
         "builders": builders,
     }
 
@@ -3757,7 +3648,7 @@ def target_machine_validation_run_packet(
         blockers.append("replay_projection_required_evidence_incomplete")
     runtime_proof_builder_inventory = _target_machine_runtime_proof_builder_inventory()
     pre_live_evidence_checklist = _pre_live_target_machine_evidence_checklist()
-    if runtime_proof_builder_inventory["next_service_slice"] != "pre_live_completion_bundle":
+    if runtime_proof_builder_inventory["next_service_slice"] != "model_efficiency_customer_validation_brief":
         blockers.append("runtime_proof_builder_inventory_missing_next_slice")
     if not pre_live_evidence_checklist["all_pre_live_checks_have_blockers"]:
         blockers.append("pre_live_evidence_checklist_missing_fail_closed_blockers")
