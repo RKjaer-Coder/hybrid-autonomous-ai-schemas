@@ -14,6 +14,7 @@ from kernel import KernelStore
 from kernel.runtime_catalog import runtime_launcher_paths, runtime_support_artifact_paths
 from kernel.services import (
     TARGET_MACHINE_REPLAY_PROJECTION_EVIDENCE_PROOF_KEYS,
+    model_efficiency_customer_validation_brief_contract,
     pre_live_completion_bundle_packet,
     target_machine_replay_projection_proof_contract,
     target_machine_replay_projection_proof_records,
@@ -1570,7 +1571,7 @@ def test_model_efficiency_customer_validation_brief_checker_fails_closed_on_spec
     brief["next_customer_validation_packet"]["forbidden_actions"] = []
     brief["next_customer_validation_packet"]["default_on_timeout"] = "continue"
 
-    result = runtime_compat._model_efficiency_customer_validation_brief_contract(
+    result = model_efficiency_customer_validation_brief_contract(
         brief,
         {"packet_name": "model_efficiency_service_packet", "live_controls_enabled": False},
         {"packet_name": "first_live_project_packet", "live_controls_enabled": False},
@@ -1837,7 +1838,7 @@ def test_target_machine_validation_run_packet_preserves_evidence_manifest(tmp_pa
     assert payload["replay_projection_proof_records_contract"] is True
     inventory = payload["runtime_proof_builder_inventory"]
     assert inventory["status"] == "inventoried"
-    assert inventory["next_service_slice"] == "model_efficiency_customer_validation_brief"
+    assert inventory["next_service_slice"] == "none_ready"
     assert inventory["service_owned_count"] >= 6
     assert any(
         item["builder"] == "pre_live_bundle_verification"
@@ -1852,7 +1853,8 @@ def test_target_machine_validation_run_packet_preserves_evidence_manifest(tmp_pa
     )
     assert any(
         item["builder"] == "model_efficiency_customer_validation_brief"
-        and item["status"] == "candidate_for_next_service_slice"
+        and item["owner"] == "kernel.services.runtime_artifacts"
+        and item["status"] == "service_owned_this_slice"
         for item in inventory["builders"]
     )
     checklist = payload["pre_live_evidence_checklist"]
