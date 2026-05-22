@@ -296,6 +296,204 @@ def target_machine_replay_projection_proof_records_contract(records: list[dict[s
     return _replay_projection_proof_records_distinguish_effects(records)
 
 
+def pre_live_completion_bundle_packet(
+    *,
+    target_run: dict[str, Any],
+    mission: dict[str, Any],
+    efficiency: dict[str, Any],
+    source_files: dict[str, Path],
+    component_paths: dict[str, Path],
+    generated_at: str,
+    repo_root: Path,
+    artifact_path: Path,
+) -> dict[str, Any]:
+    """Build the all-ten pre-live completion proof packet without activating live authority."""
+    first_project = mission["components"]["first_live_project"]
+    adapter = mission["components"]["hermes_adapter_gauntlet"]
+    shadow = mission["components"]["model_shadow_ops"]
+    readiness = mission["components"]["readiness_suite"]
+
+    source_status = {name: path.is_file() for name, path in source_files.items()}
+    component_artifacts = {
+        name: {"path": str(path), "exists": path.is_file(), "sha256": file_sha256(path)}
+        for name, path in component_paths.items()
+    }
+
+    workflow = first_project["workflow"]
+    workflow_has_events_and_grants = all(
+        step.get("event_before_projection") and step.get("capability_grants_required")
+        for step in workflow
+    )
+    mission_ready = mission.get("go_no_go") == "ready_for_target_machine_validation"
+    target_ready = target_run.get("status") == "ready_for_target_machine_execution"
+    closed_controls = target_run.get("closed_control_contract", {})
+    closed_control_ok = pre_live_controls_are_closed(closed_controls)
+
+    goals = [
+        _pre_live_goal(
+            "operator_project_loop",
+            "End-to-end operator validate/build/ship/feedback loop",
+            source_status["kernel_commercial"] and source_status["research_tests"],
+            first_project["summary"]["ready_for_target_machine_fixture"]
+            and first_project["summary"]["phase_count"] == 4
+            and first_project["summary"]["local_artifact_only"]
+            and not first_project["summary"]["external_commitments_allowed"],
+            ["kernel/commercial.py", "tests/test_kernel_research.py", "first_live_project_packet.json"],
+        ),
+        _pre_live_goal(
+            "model_efficiency_service",
+            "Governed model-efficiency service packet and shadow evidence",
+            source_status["kernel_model_intelligence"] and source_status["runtime_tests"],
+            efficiency["summary"]["seed_task_class_count"] == 3
+            and efficiency["summary"]["operator_gate_required_for_customer_delivery"]
+            and not efficiency["summary"]["route_mutation_enabled"]
+            and not efficiency["summary"]["external_side_effects_allowed"],
+            ["kernel/model_intelligence.py", "model_efficiency_service_packet.json"],
+        ),
+        _pre_live_goal(
+            "seed_model_intelligence",
+            "Seed Model Intelligence registry, eval, route, and promotion gates",
+            source_status["kernel_model_intelligence"] and source_status["model_tests"],
+            shadow["summary"]["seed_task_class_count"] == 3
+            and shadow["summary"]["shadow_mode_only"]
+            and shadow["summary"]["operator_gate_required_for_promotion"]
+            and not shadow["summary"]["live_route_mutation_enabled"],
+            ["kernel/model_intelligence.py", "tests/test_kernel_model_intelligence.py", "model_shadow_ops.json"],
+        ),
+        _pre_live_goal(
+            "research_retrieval",
+            "Research Engine retrieval planning, grants, acquisition, and evidence bundles",
+            source_status["kernel_research"] and source_status["research_tests"],
+            workflow_has_events_and_grants
+            and "research_findings" in first_project["artifact_contract"]["sections"],
+            ["kernel/research.py", "tests/test_kernel_research.py", "first_live_project_packet.json"],
+        ),
+        _pre_live_goal(
+            "council_execution",
+            "Council/scarce-deliberation records for high-uncertainty decisions",
+            source_status["kernel_commercial"] and source_status["research_tests"],
+            adapter["summary"]["authority_boundary_case_count"] >= 8
+            and "customer_visible_commitments" in target_run["fail_closed_controls"],
+            ["kernel/commercial.py", "tests/test_kernel_research.py", "hermes_adapter_gauntlet.json"],
+        ),
+        _pre_live_goal(
+            "hermes_adapter_proxy",
+            "Hermes adapter, migration, and proxy enforcement readiness",
+            source_status["kernel_runtime"] and source_status["kernel_runtime_compat"],
+            adapter["summary"]["all_surfaces_covered"]
+            and adapter["summary"]["surface_count"] >= 10
+            and readiness.get("ok")
+            and target_run["execution_order_contract"]["recovery_and_migration_before_adapter"],
+            ["kernel/runtime.py", "kernel/runtime_compat.py", "hermes_adapter_gauntlet.json"],
+        ),
+        _pre_live_goal(
+            "side_effect_delivery",
+            "Side-effect and customer-visible delivery governance",
+            source_status["kernel_commercial"] and source_status["foundation_tests"],
+            first_project["artifact_contract"]["external_delivery"] == "prepared_intent_only_until_operator_gate"
+            and "side_effect_replay" in target_run["fail_closed_controls"]
+            and not closed_controls.get("side_effect_replay_enabled", True),
+            ["kernel/commercial.py", "tests/test_kernel_foundation.py", "first_live_project_packet.json"],
+        ),
+        _pre_live_goal(
+            "operator_gate_surface",
+            "Local operator command and gate surface",
+            source_status["kernel_runtime_compat"] and source_status["runtime_tests"],
+            mission_ready
+            and closed_control_ok
+            and "operator_gate_before_external_delivery" in target_run["run_steps"][6]["required_evidence"],
+            ["kernel/runtime_compat.py", "tests/test_skills/test_runtime.py", "pre_live_mission_control.json"],
+        ),
+        _pre_live_goal(
+            "data_governance",
+            "Artifact, redaction, encrypted storage, backup, and recovery proof",
+            source_status["kernel_store_artifacts"] and source_status["kernel_store_recovery"],
+            readiness.get("ok")
+            and target_run["execution_order_contract"]["recovery_and_migration_before_adapter"]
+            and "artifact_descriptor_verified" in target_run["run_steps"][2]["required_evidence"],
+            ["kernel/store_artifacts.py", "kernel/store_recovery.py", "target_machine_validation_run_packet.json"],
+        ),
+        _pre_live_goal(
+            "evidence_packaging",
+            "Replay/projection comparisons and pre-live evidence packaging",
+            source_status["kernel_pre_live"] and source_status["pre_live_tests"],
+            target_ready
+            and all(item["exists"] and item["sha256"] for item in component_artifacts.values())
+            and "target_machine_artifact_bundle" in target_run["run_steps"][-1]["required_evidence"],
+            ["kernel/pre_live.py", "tests/test_kernel_pre_live.py", "target_machine_validation_run_packet.json"],
+        ),
+    ]
+    goal_blockers = [
+        f"{goal['goal_id']}:{blocker}"
+        for goal in goals
+        for blocker in goal["blockers"]
+    ]
+    completion_contract = {
+        "all_ten_goals_complete": not goal_blockers and len(goals) == 10,
+        "closed_control_contract_ok": closed_control_ok,
+        "component_artifacts_hash_bound": bool(component_artifacts)
+        and all(item["exists"] and item["sha256"] for item in component_artifacts.values()),
+        "no_live_authority_activation": (
+            target_run.get("live_controls_enabled") is False
+            and efficiency.get("live_controls_enabled") is False
+            and mission.get("live_controls_enabled") is False
+            and target_run.get("status") == "ready_for_target_machine_execution"
+        ),
+    }
+    contract_blockers = [
+        f"completion_contract:{key}"
+        for key, ok in completion_contract.items()
+        if not ok
+    ]
+    blockers = goal_blockers + contract_blockers
+    payload = {
+        "available": True,
+        "generated_at": generated_at,
+        "packet_name": "pre_live_completion_bundle",
+        "status": "complete_pre_live_coding" if not blockers else "blocked",
+        "repo_root": str(repo_root),
+        "summary": {
+            "completed_goals": sum(1 for goal in goals if goal["complete"]),
+            "total_goals": len(goals),
+            "all_ten_complete": not blockers,
+            "mission_go_no_go": mission.get("go_no_go"),
+            "target_machine_run_status": target_run.get("status"),
+            "live_controls_enabled": False,
+        },
+        "goals": goals,
+        "source_status": source_status,
+        "component_artifacts": component_artifacts,
+        "completion_contract": completion_contract,
+        "closed_control_contract": closed_controls,
+        "blockers": blockers,
+        "activation_effect": "none_until_target_machine_evidence_and_operator_gates_pass",
+        "live_controls_enabled": False,
+        "artifact_path": str(artifact_path),
+    }
+    return payload
+
+
+def _pre_live_goal(
+    goal_id: str,
+    title: str,
+    implementation_present: bool,
+    proof_present: bool,
+    evidence_refs: list[str],
+) -> dict[str, Any]:
+    blockers = []
+    if not implementation_present:
+        blockers.append("implementation_surface_missing")
+    if not proof_present:
+        blockers.append("proof_surface_missing_or_open_control")
+    return {
+        "goal_id": goal_id,
+        "title": title,
+        "complete": not blockers,
+        "blockers": blockers,
+        "evidence_refs": evidence_refs,
+    }
+
+
 def target_machine_evidence_check_packet(
     *,
     bundle: Path,

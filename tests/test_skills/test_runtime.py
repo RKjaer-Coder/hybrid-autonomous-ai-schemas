@@ -14,6 +14,7 @@ from kernel import KernelStore
 from kernel.runtime_catalog import runtime_launcher_paths, runtime_support_artifact_paths
 from kernel.services import (
     TARGET_MACHINE_REPLAY_PROJECTION_EVIDENCE_PROOF_KEYS,
+    pre_live_completion_bundle_packet,
     target_machine_replay_projection_proof_contract,
     target_machine_replay_projection_proof_records,
     target_machine_replay_projection_proof_records_contract,
@@ -91,6 +92,37 @@ def _bound_target_machine_evidence_records(run_packet):
                 record["proof_contract_key"] = proof_key
             records[evidence_id] = record
     return {"evidence": records}
+
+
+def _pre_live_completion_source_files(root: Path):
+    return {
+        "kernel_pre_live": root / "kernel" / "pre_live.py",
+        "kernel_research": root / "kernel" / "research.py",
+        "kernel_commercial": root / "kernel" / "commercial.py",
+        "kernel_model_intelligence": root / "kernel" / "model_intelligence.py",
+        "kernel_runtime": root / "kernel" / "runtime.py",
+        "kernel_runtime_compat": root / "kernel" / "runtime_compat.py",
+        "kernel_store_artifacts": root / "kernel" / "store_artifacts.py",
+        "kernel_store_recovery": root / "kernel" / "store_recovery.py",
+        "kernel_store_migration": root / "kernel" / "store_migration.py",
+        "foundation_tests": root / "tests" / "test_kernel_foundation.py",
+        "research_tests": root / "tests" / "test_kernel_research.py",
+        "model_tests": root / "tests" / "test_kernel_model_intelligence.py",
+        "runtime_tests": root / "tests" / "test_skills" / "test_runtime.py",
+        "pre_live_tests": root / "tests" / "test_kernel_pre_live.py",
+    }
+
+
+def _pre_live_completion_component_paths(cfg: IntegrationConfig):
+    paths = runtime_support_artifact_paths(cfg)
+    return {
+        "pre_live_mission_control": paths["pre_live_mission_control"],
+        "hermes_adapter_gauntlet": paths["hermes_adapter_gauntlet"],
+        "first_live_project_packet": paths["first_live_project_packet"],
+        "model_shadow_ops": paths["model_shadow_ops"],
+        "model_efficiency_service_packet": paths["model_efficiency_service_packet"],
+        "target_machine_validation_run_packet": paths["target_machine_validation_run_packet"],
+    }
 
 
 def test_prepare_runtime_directories_creates_layout(tmp_path):
@@ -1489,11 +1521,20 @@ def test_model_efficiency_customer_validation_brief_is_narrow_and_operator_gated
     assert brief["repo_packet_or_checker_required"]["packet_name"] == "model_efficiency_customer_validation_brief"
     assert brief["repo_packet_or_checker_required"]["drift_blocker"] == "customer_validation_brief_missing_or_speculative"
     next_packet = brief["next_customer_validation_packet"]
+    assert next_packet["checker_name"] == "first_buyer_model_efficiency_validation_workshop"
+    assert next_packet["checker_owner"] == "repo"
     assert next_packet["required_authority"] == "operator_gate"
     assert next_packet["artifact_to_show"] == "governed_model_efficiency_audit_report"
     assert next_packet["delivery_state"] == "local_artifact_only_until_operator_gate"
+    assert next_packet["default_on_timeout"] == "pause"
     assert next_packet["validation_questions"]
     assert "representative traces or proxy examples" in next_packet["minimum_continue_evidence"]
+    assert "sanitized workflow traces or internal proxy examples" in next_packet["required_local_inputs"]
+    assert "paid_provider_call" in next_packet["forbidden_actions"]
+    assert "production_route_mutation" in next_packet["forbidden_actions"]
+    assert "customer_visible_delivery" in next_packet["forbidden_actions"]
+    assert next_packet["operator_signoffs_required"] == brief["operator_signoffs_required"]
+    assert next_packet["hash_bound_artifact"] == brief["repo_packet_or_checker_required"]["hash_bound_artifact"]
     assert brief["closed_live_control_contract"] == {
         "live_controls_enabled": False,
         "paid_provider_calls_enabled": False,
@@ -1524,6 +1565,10 @@ def test_model_efficiency_customer_validation_brief_checker_fails_closed_on_spec
     brief["first_audit_report_artifact"]["delivery_state"] = "customer_visible"
     brief["first_audit_report_artifact"]["must_not_contain"] = []
     brief["closed_live_control_contract"]["route_mutation_enabled"] = True
+    brief["next_customer_validation_packet"]["checker_owner"] = "external"
+    brief["next_customer_validation_packet"]["required_local_inputs"] = []
+    brief["next_customer_validation_packet"]["forbidden_actions"] = []
+    brief["next_customer_validation_packet"]["default_on_timeout"] = "continue"
 
     result = runtime_compat._model_efficiency_customer_validation_brief_contract(
         brief,
@@ -1536,7 +1581,9 @@ def test_model_efficiency_customer_validation_brief_checker_fails_closed_on_spec
     assert "customer_validation_report_delivery_not_gated" in result["blockers"]
     assert "customer_validation_live_controls_open" in result["blockers"]
     assert "customer_validation_speculative_claims_allowed" in result["blockers"]
+    assert "customer_validation_next_packet_unbound" in result["blockers"]
     assert result["contract"]["closed_live_controls_bound"] is False
+    assert result["contract"]["next_validation_packet_bound"] is False
 
 
 def test_pre_live_completion_bundle_proves_all_ten_goals_and_stays_closed(tmp_path):
@@ -1575,7 +1622,64 @@ def test_pre_live_completion_bundle_proves_all_ten_goals_and_stays_closed(tmp_pa
     assert payload["closed_control_contract"]["paid_provider_calls_enabled"] is False
     assert payload["closed_control_contract"]["customer_visible_commitments_enabled"] is False
     assert payload["live_controls_enabled"] is False
+    assert payload["completion_contract"] == {
+        "all_ten_goals_complete": True,
+        "closed_control_contract_ok": True,
+        "component_artifacts_hash_bound": True,
+        "no_live_authority_activation": True,
+    }
+    assert all(item["exists"] and item["sha256"] for item in payload["component_artifacts"].values())
+    assert payload["activation_effect"] == "none_until_target_machine_evidence_and_operator_gates_pass"
+    assert payload["packet_hash"] == hashlib.sha256(
+        json.dumps(
+            {key: value for key, value in payload.items() if key != "packet_hash"},
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
     assert Path(payload["artifact_path"]).is_file()
+
+
+def test_pre_live_completion_bundle_packet_fails_closed_on_open_controls_and_unbound_artifacts(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+    root = Path.cwd()
+    timestamp = "2026-05-18T00:00:00+00:00"
+    mission = pre_live_mission_control(cfg, repo_root=str(root), as_of=timestamp)
+    efficiency = model_efficiency_service_packet(cfg, repo_root=str(root), as_of=timestamp)
+    target_run = target_machine_validation_run_packet(cfg, repo_root=str(root), as_of=timestamp)
+    target_run["live_controls_enabled"] = True
+    target_run["closed_control_contract"]["paid_provider_calls_enabled"] = True
+    component_paths = _pre_live_completion_component_paths(cfg)
+    component_paths["model_efficiency_service_packet"] = tmp_path / "missing-model-efficiency-service-packet.json"
+
+    payload = pre_live_completion_bundle_packet(
+        target_run=target_run,
+        mission=mission,
+        efficiency=efficiency,
+        source_files=_pre_live_completion_source_files(root),
+        component_paths=component_paths,
+        generated_at=timestamp,
+        repo_root=root,
+        artifact_path=runtime_support_artifact_paths(cfg)["pre_live_completion_bundle"],
+    )
+
+    assert payload["status"] == "blocked"
+    assert payload["summary"]["all_ten_complete"] is False
+    assert "completion_contract:closed_control_contract_ok" in payload["blockers"]
+    assert "completion_contract:component_artifacts_hash_bound" in payload["blockers"]
+    assert "completion_contract:no_live_authority_activation" in payload["blockers"]
+    assert "evidence_packaging:proof_surface_missing_or_open_control" in payload["blockers"]
+    assert payload["completion_contract"]["closed_control_contract_ok"] is False
+    assert payload["completion_contract"]["component_artifacts_hash_bound"] is False
+    assert payload["completion_contract"]["no_live_authority_activation"] is False
+    assert payload["live_controls_enabled"] is False
+    assert payload["activation_effect"] == "none_until_target_machine_evidence_and_operator_gates_pass"
 
 
 def test_first_live_project_packet_is_productized_local_only_loop(tmp_path):
@@ -1733,11 +1837,22 @@ def test_target_machine_validation_run_packet_preserves_evidence_manifest(tmp_pa
     assert payload["replay_projection_proof_records_contract"] is True
     inventory = payload["runtime_proof_builder_inventory"]
     assert inventory["status"] == "inventoried"
-    assert inventory["next_service_slice"] == "pre_live_completion_bundle"
-    assert inventory["service_owned_count"] >= 5
+    assert inventory["next_service_slice"] == "model_efficiency_customer_validation_brief"
+    assert inventory["service_owned_count"] >= 6
     assert any(
         item["builder"] == "pre_live_bundle_verification"
         and item["owner"] == "kernel.services.runtime_artifacts"
+        for item in inventory["builders"]
+    )
+    assert any(
+        item["builder"] == "pre_live_completion_bundle"
+        and item["owner"] == "kernel.services.runtime_artifacts"
+        and item["status"] == "service_owned_this_slice"
+        for item in inventory["builders"]
+    )
+    assert any(
+        item["builder"] == "model_efficiency_customer_validation_brief"
+        and item["status"] == "candidate_for_next_service_slice"
         for item in inventory["builders"]
     )
     checklist = payload["pre_live_evidence_checklist"]
